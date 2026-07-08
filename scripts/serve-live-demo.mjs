@@ -11,7 +11,7 @@ import {
   http as viemHttp,
   parseEventLogs,
 } from 'viem'
-import { sepolia } from 'viem/chains'
+import { mainnet, sepolia } from 'viem/chains'
 
 const root = process.cwd()
 const port = Number(process.env.PORT || 5173)
@@ -26,27 +26,139 @@ const overlayAssetDir = fs.existsSync(path.join(root, 'public', 'rfe-assets'))
   ? path.join(root, 'public', 'rfe-assets')
   : path.join(root, 'work', 'radio-free-ethereum', 'final')
 const maxBlobsPerBlock = Number(process.env.MAX_BLOBS_PER_BLOCK || 21)
-const slotWindow = Number(process.env.SLOT_WINDOW || 14)
+const slotWindow = Number(process.env.SLOT_WINDOW || 8)
+const slotMetricsCacheMs = Number(process.env.SLOT_METRICS_CACHE_MS || 2000)
+const viewerPollMs = Number(process.env.VIEWER_POLL_MS || 2000)
 const streamId = process.env.STREAM_ID || 'rfe-baked-clock-pipe-v6'
-const chainName = process.env.CHAIN || 'sepolia'
-const chains = { sepolia }
-const chain = chains[chainName]
-const beaconUrl = process.env.BEACON_RPC_URL?.replace(/\/$/, '')
-const executionUrl = process.env.ETH_RPC_URL
-const publicClient = chain && executionUrl ? createPublicClient({ chain, transport: viemHttp(executionUrl) }) : null
+const defaultNetwork = normalizeNetwork(process.env.CHAIN || 'sepolia')
+const chains = { mainnet, sepolia }
+const stationEventAbi = [
+  {
+    type: 'event',
+    name: 'SegmentPublished',
+    inputs: [
+      { name: 'publisher', type: 'address', indexed: true },
+      { name: 'streamIdHash', type: 'bytes32', indexed: true },
+      { name: 'sequence', type: 'uint256', indexed: true },
+      { name: 'streamId', type: 'string', indexed: false },
+      { name: 'durationMs', type: 'uint64', indexed: false },
+      { name: 'payloadBytes', type: 'uint32', indexed: false },
+      { name: 'payloadSha256', type: 'bytes32', indexed: false },
+      { name: 'codec', type: 'string', indexed: false },
+      { name: 'previousSegmentHash', type: 'bytes32', indexed: false },
+      { name: 'blobVersionedHashes', type: 'bytes32[]', indexed: false },
+    ],
+  },
+]
+const endpointPresets = {
+  public: {
+    label: 'Public RPC preset',
+    networks: {
+      sepolia: {
+        executionRpc: 'https://sepolia.drpc.org',
+        beaconApi: 'https://ethereum-sepolia-beacon-api.publicnode.com',
+      },
+      mainnet: {
+        executionRpc: 'https://ethereum-rpc.publicnode.com',
+        beaconApi: 'https://ethereum-beacon-api.publicnode.com',
+      },
+    },
+  },
+}
 const beaconTimeoutMs = Number(process.env.BEACON_TIMEOUT_MS || 3500)
-const deploymentPath = path.join(root, 'work', 'blob-radio-testnet', 'contracts', `Station.${chainName}.json`)
-const stationDeployment = fs.existsSync(deploymentPath) ? JSON.parse(fs.readFileSync(deploymentPath, 'utf8')) : null
-const stationAddress = process.env.STATION_ADDRESS || canonicalStationAddress
-const stationAbi = stationDeployment?.abi || null
-const stationFromBlock = BigInt(process.env.STATION_FROM_BLOCK || canonicalStationFromBlock)
 const secondsPerSlot = 12n
-let stationSegmentsCache = null
-let stationSegmentsPromise = null
-let slotMetricsCache = null
-let slotMetricsPromise = null
-let genesisTimeCache = null
+const stationSegmentsCache = new Map()
+const stationSegmentsPromise = new Map()
+const slotMetricsCache = new Map()
+const slotMetricsPromise = new Map()
+const genesisTimeCache = new Map()
 const mediaInflight = new Map()
+
+function normalizeNetwork(value) {
+  const text = String(value || '').toLowerCase()
+  if (text === 'mainnet' || text === 'ethereum' || text === 'eth') return 'mainnet'
+  return 'sepolia'
+}
+
+function networkLabel(network) {
+  return normalizeNetwork(network) === 'mainnet' ? 'Mainnet' : 'Sepolia'
+}
+
+function envForNetwork(network, name, fallback = '') {
+  const prefix = network.toUpperCase()
+  return process.env[`${prefix}_${name}`] || process.env[`${name}_${prefix}`] || (network === defaultNetwork ? process.env[name] : '') || fallback
+}
+
+function endpointPresetFor(network, presetKey) {
+  const key = endpointPresets[presetKey] ? presetKey : ''
+  const endpoints = key ? endpointPresets[key].networks[network] : null
+  return endpoints ? { key, ...endpoints } : { key: '', executionRpc: '', beaconApi: '' }
+}
+
+function cleanHttpUrl(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  try {
+    const url = new URL(text)
+    if (url.username || url.password) return ''
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString().replace(/\/$/, '') : ''
+  } catch {
+    return ''
+  }
+}
+
+function contextCacheKey(ctx) {
+  return `${ctx.name}:${ctx.endpointPreset || 'env'}:${ctx.executionUrl || ''}:${ctx.beaconUrl || ''}`
+}
+
+function blobspaceConfig(ctx) {
+  return {
+    endpointPreset: ctx.endpointPreset || '',
+    endpointPresetLabel: ctx.endpointPreset ? endpointPresets[ctx.endpointPreset]?.label || ctx.endpointPreset : '',
+    presetAvailable: Boolean(endpointPresets.public?.networks?.[ctx.name]),
+    executionRpcConfigured: Boolean(ctx.publicClient),
+    beaconApiConfigured: Boolean(ctx.beaconUrl),
+    executionRpcUrl: ctx.executionUrl || '',
+    beaconRpcUrl: ctx.beaconUrl || '',
+  }
+}
+
+function networkContext(networkInput, options = {}) {
+  const name = normalizeNetwork(networkInput)
+  const chain = chains[name]
+  const preset = endpointPresetFor(name, options.endpointPreset || '')
+  const executionFallback = preset.executionRpc || (name === 'mainnet' ? 'https://ethereum-rpc.publicnode.com' : '')
+  const beaconFallback = preset.beaconApi || (name === 'mainnet' ? 'https://ethereum-beacon-api.publicnode.com' : '')
+  const executionUrl = cleanHttpUrl(options.executionRpcUrl) || envForNetwork(name, 'ETH_RPC_URL', executionFallback)
+  const beaconUrl = (cleanHttpUrl(options.beaconRpcUrl) || envForNetwork(name, 'BEACON_RPC_URL', beaconFallback))?.replace(/\/$/, '')
+  const deploymentPath = path.join(root, 'work', 'blob-radio-testnet', 'contracts', `Station.${name}.json`)
+  const stationDeployment = fs.existsSync(deploymentPath) ? JSON.parse(fs.readFileSync(deploymentPath, 'utf8')) : null
+  const stationAddress = envForNetwork(name, 'STATION_ADDRESS', name === 'sepolia' ? canonicalStationAddress : '')
+  const stationFromBlock = BigInt(envForNetwork(name, 'STATION_FROM_BLOCK', name === 'sepolia' ? canonicalStationFromBlock : '0'))
+  return {
+    name,
+    label: networkLabel(name),
+    chain,
+    endpointPreset: preset.key,
+    beaconUrl,
+    executionUrl,
+    publicClient: chain && executionUrl ? createPublicClient({ chain, transport: viemHttp(executionUrl) }) : null,
+    stationAddress,
+    stationAbi: stationDeployment?.abi || stationEventAbi,
+    stationFromBlock,
+    explorerBase: name === 'mainnet' ? 'https://etherscan.io' : 'https://sepolia.etherscan.io',
+  }
+}
+
+function canonicalSegmentSort(a, b) {
+  return (
+    String(a.streamId || '').localeCompare(String(b.streamId || '')) ||
+    Number(a.sequence) - Number(b.sequence) ||
+    Number(a.blockNumber || 0) - Number(b.blockNumber || 0) ||
+    Number(a.transactionIndex || 0) - Number(b.transactionIndex || 0) ||
+    Number(a.logIndex || 0) - Number(b.logIndex || 0)
+  )
+}
 
 function send(response, status, body, headers = {}) {
   response.writeHead(status, headers)
@@ -113,19 +225,19 @@ function readManifests() {
         ready: fs.existsSync(mediaPath),
       }
     })
-    .sort((a, b) => a.streamId.localeCompare(b.streamId) || Number(a.sequence) - Number(b.sequence))
+    .sort(canonicalSegmentSort)
 }
 
-async function readStationSegments() {
-  if (!publicClient || !stationAddress || !stationAbi) return []
+async function readStationSegments(ctx = networkContext(defaultNetwork)) {
+  if (!ctx.publicClient || !ctx.stationAddress || !ctx.stationAbi) return []
 
-  const logs = await publicClient.getLogs({
-    address: getAddress(stationAddress),
-    fromBlock: stationFromBlock,
+  const logs = await ctx.publicClient.getLogs({
+    address: getAddress(ctx.stationAddress),
+    fromBlock: ctx.stationFromBlock,
     toBlock: 'latest',
   })
   const parsed = parseEventLogs({
-    abi: stationAbi,
+    abi: ctx.stationAbi,
     eventName: 'SegmentPublished',
     logs,
   })
@@ -133,7 +245,7 @@ async function readStationSegments() {
   for (const log of parsed) {
     const key = log.blockNumber.toString()
     if (blockTimestamps.has(key)) continue
-    const block = await publicClient.getBlock({ blockNumber: log.blockNumber })
+    const block = await ctx.publicClient.getBlock({ blockNumber: log.blockNumber })
     blockTimestamps.set(key, Number(block.timestamp) * 1000)
   }
 
@@ -145,9 +257,9 @@ async function readStationSegments() {
       return {
         app: 'eth-radio',
         version: 1,
-        chain: chainName,
+        chain: ctx.name,
         source: 'station',
-        station: getAddress(stationAddress),
+        station: getAddress(ctx.stationAddress),
         streamId: log.args.streamId,
         sequence: Number(log.args.sequence),
         durationMs: Number(log.args.durationMs),
@@ -161,6 +273,7 @@ async function readStationSegments() {
         transactionHash: log.transactionHash,
         blockNumber: log.blockNumber.toString(),
         blockHash: log.blockHash,
+        transactionIndex: log.transactionIndex,
         logIndex: log.logIndex,
         createdAt: createdAtMs ? new Date(createdAtMs).toISOString() : null,
         publisher: log.args.publisher,
@@ -171,7 +284,7 @@ async function readStationSegments() {
         gatewayUrl: `/api/segments/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}/payload`,
       }
     })
-    .sort((a, b) => a.streamId.localeCompare(b.streamId) || a.sequence - b.sequence || Number(a.logIndex) - Number(b.logIndex))
+    .sort(canonicalSegmentSort)
 
   const latestByKey = new Map()
   for (const segment of segments) {
@@ -183,37 +296,42 @@ async function readStationSegments() {
   }
 
   return [...latestByKey.values()].sort(
-    (a, b) => a.streamId.localeCompare(b.streamId) || a.sequence - b.sequence || Number(a.logIndex) - Number(b.logIndex),
+    canonicalSegmentSort,
   )
 }
 
-function refreshStationSegments() {
-  if (stationSegmentsPromise) return stationSegmentsPromise
-  stationSegmentsPromise = readStationSegments()
+function refreshStationSegments(ctx = networkContext(defaultNetwork)) {
+  const cacheKey = contextCacheKey(ctx)
+  if (stationSegmentsPromise.has(cacheKey)) return stationSegmentsPromise.get(cacheKey)
+  const promise = readStationSegments(ctx)
     .then((segments) => {
-      stationSegmentsCache = { segments, updatedAt: Date.now() }
+      stationSegmentsCache.set(cacheKey, { segments, updatedAt: Date.now() })
       return segments
     })
     .catch((error) => {
-      console.warn(`Station segment feed unavailable: ${error.message}`)
-      return stationSegmentsCache?.segments || []
+      console.warn(`${ctx.name} Station segment feed unavailable: ${error.message}`)
+      return stationSegmentsCache.get(cacheKey)?.segments || []
     })
     .finally(() => {
-      stationSegmentsPromise = null
+      stationSegmentsPromise.delete(cacheKey)
     })
-  return stationSegmentsPromise
+  stationSegmentsPromise.set(cacheKey, promise)
+  return promise
 }
 
-async function segmentFeed() {
-  if (stationSegmentsCache?.segments?.length) {
-    if (Date.now() - stationSegmentsCache.updatedAt > 10_000) void refreshStationSegments()
-    return stationSegmentsCache.segments
+async function segmentFeed(ctx = networkContext(defaultNetwork)) {
+  const cached = stationSegmentsCache.get(contextCacheKey(ctx))
+  if (cached?.segments?.length) {
+    if (Date.now() - cached.updatedAt > 10_000) void refreshStationSegments(ctx)
+    return cached.segments
   }
-  void refreshStationSegments()
+  if (ctx.publicClient && ctx.stationAddress && ctx.stationAbi) return refreshStationSegments(ctx)
+  void refreshStationSegments(ctx)
+  if (ctx.name !== 'sepolia') return []
   return readManifests()
 }
 
-function summarizeHealth(id, segments, blobspace) {
+function summarizeHealth(id, segments, blobspace, ctx = networkContext(defaultNetwork)) {
   const streamSegments = segments
     .filter((segment) => segment.streamId === id)
     .sort((a, b) => Number(a.sequence) - Number(b.sequence))
@@ -241,16 +359,29 @@ function summarizeHealth(id, segments, blobspace) {
       : null,
     segmentCount: streamSegments.length,
     transport: {
-      executionRpcConfigured: Boolean(publicClient),
-      beaconApiConfigured: Boolean(beaconUrl),
-      stationConfigured: Boolean(stationAddress && stationAbi),
-      station: stationAddress ? getAddress(stationAddress) : null,
-      stationFromBlock: stationFromBlock.toString(),
+      network: ctx.name,
+      networkLabel: ctx.label,
+      endpointPreset: ctx.endpointPreset || '',
+      endpointPresetLabel: ctx.endpointPreset ? endpointPresets[ctx.endpointPreset]?.label || ctx.endpointPreset : '',
+      executionRpcConfigured: Boolean(ctx.publicClient),
+      beaconApiConfigured: Boolean(ctx.beaconUrl),
+      stationConfigured: Boolean(ctx.stationAddress && ctx.stationAbi),
+      station: ctx.stationAddress ? getAddress(ctx.stationAddress) : null,
+      stationFromBlock: ctx.stationFromBlock.toString(),
     },
     blobspace: {
       mode: blobspace?.mode || null,
+      chain: blobspace?.chain || ctx.name,
+      networkLabel: blobspace?.networkLabel || ctx.label,
       latestSlot: blobspace?.latestSlot || null,
       maxBlobsPerBlock: blobspace?.maxBlobsPerBlock || maxBlobsPerBlock,
+      endpointPreset: blobspace?.endpointPreset || ctx.endpointPreset || '',
+      endpointPresetLabel: blobspace?.endpointPresetLabel || (ctx.endpointPreset ? endpointPresets[ctx.endpointPreset]?.label || ctx.endpointPreset : ''),
+      presetAvailable: blobspace?.presetAvailable ?? Boolean(endpointPresets.public?.networks?.[ctx.name]),
+      executionRpcConfigured: blobspace?.executionRpcConfigured ?? Boolean(ctx.publicClient),
+      beaconApiConfigured: blobspace?.beaconApiConfigured ?? Boolean(ctx.beaconUrl),
+      executionRpcUrl: blobspace?.executionRpcUrl || ctx.executionUrl || '',
+      beaconRpcUrl: blobspace?.beaconRpcUrl || ctx.beaconUrl || '',
       warning: blobspace?.warning || null,
     },
   }
@@ -271,6 +402,7 @@ function summarizeSegment(segment) {
     payloadSha256: segment.payloadSha256,
     payloadSha256Hex: segment.payloadSha256Hex,
     codec: segment.codec,
+    previousSegmentHash: segment.previousSegmentHash || null,
     publisher: segment.publisher,
     blobCount: Number(segment.blobCount || segment.blobVersionedHashes?.length || 0),
     blobVersionedHashes: segment.blobVersionedHashes || [],
@@ -294,12 +426,119 @@ function summarizeSegment(segment) {
   }
 }
 
-async function beacon(pathname, timeoutMs = beaconTimeoutMs) {
-  if (!beaconUrl) throw new Error('BEACON_RPC_URL is not configured')
+async function summarizeStationLog(log, ctx) {
+  const block = await ctx.publicClient.getBlock({ blockNumber: log.blockNumber })
+  const payloadSha256 = log.args.payloadSha256?.replace(/^0x/, '') || ''
+  const mediaPath = path.join(reconstructedDir, `${safeStreamId(log.args.streamId)}-${log.args.sequence}.webm`)
+  return summarizeSegment({
+    app: 'eth-radio',
+    version: 1,
+    chain: ctx.name,
+    source: 'station',
+    station: getAddress(ctx.stationAddress),
+    streamId: log.args.streamId,
+    sequence: Number(log.args.sequence),
+    durationMs: Number(log.args.durationMs),
+    payloadBytes: Number(log.args.payloadBytes),
+    payloadSha256,
+    payloadSha256Hex: log.args.payloadSha256,
+    codec: log.args.codec,
+    previousSegmentHash: log.args.previousSegmentHash,
+    blobCount: log.args.blobVersionedHashes.length,
+    txHash: log.transactionHash,
+    transactionHash: log.transactionHash,
+    blockNumber: log.blockNumber.toString(),
+    blockHash: log.blockHash,
+    transactionIndex: log.transactionIndex,
+    logIndex: log.logIndex,
+    createdAt: new Date(Number(block.timestamp) * 1000).toISOString(),
+    publisher: log.args.publisher,
+    streamIdHash: log.args.streamIdHash,
+    blobVersionedHashes: log.args.blobVersionedHashes,
+    hasMedia: fs.existsSync(mediaPath),
+    mediaUrl: `/media/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}.webm`,
+    gatewayUrl: `/api/segments/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}/payload`,
+  })
+}
+
+async function lookupStationSegmentTargeted(value, ctx) {
+  if (!ctx.publicClient || !ctx.stationAddress || !ctx.stationAbi) return null
+  const text = String(value || '').trim()
+  if (!text) return null
+  const hash = text.match(/0x[a-fA-F0-9]{64}/)?.[0]
+
+  if (hash) {
+    const receipt = await ctx.publicClient.getTransactionReceipt({ hash }).catch(() => null)
+    if (receipt?.logs?.length) {
+      const parsed = parseEventLogs({
+        abi: ctx.stationAbi,
+        eventName: 'SegmentPublished',
+        logs: receipt.logs.filter((log) => String(log.address).toLowerCase() === String(ctx.stationAddress).toLowerCase()),
+      })
+      if (parsed[0]) return summarizeStationLog(parsed[0], ctx)
+    }
+
+    const blockLogs = await ctx.publicClient.getLogs({
+      address: getAddress(ctx.stationAddress),
+      blockHash: hash,
+    }).catch(() => [])
+    if (blockLogs.length) {
+      const parsed = parseEventLogs({ abi: ctx.stationAbi, eventName: 'SegmentPublished', logs: blockLogs })
+      if (parsed[0]) return summarizeStationLog(parsed[0], ctx)
+    }
+    return null
+  }
+
+  const blockNumberText = text.match(/(?:\/block\/|block(?:number)?[=:\s]+)(\d+)/i)?.[1] ||
+    (/^\d{5,}$/.test(text) ? text : '')
+  if (!blockNumberText) return null
+  const blockNumber = BigInt(blockNumberText)
+  const logs = await ctx.publicClient.getLogs({
+    address: getAddress(ctx.stationAddress),
+    fromBlock: blockNumber,
+    toBlock: blockNumber,
+  }).catch(() => [])
+  const parsed = parseEventLogs({ abi: ctx.stationAbi, eventName: 'SegmentPublished', logs })
+  return parsed[0] ? summarizeStationLog(parsed[0], ctx) : null
+}
+
+function findSegmentFromText(value, candidates) {
+  const text = String(value || '').trim()
+  if (!text) return null
+  const hash = text.match(/0x[a-fA-F0-9]{64}/)?.[0]?.toLowerCase()
+  if (hash) {
+    return candidates.find((segment) =>
+      String(segment.txHash || segment.transactionHash || '').toLowerCase() === hash
+    ) || candidates.find((segment) =>
+      String(segment.blockHash || segment.proof?.block?.hash || '').toLowerCase() === hash
+    ) || candidates.find((segment) =>
+      (segment.blobVersionedHashes || []).some((versionedHash) => String(versionedHash).toLowerCase() === hash)
+    ) || null
+  }
+  const blockNumber = text.match(/(?:\/block\/|block(?:number)?[=:\s]+)(\d+)/i)?.[1] ||
+    (/^\d{5,}$/.test(text) ? text : '')
+  if (blockNumber) {
+    return candidates.find((segment) =>
+      String(segment.blockNumber || segment.proof?.block?.number || '') === blockNumber
+    ) || null
+  }
+  return null
+}
+
+function latestPublishedSegment(segments) {
+  return [...segments].sort((a, b) => (
+    Number(a.blockNumber || 0) - Number(b.blockNumber || 0) ||
+    Number(a.transactionIndex || 0) - Number(b.transactionIndex || 0) ||
+    Number(a.logIndex || 0) - Number(b.logIndex || 0)
+  )).at(-1) || null
+}
+
+async function beacon(pathname, ctx = networkContext(defaultNetwork), timeoutMs = beaconTimeoutMs) {
+  if (!ctx.beaconUrl) throw new Error(`${ctx.name} BEACON_RPC_URL is not configured`)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetch(`${beaconUrl}${pathname}`, {
+    const response = await fetch(`${ctx.beaconUrl}${pathname}`, {
       headers: { accept: 'application/json' },
       signal: controller.signal,
     })
@@ -310,12 +549,13 @@ async function beacon(pathname, timeoutMs = beaconTimeoutMs) {
   }
 }
 
-async function getBeaconGenesisTime() {
-  if (genesisTimeCache != null) return genesisTimeCache
-  if (!beaconUrl) return null
-  const genesis = await beacon('/eth/v1/beacon/genesis')
-  genesisTimeCache = BigInt(genesis.data.genesis_time)
-  return genesisTimeCache
+async function getBeaconGenesisTime(ctx = networkContext(defaultNetwork)) {
+  if (genesisTimeCache.has(ctx.name)) return genesisTimeCache.get(ctx.name)
+  if (!ctx.beaconUrl) return null
+  const genesis = await beacon('/eth/v1/beacon/genesis', ctx)
+  const value = BigInt(genesis.data.genesis_time)
+  genesisTimeCache.set(ctx.name, value)
+  return value
 }
 
 function slotTimestampMs(slot, genesisTime) {
@@ -323,15 +563,15 @@ function slotTimestampMs(slot, genesisTime) {
   return Number((genesisTime + BigInt(slot) * secondsPerSlot) * 1000n)
 }
 
-async function latestSlot() {
-  if (!beaconUrl) return null
-  const head = await beacon('/eth/v1/beacon/headers/head')
+async function latestSlot(ctx = networkContext(defaultNetwork)) {
+  if (!ctx.beaconUrl) return null
+  const head = await beacon('/eth/v1/beacon/headers/head', ctx)
   return Number(head.data.header.message.slot)
 }
 
-async function sidecarsForSlot(slot) {
+async function sidecarsForSlot(slot, ctx = networkContext(defaultNetwork)) {
   const started = performance.now()
-  const body = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`)
+  const body = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, ctx)
   const sidecars = body.data || []
   const rows = sidecars.map((sidecar) => {
     const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
@@ -367,9 +607,10 @@ function cachedBlobspaceRows(segments) {
   return [...rows.values()].sort((a, b) => b.slot - a.slot)
 }
 
-async function stationStreamBlobHashes() {
+async function stationStreamBlobHashes(ctx = networkContext(defaultNetwork)) {
   const hashes = new Map()
-  const segments = stationSegmentsCache?.segments?.length ? stationSegmentsCache.segments : await segmentFeed()
+  const cached = stationSegmentsCache.get(contextCacheKey(ctx))
+  const segments = cached?.segments?.length ? cached.segments : await segmentFeed(ctx)
   for (const segment of segments) {
     for (const hash of segment.blobVersionedHashes || []) {
       hashes.set(hash, {
@@ -382,19 +623,61 @@ async function stationStreamBlobHashes() {
   return hashes
 }
 
-async function computeSlotMetrics(count = 8) {
-  const streamBlobHashes = await stationStreamBlobHashes()
-  const genesisTime = await getBeaconGenesisTime().catch(() => null)
-  if (!publicClient || !beaconUrl) {
+async function recentBlobTransactionsByHash(ctx, latestBlock, genesisTime, count = 8) {
+  const hashes = new Map()
+  if (!ctx.publicClient || genesisTime == null || latestBlock?.number == null) return hashes
+  const station = ctx.stationAddress ? getAddress(ctx.stationAddress).toLowerCase() : ''
+  const latestSlot = (latestBlock.timestamp - genesisTime) / secondsPerSlot
+  const minSlot = latestSlot - BigInt(Math.max(0, count + 2))
+  const maxBlocks = Math.max(count * 3, count + 8)
+
+  for (let offset = 0; offset < maxBlocks; offset++) {
+    const blockNumber = latestBlock.number - BigInt(offset)
+    if (blockNumber < 0n) break
+    let block = null
+    try {
+      block = await ctx.publicClient.getBlock({ blockNumber, includeTransactions: true })
+    } catch {
+      continue
+    }
+    const slot = (block.timestamp - genesisTime) / secondsPerSlot
+    if (slot < minSlot) break
+    const transactions = Array.isArray(block.transactions) ? block.transactions : []
+    for (const tx of transactions) {
+      const blobHashes = tx?.blobVersionedHashes || []
+      if (!blobHashes.length) continue
+      const to = tx.to ? String(tx.to) : ''
+      for (const versionedHash of blobHashes) {
+        hashes.set(versionedHash, {
+          txHash: tx.hash,
+          to,
+          blockNumber: block.number?.toString(),
+          slot: slot.toString(),
+          isStationTx: Boolean(station && to && to.toLowerCase() === station),
+        })
+      }
+    }
+  }
+
+  return hashes
+}
+
+async function computeSlotMetrics(count = 8, ctx = networkContext(defaultNetwork)) {
+  const streamBlobHashes = await stationStreamBlobHashes(ctx)
+  const genesisTime = await getBeaconGenesisTime(ctx).catch(() => null)
+  if (!ctx.publicClient || !ctx.beaconUrl) {
     return {
-      chain: chainName,
+      chain: ctx.name,
+      networkLabel: ctx.label,
       latestExecutionBlock: null,
       latestSlot: null,
-      station: stationAddress,
+      station: ctx.stationAddress,
+      explorerBase: ctx.explorerBase,
       streamKnownBlobHashes: streamBlobHashes.size,
       maxBlobsPerBlock,
+      ...blobspaceConfig(ctx),
       mode: 'cached',
-      rows: cachedBlobspaceRows(await segmentFeed()).map((row) => ({
+      rows: cachedBlobspaceRows(await segmentFeed(ctx)).map((row) => ({
         slot: String(row.slot),
         timestampMs: slotTimestampMs(row.slot, genesisTime),
         blobCount: row.sidecars.length,
@@ -410,14 +693,15 @@ async function computeSlotMetrics(count = 8) {
         })),
         error: null,
       })),
-      warning: 'Set ETH_RPC_URL and BEACON_RPC_URL to watch live Station blob metrics.',
+      warning: `Set ${ctx.name.toUpperCase()}_ETH_RPC_URL and ${ctx.name.toUpperCase()}_BEACON_RPC_URL to watch live blob metrics.`,
     }
   }
 
   try {
-    const latestBlock = await publicClient.getBlock({ blockTag: 'latest' })
+    const latestBlock = await ctx.publicClient.getBlock({ blockTag: 'latest' })
     if (genesisTime == null) throw new Error('Beacon genesis time unavailable')
     const latest = (latestBlock.timestamp - genesisTime) / 12n
+    const blobTransactions = await recentBlobTransactionsByHash(ctx, latestBlock, genesisTime, count)
     const slots = []
     for (let i = 0; i < count; i++) {
       slots.push(latest - BigInt(i))
@@ -427,7 +711,7 @@ async function computeSlotMetrics(count = 8) {
       let sidecars = []
       let error = null
       try {
-        const result = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`)
+        const result = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, ctx)
         sidecars = result.data || []
       } catch (err) {
         error = err.message
@@ -437,11 +721,16 @@ async function computeSlotMetrics(count = 8) {
         const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
         const versionedHash = commitment ? commitmentToVersionedHash({ commitment }) : null
         const stream = versionedHash ? streamBlobHashes.get(versionedHash) : null
+        const tx = versionedHash ? blobTransactions.get(versionedHash) : null
         return {
           index: Number(sidecar.index),
           versionedHash,
-          isStreamBlob: Boolean(stream),
-          stream: stream || null,
+          txHash: tx?.txHash || stream?.txHash || null,
+          to: tx?.to || null,
+          blockNumber: tx?.blockNumber || null,
+          isStationTx: Boolean(tx?.isStationTx),
+          isStreamBlob: Boolean(stream || tx?.isStationTx),
+          stream: stream || (tx?.isStationTx ? { txHash: tx.txHash, stationOnly: true } : null),
         }
       })
 
@@ -457,68 +746,79 @@ async function computeSlotMetrics(count = 8) {
     }))
 
     return {
-      chain: chainName,
+      chain: ctx.name,
+      networkLabel: ctx.label,
       latestExecutionBlock: latestBlock.number.toString(),
       latestSlot: latest.toString(),
-      station: stationAddress ? getAddress(stationAddress) : null,
+      station: ctx.stationAddress ? getAddress(ctx.stationAddress) : null,
+      explorerBase: ctx.explorerBase,
       streamKnownBlobHashes: streamBlobHashes.size,
       maxBlobsPerBlock,
+      ...blobspaceConfig(ctx),
       mode: 'live',
       rows,
     }
   } catch (error) {
     return {
-      chain: chainName,
+      chain: ctx.name,
+      networkLabel: ctx.label,
       latestExecutionBlock: null,
       latestSlot: null,
-      station: stationAddress,
+      station: ctx.stationAddress,
+      explorerBase: ctx.explorerBase,
       streamKnownBlobHashes: streamBlobHashes.size,
       maxBlobsPerBlock,
+      ...blobspaceConfig(ctx),
       mode: 'cached',
-      rows: cachedBlobspaceRows(await segmentFeed()),
+      rows: cachedBlobspaceRows(await segmentFeed(ctx)),
       warning: error.message,
     }
   }
 }
 
-function refreshSlotMetrics(count = 8) {
-  if (slotMetricsPromise) return slotMetricsPromise
-  slotMetricsPromise = computeSlotMetrics(count)
+function refreshSlotMetrics(count = 8, ctx = networkContext(defaultNetwork)) {
+  const cacheKey = contextCacheKey(ctx)
+  if (slotMetricsPromise.has(cacheKey)) return slotMetricsPromise.get(cacheKey)
+  const promise = computeSlotMetrics(count, ctx)
     .then((metrics) => {
-      slotMetricsCache = { metrics, updatedAt: Date.now() }
+      slotMetricsCache.set(cacheKey, { metrics, updatedAt: Date.now() })
       return metrics
     })
     .catch((error) => {
-      console.warn(`Slot metrics unavailable: ${error.message}`)
-      return slotMetricsCache?.metrics || null
+      console.warn(`${ctx.name} slot metrics unavailable: ${error.message}`)
+      return slotMetricsCache.get(cacheKey)?.metrics || null
     })
     .finally(() => {
-      slotMetricsPromise = null
+      slotMetricsPromise.delete(cacheKey)
     })
-  return slotMetricsPromise
+  slotMetricsPromise.set(cacheKey, promise)
+  return promise
 }
 
-async function slotMetrics(count = 8) {
-  if (slotMetricsCache?.metrics) {
-    if (Date.now() - slotMetricsCache.updatedAt > 6_000) void refreshSlotMetrics(count)
-    return slotMetricsCache.metrics
+async function slotMetrics(count = 8, ctx = networkContext(defaultNetwork)) {
+  const cached = slotMetricsCache.get(contextCacheKey(ctx))
+  if (cached?.metrics) {
+    if (Date.now() - cached.updatedAt > slotMetricsCacheMs) void refreshSlotMetrics(count, ctx)
+    return cached.metrics
   }
-  void refreshSlotMetrics(count)
-  const fallbackGenesisTime = await getBeaconGenesisTime().catch(() => null)
+  void refreshSlotMetrics(count, ctx)
+  const fallbackGenesisTime = await getBeaconGenesisTime(ctx).catch(() => null)
   return {
-    chain: chainName,
+    chain: ctx.name,
     latestExecutionBlock: null,
     latestSlot: null,
-    station: stationAddress,
+    station: ctx.stationAddress,
+    explorerBase: ctx.explorerBase,
     streamKnownBlobHashes: 0,
     maxBlobsPerBlock,
+    ...blobspaceConfig(ctx),
     mode: 'warming',
-    rows: cachedBlobspaceRows(await segmentFeed()).map((row) => ({
+    rows: cachedBlobspaceRows(await segmentFeed(ctx)).map((row) => ({
       slot: String(row.slot),
       timestampMs: slotTimestampMs(row.slot, fallbackGenesisTime),
       blobCount: row.sidecars.length,
       maxBlobs: maxBlobsPerBlock,
-      streamBlobCount: row.sidecars.filter((sidecar) => sidecar.streamId === streamId).length,
+      streamBlobCount: row.sidecars.filter((sidecar) => sidecar.streamId).length,
       blobs: row.sidecars.map((sidecar) => ({
         index: sidecar.index,
         versionedHash: sidecar.versionedHash,
@@ -529,11 +829,11 @@ async function slotMetrics(count = 8) {
       })),
       error: null,
     })),
-    warning: 'Warming Station slot metrics from execution RPC and beacon sidecars.',
+    warning: `Warming ${ctx.name} slot metrics from execution RPC and beacon sidecars.`,
   }
 }
 
-async function blobspaceRows(segments, count = 8) {
+async function blobspaceRows(segments, count = 8, ctx = networkContext(defaultNetwork)) {
   const streamHashes = new Map()
   for (const segment of segments) {
     for (const hash of segment.blobVersionedHashes || []) {
@@ -541,21 +841,22 @@ async function blobspaceRows(segments, count = 8) {
     }
   }
 
-  if (!beaconUrl) {
+  if (!ctx.beaconUrl) {
     return {
       mode: 'cached',
       maxBlobsPerBlock,
+      ...blobspaceConfig(ctx),
       rows: cachedBlobspaceRows(segments),
-      warning: 'Set BEACON_RPC_URL to watch live blob sidecars from /eth/v1/beacon/blob_sidecars/{slot}.',
+      warning: `Set ${ctx.name.toUpperCase()}_BEACON_RPC_URL to watch live blob sidecars from /eth/v1/beacon/blob_sidecars/{slot}.`,
     }
   }
 
   try {
-    const headSlot = await latestSlot()
+    const headSlot = await latestSlot(ctx)
     const slots = Array.from({ length: count }, (_, index) => headSlot - index).filter((slot) => slot >= 0)
     const rows = await Promise.all(slots.map(async (slot) => {
       try {
-        const row = await sidecarsForSlot(slot)
+        const row = await sidecarsForSlot(slot, ctx)
         row.source = 'beacon'
         row.sidecars = row.sidecars.map((sidecar) => ({
           ...sidecar,
@@ -566,27 +867,28 @@ async function blobspaceRows(segments, count = 8) {
         return { slot, source: 'beacon', error: error.message, sidecars: [] }
       }
     }))
-    return { mode: 'live', maxBlobsPerBlock, rows }
+    return { mode: 'live', maxBlobsPerBlock, ...blobspaceConfig(ctx), rows }
   } catch (error) {
     return {
       mode: 'cached',
       maxBlobsPerBlock,
+      ...blobspaceConfig(ctx),
       rows: cachedBlobspaceRows(segments),
       warning: error.message,
     }
   }
 }
 
-async function fetchAndCacheSidecars(segment) {
+async function fetchAndCacheSidecars(segment, ctx = networkContext(segment.chain || defaultNetwork)) {
   const cached = getCachedSidecars(segment.txHash)
   if (cached) return cached
-  if (!publicClient || !beaconUrl) throw new Error('ETH_RPC_URL and BEACON_RPC_URL are required to fetch uncached blob sidecars')
+  if (!ctx.publicClient || !ctx.beaconUrl) throw new Error(`${ctx.name} ETH_RPC_URL and BEACON_RPC_URL are required to fetch uncached blob sidecars`)
 
-  const tx = await publicClient.getTransaction({ hash: segment.txHash })
-  const block = await publicClient.getBlock({ blockHash: tx.blockHash })
-  const genesis = await beacon('/eth/v1/beacon/genesis')
+  const tx = await ctx.publicClient.getTransaction({ hash: segment.txHash })
+  const block = await ctx.publicClient.getBlock({ blockHash: tx.blockHash })
+  const genesis = await beacon('/eth/v1/beacon/genesis', ctx)
   const slot = (block.timestamp - BigInt(genesis.data.genesis_time)) / 12n
-  const sidecars = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`)
+  const sidecars = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, ctx)
   const wanted = new Set(tx.blobVersionedHashes || segment.blobVersionedHashes || [])
   const matches = []
 
@@ -640,13 +942,13 @@ function reconstructPayload(segment, sidecars) {
   return payload
 }
 
-async function ensureMedia(segment) {
+async function ensureMedia(segment, ctx = networkContext(segment.chain || defaultNetwork)) {
   const mediaPath = path.join(reconstructedDir, `${safeStreamId(segment.streamId)}-${segment.sequence}.webm`)
   if (fs.existsSync(mediaPath)) return mediaPath
   if (mediaInflight.has(mediaPath)) return mediaInflight.get(mediaPath)
   const promise = (async () => {
     if (fs.existsSync(mediaPath)) return mediaPath
-    const sidecars = await fetchAndCacheSidecars(segment)
+    const sidecars = await fetchAndCacheSidecars(segment, ctx)
     const payload = reconstructPayload(segment, sidecars)
     fs.mkdirSync(reconstructedDir, { recursive: true })
     const tempPath = `${mediaPath}.${process.pid}.${Date.now()}.tmp`
@@ -820,9 +1122,33 @@ function overlayHtml() {
     }
 
     #timeUtc { left: 672px; width: 236px; }
-    #slot { left: 922px; width: 238px; }
-    #nonce { left: 1174px; width: 252px; }
-    #blockHash { left: 1440px; width: 374px; }
+    .chip:not(#timeUtc) {
+      top: 35px;
+      height: 40px;
+      padding: 0 11px;
+      font-size: 22px;
+    }
+    #slot { left: 922px; width: 198px; }
+    #nonce { left: 1135px; width: 252px; }
+    #blockHash { left: 1402px; width: 412px; }
+
+    .network-signal {
+      position: absolute;
+      left: 113px;
+      top: 66px;
+      width: 520px;
+      height: 31px;
+      display: flex;
+      align-items: center;
+      background: #181a24;
+      color: var(--link);
+      font: 700 26px/1 var(--mono);
+      letter-spacing: 0;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      z-index: 2;
+    }
 
     .lower {
       position: absolute;
@@ -831,17 +1157,33 @@ function overlayHtml() {
       width: 1848px;
       height: 144px;
       pointer-events: none;
+      z-index: 3;
+    }
+
+    .lower-panel-mask {
+      position: absolute;
+      inset: 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background:
+        linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
+        var(--surface);
+      background-size: 8px 8px, 8px 8px, auto;
+      box-shadow: inset -3px -3px 0 rgba(0, 0, 0, .42), inset 2px 2px 0 rgba(255, 255, 255, .04);
+      z-index: 0;
     }
 
     .status-label {
       position: absolute;
       left: 28px;
       top: 19px;
-      display: none;
+      display: block;
       color: var(--accent);
       font: 900 24px/1 var(--ui);
       text-transform: uppercase;
       letter-spacing: 0;
+      z-index: 1;
     }
 
     .reading-title {
@@ -849,39 +1191,56 @@ function overlayHtml() {
       left: 28px;
       top: 91px;
       width: 740px;
-      display: none;
+      display: block;
       color: var(--text);
       font: 900 42px/1 var(--ui);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       text-shadow: 2px 2px 0 #000;
+      z-index: 1;
     }
 
     .telemetry {
       position: absolute;
       inset: 0;
+      z-index: 3;
+    }
+
+    .telemetry-mask {
+      position: absolute;
+      left: 720px;
+      top: 74px;
+      width: 1068px;
+      height: 98px;
+      background: transparent;
+      z-index: 0;
     }
 
     .telemetry-card {
       position: absolute;
-      top: 83px;
-      height: 58px;
-      padding: 11px 16px 8px;
-      background-color: var(--surface-2);
+      top: 93px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
       font-family: var(--mono);
       overflow: hidden;
+      z-index: 1;
     }
 
-    .telemetry-card.tx { left: 791px; width: 272px; }
-    .telemetry-card.payload { left: 1080px; width: 286px; }
-    .telemetry-card.hash { left: 1383px; width: 322px; }
+    .telemetry-card.tx { left: 748px; width: 252px; }
+    .telemetry-card.payload { left: 1024px; width: 196px; }
+    .telemetry-card.hash { left: 1244px; width: 244px; }
+    .telemetry-card.prev { left: 1512px; width: 244px; }
 
     .telemetry-card dt {
-      margin: 0 0 4px;
+      margin: 0 0 5px;
       color: var(--muted);
       text-transform: uppercase;
-      font: 700 21px/1 var(--mono);
+      font: 700 13px/1 var(--mono);
     }
 
     .telemetry-card dd {
@@ -891,7 +1250,7 @@ function overlayHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 700 26px/1 var(--mono);
+      font: 700 17px/1 var(--mono);
     }
 
     .ticker-viewport {
@@ -927,10 +1286,11 @@ function overlayHtml() {
   <div class="viewport">
     <main id="overlay" class="overlay" aria-label="Radio Free Ethereum livestream overlay">
       <img class="reference" src="/rfe-assets/rfe-terminal-final.png" alt="" aria-hidden="true" />
+      <div id="networkSignal" class="network-signal">PUBLIC SIGNAL / ${networkLabel(defaultNetwork).toUpperCase()}</div>
       <section class="topbar" aria-label="Live stream telemetry">
         <div id="timeUtc" class="chip">--:--:-- UTC</div>
         <div id="slot" class="chip">SLOT --</div>
-        <div id="nonce" class="chip">NONCE --</div>
+        <div id="nonce" class="chip">SEQ --</div>
         <div id="blockHash" class="chip">BLOCK --</div>
       </section>
 
@@ -942,9 +1302,11 @@ function overlayHtml() {
         <div class="status-label">Now Reading</div>
         <div id="readingTitle" class="reading-title">The Ethereum Foundation Mandate</div>
         <dl class="telemetry">
+          <div class="telemetry-mask" aria-hidden="true"></div>
           <div class="telemetry-card tx"><dt>TX</dt><dd id="txHash">--</dd></div>
-          <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">-- B</dd></div>
+          <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">--</dd></div>
           <div class="telemetry-card hash"><dt>Hash</dt><dd id="contentHash">--</dd></div>
+          <div class="telemetry-card prev"><dt>Prev</dt><dd id="previousHash">--</dd></div>
         </dl>
       </section>
     </main>
@@ -953,6 +1315,9 @@ function overlayHtml() {
   <script>
     const params = new URLSearchParams(location.search)
     const streamId = params.get('streamId') || '${streamId}'
+    let selectedNetwork = (params.get('network') || ${JSON.stringify(defaultNetwork)}).toLowerCase() === 'mainnet' ? 'mainnet' : 'sepolia'
+    const endpointPreset = params.get('endpointPreset') === 'public' ? 'public' : ''
+    let selectedNetworkLabel = selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia'
     const preview = params.has('preview')
     const overlay = document.getElementById('overlay')
     if (preview) document.body.classList.add('preview')
@@ -966,6 +1331,22 @@ function overlayHtml() {
       document.getElementById('timeUtc').textContent = streamClockText()
     }
 
+    function apiUrl(path) {
+      const params = new URLSearchParams()
+      params.set('network', selectedNetwork)
+      if (endpointPreset) params.set('endpointPreset', endpointPreset)
+      if (customExecutionRpc) params.set('ethRpcUrl', customExecutionRpc)
+      if (customBeaconRpc) params.set('beaconRpcUrl', customBeaconRpc)
+      return path + (path.includes('?') ? '&' : '?') + params.toString()
+    }
+
+    function updateNetworkSignal(data) {
+      const label = data?.networkLabel || data?.transport?.networkLabel || data?.blobspace?.networkLabel || selectedNetworkLabel
+      selectedNetworkLabel = label
+      selectedNetwork = (data?.network || data?.transport?.network || data?.blobspace?.chain || selectedNetwork) === 'mainnet' ? 'mainnet' : 'sepolia'
+      document.getElementById('networkSignal').textContent = 'PUBLIC SIGNAL / ' + String(label).toUpperCase()
+    }
+
     function shorten(value, head, tail) {
       if (!value) return '--'
       const text = String(value)
@@ -975,7 +1356,13 @@ function overlayHtml() {
 
     function formatBytes(value) {
       const n = Number(value || 0)
-      return n ? new Intl.NumberFormat('en-US').format(n) + ' B' : '-- B'
+      return n ? new Intl.NumberFormat('en-US').format(n) + ' B' : '--'
+    }
+
+    function proofOrSequenceLabel(segment, proof) {
+      if (proof && proof.nonce) return 'PROOF ' + proof.nonce
+      if (segment && segment.sequence != null) return 'SEQ #' + segment.sequence
+      return 'SEQ --'
     }
 
     function latestSegment(segments) {
@@ -1017,33 +1404,42 @@ function overlayHtml() {
       const content = segment && (segment.payloadSha256Hex || segment.payloadSha256)
       const text = [
         document.getElementById('timeUtc').textContent,
-        'SLOT ' + ((blobspace && blobspace.latestSlot) || '--'),
+        'SLOT ' + ((segment && segment.slot) || (blobspace && blobspace.latestSlot) || '--'),
         'BLOCK ' + shorten(blockHash, 8, 4),
-        'NONCE ' + (proof.nonce || '--'),
+        proofOrSequenceLabel(segment, proof),
         'TX ' + shorten(segment && segment.txHash, 8, 4),
+        'PREV ' + shorten(segment && segment.previousSegmentHash, 8, 4),
         'CONTENT ' + shorten(content, 8, 4),
       ].join(' / ')
-      document.getElementById('ticker').innerHTML = '<span>' + text + '</span><span aria-hidden="true">' + text + '</span>'
+      const ticker = document.getElementById('ticker')
+      const primary = document.createElement('span')
+      const duplicate = document.createElement('span')
+      primary.textContent = text
+      duplicate.textContent = text
+      duplicate.setAttribute('aria-hidden', 'true')
+      ticker.replaceChildren(primary, duplicate)
     }
 
     async function poll() {
       try {
-        const response = await fetch('/api/streams/' + encodeURIComponent(streamId) + '/live', { cache: 'no-store' })
+        const response = await fetch(apiUrl('/api/streams/' + encodeURIComponent(streamId) + '/live'), { cache: 'no-store' })
         if (!response.ok) throw new Error(await response.text())
         const data = await response.json()
+        updateNetworkSignal(data)
         const segment = latestSegment(data.segments)
         const proof = segment && segment.proof ? segment.proof : {}
         const blockHash = segment && segment.blockHash ? segment.blockHash : proof.block && proof.block.hash
         const latestSlot = data.blobspace && data.blobspace.latestSlot
         updateStreamClock(segment)
         overlay.classList.toggle('offline', !segment)
-        document.getElementById('slot').textContent = 'SLOT ' + (latestSlot || segment && segment.slot || '--')
-        document.getElementById('nonce').textContent = 'NONCE ' + (proof.nonce || '--')
+        document.getElementById('slot').textContent = 'SLOT ' + (segment && segment.slot || latestSlot || '--')
+        document.getElementById('nonce').textContent = proofOrSequenceLabel(segment, proof)
         document.getElementById('blockHash').textContent = 'BLOCK ' + shorten(blockHash, 8, 4)
         document.getElementById('txHash').textContent = shorten(segment && segment.txHash, 10, 6)
         document.getElementById('payloadSize').textContent = formatBytes(segment && segment.payloadBytes)
         const content = segment && (segment.payloadSha256Hex || segment.payloadSha256)
         document.getElementById('contentHash').textContent = shorten(content, 10, 6)
+        document.getElementById('previousHash').textContent = shorten(segment && segment.previousSegmentHash, 10, 6)
         updateTicker(segment, data.blobspace)
       } catch (error) {
         overlay.classList.add('offline')
@@ -1181,9 +1577,33 @@ function overlayPreviewHtml() {
     }
 
     #timeUtc { left: 672px; width: 236px; }
-    #slot { left: 922px; width: 238px; }
-    #nonce { left: 1174px; width: 252px; }
-    #blockHash { left: 1440px; width: 374px; }
+    .chip:not(#timeUtc) {
+      top: 35px;
+      height: 40px;
+      padding: 0 11px;
+      font-size: 22px;
+    }
+    #slot { left: 922px; width: 198px; }
+    #nonce { left: 1135px; width: 252px; }
+    #blockHash { left: 1402px; width: 412px; }
+
+    .network-signal {
+      position: absolute;
+      left: 113px;
+      top: 66px;
+      width: 520px;
+      height: 31px;
+      display: flex;
+      align-items: center;
+      background: #181a24;
+      color: #c6ccff;
+      font: 700 26px/1 Consolas, ui-monospace, monospace;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      z-index: 2;
+    }
 
     .status-label {
       position: absolute;
@@ -1209,24 +1629,53 @@ function overlayPreviewHtml() {
       text-shadow: 2px 2px 0 #000;
     }
 
-    .telemetry-card {
+    .telemetry {
       position: absolute;
-      top: 999px;
-      height: 58px;
-      padding: 11px 16px 8px;
-      overflow: hidden;
-      font-family: Consolas, ui-monospace, monospace;
+      inset: 0;
+      z-index: 3;
     }
 
-    .telemetry-card.tx { left: 827px; width: 272px; }
-    .telemetry-card.payload { left: 1116px; width: 286px; }
-    .telemetry-card.hash { left: 1419px; width: 322px; }
+    .telemetry-mask {
+      position: absolute;
+      left: 756px;
+      top: 990px;
+      width: 1068px;
+      height: 90px;
+      border: 1px solid #252838;
+      border-radius: 6px;
+      background:
+        linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
+        #11131a;
+      background-size: 8px 8px, 8px 8px, auto;
+      box-shadow: inset -3px -3px 0 rgba(0, 0, 0, .42), inset 2px 2px 0 rgba(255, 255, 255, .04);
+      z-index: 0;
+    }
+
+    .telemetry-card {
+      position: absolute;
+      top: 1009px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      overflow: hidden;
+      font-family: Consolas, ui-monospace, monospace;
+      z-index: 1;
+    }
+
+    .telemetry-card.tx { left: 784px; width: 252px; }
+    .telemetry-card.payload { left: 1060px; width: 196px; }
+    .telemetry-card.hash { left: 1280px; width: 244px; }
+    .telemetry-card.prev { left: 1548px; width: 244px; }
 
     .telemetry-card dt {
-      margin: 0 0 4px;
+      margin: 0 0 5px;
       color: rgba(186, 190, 214, .82);
       text-transform: uppercase;
-      font: 700 21px/1 Consolas, ui-monospace, monospace;
+      font: 700 13px/1 Consolas, ui-monospace, monospace;
     }
 
     .telemetry-card dd {
@@ -1235,7 +1684,7 @@ function overlayPreviewHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 700 26px/1 Consolas, ui-monospace, monospace;
+      font: 700 17px/1 Consolas, ui-monospace, monospace;
     }
 
     .controls {
@@ -1335,23 +1784,26 @@ function overlayPreviewHtml() {
       <div class="preview-overlay" aria-label="Radio Free Ethereum overlay preview">
         <div id="previewDesign" class="overlay-design">
           <img class="reference" src="/rfe-assets/rfe-terminal-final.png" alt="" aria-hidden="true" />
+          <div id="networkSignal" class="network-signal">PUBLIC SIGNAL / ${networkLabel(defaultNetwork).toUpperCase()}</div>
           <div id="timeUtc" class="chip">--:--:-- UTC</div>
           <div id="slot" class="chip">SLOT --</div>
-          <div id="nonce" class="chip">NONCE --</div>
+          <div id="nonce" class="chip">SEQ --</div>
           <div id="blockHash" class="chip">BLOCK --</div>
           <div class="status-label">Now Reading</div>
           <div class="reading-title">The Ethereum Foundation Mandate</div>
-          <dl>
+          <dl class="telemetry">
+            <div class="telemetry-mask" aria-hidden="true"></div>
             <div class="telemetry-card tx"><dt>TX</dt><dd id="txHash">--</dd></div>
-            <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">-- B</dd></div>
+            <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">--</dd></div>
             <div class="telemetry-card hash"><dt>Hash</dt><dd id="contentHash">--</dd></div>
+            <div class="telemetry-card prev"><dt>Prev</dt><dd id="previousHash">--</dd></div>
           </dl>
         </div>
       </div>
     </div>
   </main>
   <div class="controls">
-    <span id="liveStrip" class="status-strip">WAITING / Sepolia / seq -- / -- blobs / tx -- / age --</span>
+    <span id="liveStrip" class="status-strip">WAITING / ${networkLabel(defaultNetwork)} / seq -- / -- blobs / tx -- / age --</span>
     <button id="debugToggle" type="button" aria-expanded="false">Proof</button>
     <span id="status">loading stream</span>
   </div>
@@ -1371,6 +1823,9 @@ function overlayPreviewHtml() {
   <script>
     const params = new URLSearchParams(location.search)
     const streamId = params.get('streamId') || '${streamId}'
+    let selectedNetwork = (params.get('network') || ${JSON.stringify(defaultNetwork)}).toLowerCase() === 'mainnet' ? 'mainnet' : 'sepolia'
+    const endpointPreset = params.get('endpointPreset') === 'public' ? 'public' : ''
+    let selectedNetworkLabel = selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia'
     const video = document.getElementById('video')
     const frame = document.querySelector('.frame')
     const previewDesign = document.getElementById('previewDesign')
@@ -1401,7 +1856,13 @@ function overlayPreviewHtml() {
 
     function formatBytes(value) {
       const n = Number(value || 0)
-      return n ? new Intl.NumberFormat('en-US').format(n) + ' B' : '-- B'
+      return n ? new Intl.NumberFormat('en-US').format(n) + ' B' : '--'
+    }
+
+    function proofOrSequenceLabel(segment, proof) {
+      if (proof && proof.nonce) return 'PROOF ' + proof.nonce
+      if (segment && segment.sequence != null) return 'SEQ #' + segment.sequence
+      return 'SEQ --'
     }
 
     function streamClockText() {
@@ -1443,6 +1904,20 @@ function overlayPreviewHtml() {
       return '/api/segments/' + encodeURIComponent(streamId) + '/' + encodeURIComponent(sequence) + '/payload'
     }
 
+    function apiUrl(path) {
+      const params = new URLSearchParams()
+      params.set('network', selectedNetwork)
+      if (endpointPreset) params.set('endpointPreset', endpointPreset)
+      return path + (path.includes('?') ? '&' : '?') + params.toString()
+    }
+
+    function updateNetworkSignal(data) {
+      const label = data?.networkLabel || data?.transport?.networkLabel || data?.blobspace?.networkLabel || selectedNetworkLabel
+      selectedNetworkLabel = label
+      selectedNetwork = (data?.network || data?.transport?.network || data?.blobspace?.chain || selectedNetwork) === 'mainnet' ? 'mainnet' : 'sepolia'
+      document.getElementById('networkSignal').textContent = 'PUBLIC SIGNAL / ' + String(label).toUpperCase()
+    }
+
     function ageText(segment) {
       const created = Date.parse(segment && segment.createdAt || '')
       if (!Number.isFinite(created)) return '--'
@@ -1457,7 +1932,7 @@ function overlayPreviewHtml() {
       const seq = segment ? '#' + segment.sequence : '--'
       const blobs = segment ? segment.blobCount + ' blobs' : '-- blobs'
       const tx = segment ? shorten(segment.txHash, 8, 6) : '--'
-      liveStrip.textContent = state + ' / Sepolia / seq ' + seq + ' / ' + blobs + ' / tx ' + tx + ' / age ' + ageText(segment)
+      liveStrip.textContent = state + ' / ' + selectedNetworkLabel + ' / seq ' + seq + ' / ' + blobs + ' / tx ' + tx + ' / age ' + ageText(segment)
     }
 
     function updateDebug(segment, data) {
@@ -1480,20 +1955,22 @@ function overlayPreviewHtml() {
       const proof = segment.proof || {}
       const blockHash = segment.blockHash || (proof.block && proof.block.hash)
       updateStreamClock(segment)
-      document.getElementById('slot').textContent = 'SLOT ' + ((data && data.blobspace && data.blobspace.latestSlot) || segment.slot || '--')
-      document.getElementById('nonce').textContent = 'NONCE ' + (proof.nonce || '--')
+      document.getElementById('slot').textContent = 'SLOT ' + (segment.slot || (data && data.blobspace && data.blobspace.latestSlot) || '--')
+      document.getElementById('nonce').textContent = proofOrSequenceLabel(segment, proof)
       document.getElementById('blockHash').textContent = 'BLOCK ' + shorten(blockHash, 8, 4)
       document.getElementById('txHash').textContent = shorten(segment.txHash, 10, 6)
       document.getElementById('payloadSize').textContent = formatBytes(segment.payloadBytes)
       document.getElementById('contentHash').textContent = shorten(segment.payloadSha256Hex || segment.payloadSha256, 10, 6)
+      document.getElementById('previousHash').textContent = shorten(segment.previousSegmentHash, 10, 6)
       setStatusStrip(segment, isPlaying ? 'LIVE' : 'WAITING')
       updateDebug(segment, data)
     }
 
     async function pollLive() {
-      const response = await fetch('/api/streams/' + encodeURIComponent(streamId) + '/live', { cache: 'no-store' })
+      const response = await fetch(apiUrl('/api/streams/' + encodeURIComponent(streamId) + '/live'), { cache: 'no-store' })
       if (!response.ok) throw new Error(await response.text())
       const data = await response.json()
+      updateNetworkSignal(data)
       latestBlobspace = data.blobspace || null
       for (const segment of data.segments || []) {
         segments.set(Number(segment.sequence), segment)
@@ -1530,7 +2007,7 @@ function overlayPreviewHtml() {
     function prefetchSegment(segment) {
       const sequence = Number(segment.sequence)
       if (payloads.has(sequence)) return payloads.get(sequence).promise
-      const promise = fetch(segmentUrl(sequence), { cache: 'no-store' })
+      const promise = fetch(apiUrl(segmentUrl(sequence)), { cache: 'no-store' })
         .then((response) => {
           if (!response.ok) throw new Error('payload ' + sequence + ': ' + response.status)
           return response.blob()
@@ -1752,14 +2229,16 @@ function indexHtml() {
       stroke-linejoin: round;
       fill: none;
     }
-    .mark {
-      width: 40px;
+    .network-toggle {
+      width: 82px;
       height: 34px;
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      align-items: center;
       border: 2px solid #a9afd8;
       border-right-color: #07080d;
       border-bottom-color: #07080d;
-      display: grid;
-      place-items: center;
       background:
         linear-gradient(135deg, rgba(143, 151, 232, .34), rgba(17, 19, 26, .96)),
         #181a24;
@@ -1770,6 +2249,42 @@ function indexHtml() {
       font-weight: 900;
       letter-spacing: 0;
       box-shadow: inset 1px 1px 0 rgba(255, 255, 255, .16);
+      cursor: pointer;
+      padding: 0;
+      overflow: hidden;
+    }
+    .network-toggle:active {
+      border-color: #07080d #a9afd8 #a9afd8 #07080d;
+      transform: translate(1px, 1px);
+    }
+    .network-toggle::before {
+      content: "";
+      position: absolute;
+      inset: 3px auto 3px 3px;
+      width: calc(50% - 4px);
+      border-radius: 3px;
+      background: #ffbdd4;
+      border: 1px solid rgba(255,255,255,.65);
+      box-shadow: 1px 1px 0 rgba(0,0,0,.45);
+      transition: transform .18s ease;
+    }
+    .network-toggle.is-sepolia::before {
+      transform: translateX(calc(100% + 2px));
+      background: #bfeeff;
+    }
+    .network-toggle span {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      opacity: .45;
+      color: #ffffff;
+      text-shadow: 1px 1px 0 #000;
+    }
+    .network-toggle:not(.is-sepolia) .eth,
+    .network-toggle.is-sepolia .sep {
+      opacity: 1;
+      color: #181019;
+      text-shadow: none;
     }
     h1 {
       margin: 0;
@@ -1780,7 +2295,14 @@ function indexHtml() {
       text-shadow: 1px 1px 0 #000000;
     }
     .sub { color: rgba(255, 255, 255, .72); font-size: 12px; margin-top: 3px; }
-    .status-pill {
+    .top-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .status-pill,
+    .utc-clock {
       display: inline-flex;
       align-items: center;
       gap: 9px;
@@ -1799,6 +2321,13 @@ function indexHtml() {
       letter-spacing: 0;
       white-space: nowrap;
       box-shadow: inset 2px 2px 0 rgba(255, 255, 255, .7);
+    }
+    .utc-clock {
+      min-width: 112px;
+      justify-content: center;
+      gap: 0;
+      color: #202a76;
+      background: #f8d5e3;
     }
     .status-dot {
       width: 9px;
@@ -1884,6 +2413,17 @@ function indexHtml() {
     .now strong { display: block; color: #ffffff; font-size: 15px; margin-bottom: 4px; text-shadow: 1px 1px 0 #000; }
     .now span { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
     .btns { display: flex; align-items: center; gap: 8px; }
+    .volume-slider {
+      width: 96px;
+      height: 38px;
+      accent-color: #ff8fb3;
+      cursor: pointer;
+    }
+    .volume-slider:disabled {
+      opacity: .42;
+      cursor: not-allowed;
+      filter: grayscale(1);
+    }
     .icon-btn {
       width: 38px;
       height: 38px;
@@ -1998,7 +2538,7 @@ function indexHtml() {
       padding: 12px;
       overflow: hidden;
       display: grid;
-      grid-template-rows: auto auto minmax(120px, 1fr) 12px minmax(96px, var(--segments-pane-height, 190px));
+      grid-template-rows: auto auto auto minmax(0, 1fr) minmax(176px, var(--segments-pane-height, 190px));
       gap: 0;
       box-shadow:
         inset 2px 2px 0 var(--highlight),
@@ -2020,6 +2560,39 @@ function indexHtml() {
       text-decoration: none;
     }
     .station-link:hover { color: #ffffff; text-decoration: underline; }
+    .rail-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .endpoint-settings {
+      width: 24px;
+      height: 24px;
+      border: 1px solid #30364e;
+      border-right-color: #07080d;
+      border-bottom-color: #07080d;
+      border-radius: 3px;
+      background: #11131a;
+      color: #ffbdd4;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      padding: 0;
+    }
+    .endpoint-settings svg {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .endpoint-settings[aria-expanded="true"] {
+      background: #ffbdd4;
+      color: #201014;
+      border-color: #ffd3e1 #64243c #64243c #ffd3e1;
+    }
     .legend {
       display: flex;
       gap: 8px;
@@ -2035,6 +2608,94 @@ function indexHtml() {
     .swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--other); }
     .swatch.m { background: var(--milady); }
     .swatch.e { background: transparent; border: 1px solid #3d464b; }
+    .endpoint-panel {
+      display: none;
+      border: 1px solid rgba(255, 189, 212, .48);
+      border-right-color: rgba(100, 36, 60, .72);
+      border-bottom-color: rgba(100, 36, 60, .72);
+      border-radius: 4px;
+      background: linear-gradient(135deg, rgba(255, 189, 212, .13), rgba(16, 17, 24, .9));
+      padding: 10px;
+      margin: -6px 0 12px;
+      color: #f4f1f7;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .endpoint-panel.is-visible {
+      display: grid;
+      gap: 8px;
+    }
+    .endpoint-panel strong {
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 900;
+      text-shadow: 1px 1px 0 #000;
+    }
+    .endpoint-panel p {
+      margin: 0;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+    .endpoint-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+    }
+    .endpoint-fields {
+      display: grid;
+      gap: 7px;
+    }
+    .endpoint-fields label {
+      display: grid;
+      gap: 3px;
+      color: #ffbdd4;
+      font: 900 10px/1 var(--mono);
+      text-transform: uppercase;
+    }
+    .endpoint-input {
+      min-width: 0;
+      height: 26px;
+      border: 1px solid #30364e;
+      border-right-color: #07080d;
+      border-bottom-color: #07080d;
+      border-radius: 3px;
+      background: #080a10;
+      color: #d7dbff;
+      font: 700 10px/1 var(--mono);
+      padding: 0 7px;
+      outline: none;
+    }
+    .endpoint-input::placeholder {
+      color: rgba(244, 241, 247, .46);
+    }
+    .endpoint-apply {
+      min-height: 28px;
+      border: 1px solid #bfeeff;
+      border-right-color: #285163;
+      border-bottom-color: #285163;
+      border-radius: 3px;
+      background: #bfeeff;
+      color: #102633;
+      font: 900 10px/1 var(--mono);
+      padding: 0 8px;
+      cursor: pointer;
+    }
+    .endpoint-preset {
+      min-height: 28px;
+      border: 1px solid #ffd3e1;
+      border-right-color: #64243c;
+      border-bottom-color: #64243c;
+      border-radius: 3px;
+      background: #ffbdd4;
+      color: #201014;
+      font: 900 10px/1 var(--mono);
+      padding: 0 8px;
+      cursor: pointer;
+    }
+    .endpoint-preset.is-active {
+      background: #bfeeff;
+      border-color: #e6fbff #285163 #285163 #e6fbff;
+    }
     .slot {
       border: 2px solid #3c425f;
       border-right-color: #090a10;
@@ -2056,26 +2717,6 @@ function indexHtml() {
       margin-right: -2px;
       scrollbar-width: thin;
     }
-    .rail-resizer {
-      position: relative;
-      margin: 5px 0;
-      min-height: 12px;
-      cursor: ns-resize;
-      border-top: 1px solid rgba(143,151,232,.3);
-      border-bottom: 1px solid rgba(7,8,13,.9);
-    }
-    .rail-resizer::after {
-      content: "";
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 54px;
-      height: 4px;
-      transform: translate(-50%, -50%);
-      border-top: 1px solid #ffbdd4;
-      border-bottom: 1px solid #5f668f;
-      opacity: .9;
-    }
     .rail.resizing,
     .rail.resizing * {
       user-select: none;
@@ -2091,12 +2732,17 @@ function indexHtml() {
     .slot-top strong { color: #f8d5e3; font-family: var(--mono); font-size: 13px; }
     .slot-top span { color: var(--muted); }
     .slot-time {
-      display: grid;
-      gap: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       margin-bottom: 10px;
       color: var(--muted);
       font-size: 11px;
       line-height: 1.25;
+    }
+    .slot-time span {
+      min-width: 0;
     }
     .slot-time strong {
       color: #d7dbff;
@@ -2155,6 +2801,7 @@ function indexHtml() {
     }
     .slot-error { color: var(--bad); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
     .segments {
+      position: relative;
       margin-top: 0;
       border: 2px solid var(--line);
       border-right-color: var(--line-dark);
@@ -2162,10 +2809,23 @@ function indexHtml() {
       border-radius: 6px;
       overflow: hidden;
       background: #11131a;
-      min-height: 0;
+      min-height: 176px;
       overflow: hidden;
       display: grid;
       grid-template-rows: auto auto minmax(0, 1fr);
+    }
+    .segments::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: -6px;
+      height: 12px;
+      cursor: ns-resize;
+      z-index: 3;
+    }
+    .segments:hover {
+      border-top-color: #ffbdd4;
     }
     .segments-title {
       padding: 8px 12px 6px;
@@ -2177,6 +2837,9 @@ function indexHtml() {
       grid-template-columns: auto minmax(0, 1fr);
       gap: 8px;
       align-items: center;
+    }
+    .segments-title > span {
+      white-space: nowrap;
     }
     .explorer-jump {
       display: grid;
@@ -2215,6 +2878,17 @@ function indexHtml() {
       padding: 0 7px;
       cursor: pointer;
     }
+    .explorer-message {
+      grid-column: 1 / -1;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+    .explorer-message.is-error { color: var(--bad); }
+    .explorer-message.is-ok { color: #9ff5d7; }
     #segments {
       min-height: 0;
       overflow-y: auto;
@@ -2243,6 +2917,16 @@ function indexHtml() {
     .segment-row:first-child { border-top: 0; }
     .segment-row.current { background: #2b2140; box-shadow: inset 4px 0 0 var(--milady); }
     .segment-row .empty { grid-column: 1 / -1; }
+    .segment-row.empty-row {
+      min-height: 42px;
+      color: var(--muted);
+    }
+    .segment-row.empty-row span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     code, .tx-link {
       min-width: 0;
       color: #bfeeff;
@@ -2283,6 +2967,7 @@ function indexHtml() {
     }
     body.light .rail .sub,
     body.light .legend,
+    body.light .endpoint-panel p,
     body.light .slot-top span,
     body.light .slot-time {
       color: rgba(31, 29, 42, .72);
@@ -2297,9 +2982,14 @@ function indexHtml() {
       color: #201b33;
     }
     body.light .legend,
+    body.light .endpoint-panel,
     body.light .metric {
       border-color: rgba(85, 95, 193, .28);
       background: rgba(255, 255, 255, .68);
+    }
+    body.light .endpoint-panel strong {
+      color: #201b33;
+      text-shadow: none;
     }
     body.light .slot,
     body.light .segments {
@@ -2321,6 +3011,11 @@ function indexHtml() {
       text-shadow: none;
     }
     body.light .explorer-input {
+      background: #ffffff;
+      color: #201b33;
+      border-color: #b9b3d2 #6f688c #6f688c #ffffff;
+    }
+    body.light .endpoint-input {
       background: #ffffff;
       color: #201b33;
       border-color: #b9b3d2 #6f688c #6f688c #ffffff;
@@ -2383,6 +3078,7 @@ function indexHtml() {
       .topbar, .controls { grid-template-columns: 1fr; display: grid; }
       .status-pill { width: 100%; justify-content: center; }
       .metrics { grid-template-columns: 1fr; }
+      .segments-title { grid-template-columns: 1fr; }
       .segment-row { grid-template-columns: 52px 1fr; }
       .segment-row code, .segment-row .tx-link { grid-column: 1 / -1; }
     }
@@ -2394,13 +3090,18 @@ function indexHtml() {
       <header class="topbar">
         <div class="brand">
           <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
-          <div class="mark">ETH</div>
+          <button class="network-toggle" id="network-toggle" type="button" aria-label="Switch blob feed network">
+            <span class="eth">ETH</span><span class="sep">SEP</span>
+          </button>
           <div>
             <h1>Radio Free Ethereum</h1>
             <div class="sub">Milady stream tuned through live Ethereum blobspace</div>
           </div>
         </div>
-        <div class="status-pill"><span class="status-dot"></span><span id="status">offline</span></div>
+        <div class="top-status">
+          <div class="status-pill"><span class="status-dot"></span><span id="status">offline</span></div>
+          <div class="utc-clock" id="utc-clock">--:--:-- UTC</div>
+        </div>
       </header>
 
       <section class="player-shell">
@@ -2430,6 +3131,7 @@ function indexHtml() {
               </svg>
             </button>
             <button class="icon-btn" id="mute" type="button" title="Toggle mute" aria-label="Toggle mute"></button>
+            <input class="volume-slider" id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
           </div>
         </div>
       </section>
@@ -2449,15 +3151,39 @@ function indexHtml() {
           <h2>Blobspace Feed</h2>
           <div class="sub" id="rail-mode">Watching recent slots for blob sidecars.</div>
         </div>
-        <a class="station-link" href="https://sepolia.etherscan.io/address/${stationAddress}" target="_blank" rel="noopener noreferrer">Station</a>
+        <div class="rail-actions">
+          <a class="station-link" id="station-link" href="${networkContext(defaultNetwork).explorerBase}/address/${networkContext(defaultNetwork).stationAddress || canonicalStationAddress}" target="_blank" rel="noopener noreferrer">Station</a>
+          <button class="endpoint-settings" id="endpoint-settings" type="button" aria-label="Endpoint settings" aria-expanded="false" title="Endpoint settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z" />
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="legend">
-        <span><i class="swatch m"></i> Milady</span>
+        <span><i class="swatch m"></i> Station/Milady</span>
         <span><i class="swatch"></i> other blob</span>
         <span><i class="swatch e"></i> unused</span>
       </div>
+      <div class="endpoint-panel" id="endpoint-panel" aria-live="polite">
+        <strong id="endpoint-title">Blobspace endpoints missing</strong>
+        <p id="endpoint-copy">Use a preset to fill the execution RPC and beacon API for this viewer.</p>
+        <div class="endpoint-actions">
+          <button class="endpoint-preset" type="button" data-network="sepolia" data-preset="public">Use Sepolia Preset</button>
+          <button class="endpoint-preset" type="button" data-network="mainnet" data-preset="public">Use Mainnet Preset</button>
+        </div>
+        <div class="endpoint-fields">
+          <label>Execution RPC
+            <input class="endpoint-input" id="endpoint-execution" type="url" autocomplete="off" spellcheck="false" placeholder="https://sepolia.drpc.org" />
+          </label>
+          <label>Beacon API
+            <input class="endpoint-input" id="endpoint-beacon" type="url" autocomplete="off" spellcheck="false" placeholder="https://ethereum-sepolia-beacon-api.publicnode.com" />
+          </label>
+          <button class="endpoint-apply" id="endpoint-apply" type="button">Apply Endpoints</button>
+        </div>
+      </div>
       <div id="slots" aria-label="recent blob slots"></div>
-      <div class="rail-resizer" id="rail-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize segment list"></div>
       <div class="segments" aria-label="station segment arrivals">
         <div class="segments-title">
           <span>Stream Segments</span>
@@ -2465,6 +3191,7 @@ function indexHtml() {
             <input class="explorer-input" id="explorer-input" type="text" autocomplete="off" spellcheck="false" placeholder="Paste tx URL, hash, or block" aria-label="Paste block explorer transaction or block" />
             <button class="explorer-watch" id="explorer-watch" type="button">WATCH</button>
           </div>
+          <div class="explorer-message" id="explorer-message" aria-live="polite"></div>
         </div>
         <div class="segments-head"><span>Seq</span><span>Arrived</span><span>Tx</span><span>Blobs</span><span>Play</span></div>
         <div id="segments"></div>
@@ -2473,14 +3200,21 @@ function indexHtml() {
   </main>
 
   <script>
-    const streamId = ${JSON.stringify(streamId)}
+    const initialParams = new URLSearchParams(window.location.search)
+    let streamId = initialParams.get('streamId') || ${JSON.stringify(streamId)}
+    let selectedNetwork = (initialParams.get('network') || ${JSON.stringify(defaultNetwork)}).toLowerCase() === 'mainnet' ? 'mainnet' : 'sepolia'
+    let endpointPreset = initialParams.get('endpointPreset') === 'public' ? 'public' : ''
+    let customExecutionRpc = initialParams.get('ethRpcUrl') || ''
+    let customBeaconRpc = initialParams.get('beaconRpcUrl') || ''
+    let explorerBase = selectedNetwork === 'mainnet' ? 'https://etherscan.io' : 'https://sepolia.etherscan.io'
+    const endpointPresets = ${JSON.stringify(endpointPresets)}
     const startBuffer = 0
     const segmentTimeoutMs = 150_000
-    const pollMs = 4_000
+    const pollMs = ${viewerPollMs}
     const video = document.querySelector('#video')
     const statusEl = document.querySelector('#status')
     const overlay = document.querySelector('#overlay')
-    const suppressPlayerOverlay = streamId.startsWith('rfe-baked-')
+    let suppressPlayerOverlay = streamId.startsWith('rfe-baked-')
     const overlayTitle = document.querySelector('#overlay-title')
     const overlayCopy = document.querySelector('#overlay-copy')
     const nowTitle = document.querySelector('#now-title')
@@ -2489,14 +3223,26 @@ function indexHtml() {
     const loopToggle = document.querySelector('#loop-toggle')
     const refresh = document.querySelector('#refresh')
     const mute = document.querySelector('#mute')
+    const volume = document.querySelector('#volume')
+    const utcClockEl = document.querySelector('#utc-clock')
     const slotsEl = document.querySelector('#slots')
     const segmentsEl = document.querySelector('#segments')
+    const segmentsPanel = document.querySelector('.segments')
     const rail = document.querySelector('.rail')
-    const railResizer = document.querySelector('#rail-resizer')
     const railMode = document.querySelector('#rail-mode')
     const explorerInput = document.querySelector('#explorer-input')
     const explorerWatch = document.querySelector('#explorer-watch')
+    const explorerMessage = document.querySelector('#explorer-message')
     const themeToggle = document.querySelector('#theme-toggle')
+    const networkToggle = document.querySelector('#network-toggle')
+    const stationLink = document.querySelector('#station-link')
+    const endpointSettings = document.querySelector('#endpoint-settings')
+    const endpointPanel = document.querySelector('#endpoint-panel')
+    const endpointTitle = document.querySelector('#endpoint-title')
+    const endpointCopy = document.querySelector('#endpoint-copy')
+    const endpointExecution = document.querySelector('#endpoint-execution')
+    const endpointBeacon = document.querySelector('#endpoint-beacon')
+    const endpointApply = document.querySelector('#endpoint-apply')
     const sunIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>'
     const moonIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>'
     const volumeOnIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="M15 9.5a4 4 0 0 1 0 5" /><path d="M18 6.5a8 8 0 0 1 0 11" /></svg>'
@@ -2505,6 +3251,7 @@ function indexHtml() {
       mute.innerHTML = video.muted ? volumeOffIcon : volumeOnIcon
       mute.setAttribute('aria-pressed', video.muted ? 'true' : 'false')
       mute.title = video.muted ? 'Unmute' : 'Mute'
+      volume.disabled = video.muted
     }
     const metrics = {
       segment: document.querySelector('#metric-segment'),
@@ -2527,13 +3274,152 @@ function indexHtml() {
     let liveMode = true
     let loopReplay = false
     let refreshSpinTimer = null
+    let endpointSettingsOpen = false
+    const segmentsPaneHeightKey = 'rfe-segments-pane-height'
+    let lastBlobspaceUpdateAt = 0
 
     const fmtBytes = (bytes) => bytes ? (bytes / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' KB' : '-'
     const fmtMs = (ms) => Number.isFinite(ms) ? Math.round(ms) + ' ms' : '-'
     const shortHash = (hash) => hash ? hash.slice(0, 10) + '...' + hash.slice(-6) : '-'
     const displaySeq = (sequence) => Number(sequence) + 1
     const blobLabel = (count) => count + ' ' + (Number(count) === 1 ? 'blob' : 'blobs')
-    const txUrl = (hash) => hash ? 'https://sepolia.etherscan.io/tx/' + encodeURIComponent(hash) : ''
+    const txUrl = (hash) => hash ? explorerBase + '/tx/' + encodeURIComponent(hash) : ''
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[char]))
+
+    function updateUtcClock() {
+      utcClockEl.textContent = new Date().toISOString().slice(11, 19) + ' UTC'
+    }
+
+    function setExplorerMessage(message = '', kind = '') {
+      explorerMessage.textContent = message
+      explorerMessage.classList.toggle('is-error', kind === 'error')
+      explorerMessage.classList.toggle('is-ok', kind === 'ok')
+    }
+
+    function setNetworkToggle() {
+      networkToggle.classList.toggle('is-sepolia', selectedNetwork === 'sepolia')
+      networkToggle.setAttribute('aria-pressed', selectedNetwork === 'sepolia' ? 'true' : 'false')
+      networkToggle.title = selectedNetwork === 'mainnet' ? 'Watching Mainnet blobs' : 'Watching Sepolia blobs'
+    }
+
+    function apiUrl(path) {
+      const params = new URLSearchParams()
+      params.set('network', selectedNetwork)
+      if (endpointPreset) params.set('endpointPreset', endpointPreset)
+      return path + (path.includes('?') ? '&' : '?') + params.toString()
+    }
+
+    function updateLocation() {
+      const params = new URLSearchParams()
+      if (streamId) params.set('streamId', streamId)
+      params.set('network', selectedNetwork)
+      if (endpointPreset) params.set('endpointPreset', endpointPreset)
+      if (customExecutionRpc) params.set('ethRpcUrl', customExecutionRpc)
+      if (customBeaconRpc) params.set('beaconRpcUrl', customBeaconRpc)
+      history.replaceState(null, '', '?' + params.toString())
+    }
+
+    function setNetwork(nextNetwork) {
+      selectedNetwork = nextNetwork === 'mainnet' ? 'mainnet' : 'sepolia'
+      explorerBase = selectedNetwork === 'mainnet' ? 'https://etherscan.io' : 'https://sepolia.etherscan.io'
+      setNetworkToggle()
+      updateLocation()
+      segments = []
+      playable = new Map()
+      preparing = new Map()
+      fetchTimings = new Map()
+      decodeTimings = new Map()
+      currentIndex = -1
+      liveMode = true
+      blackoutVideo()
+      renderSegments()
+      setState('buffering', 'Switching blob feed', 'Changing the execution and beacon RPC targets to ' + (selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia') + '.')
+      void poll(true)
+    }
+
+    function presetEndpoints(network = selectedNetwork, preset = endpointPreset) {
+      return preset ? endpointPresets[preset]?.networks?.[network] || null : null
+    }
+
+    function syncEndpointInputs() {
+      const preset = presetEndpoints()
+      endpointExecution.value = customExecutionRpc || preset?.executionRpc || ''
+      endpointBeacon.value = customBeaconRpc || preset?.beaconApi || ''
+    }
+
+    function resetForEndpointChange(title, detail) {
+      setNetworkToggle()
+      updateLocation()
+      syncEndpointInputs()
+      segments = []
+      playable = new Map()
+      preparing = new Map()
+      fetchTimings = new Map()
+      decodeTimings = new Map()
+      currentIndex = -1
+      liveMode = true
+      blackoutVideo()
+      renderSegments()
+      setState('buffering', title, detail)
+      void poll(true)
+    }
+
+    function renderEndpointPanel(blobspace = {}) {
+      const missingExecution = blobspace.executionRpcConfigured === false
+      const missingBeacon = blobspace.beaconApiConfigured === false
+      const needsSetup = blobspace.mode !== 'live' && blobspace.presetAvailable && (missingExecution || missingBeacon || Boolean(blobspace.warning))
+      const shouldShow = endpointSettingsOpen || needsSetup
+      endpointPanel.classList.toggle('is-visible', shouldShow)
+      endpointSettings.setAttribute('aria-expanded', shouldShow ? 'true' : 'false')
+      if (!shouldShow) return
+      const networkLabel = blobspace.networkLabel || (selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia')
+      const missing = [
+        missingExecution ? 'execution RPC' : '',
+        missingBeacon ? 'beacon API' : '',
+      ].filter(Boolean).join(' and ')
+      endpointTitle.textContent = missing ? networkLabel + ' ' + missing + ' missing' : networkLabel + ' blobspace feed needs endpoints'
+      const active = blobspace.endpointPresetLabel ? ' Active preset: ' + blobspace.endpointPresetLabel + '.' : ''
+      endpointCopy.textContent = (blobspace.warning || 'Use a preset to fetch live blob sidecars from the viewer without editing .env.') + active
+      syncEndpointInputs()
+      endpointPanel.querySelectorAll('.endpoint-preset').forEach((button) => {
+        const isActive = button.dataset.network === selectedNetwork && button.dataset.preset === endpointPreset
+        button.classList.toggle('is-active', isActive)
+        button.textContent = isActive
+          ? (button.dataset.network === 'mainnet' ? 'Mainnet Preset Active' : 'Sepolia Preset Active')
+          : (button.dataset.network === 'mainnet' ? 'Use Mainnet Preset' : 'Use Sepolia Preset')
+      })
+    }
+
+    function endpointLabel(network = selectedNetwork, preset = endpointPreset) {
+      const configured = presetEndpoints(network, preset)
+      if (!configured) return ''
+      return endpointPresets[preset]?.label || preset
+    }
+
+    function setEndpointPreset(nextPreset, nextNetwork = selectedNetwork) {
+      endpointSettingsOpen = true
+      selectedNetwork = nextNetwork === 'mainnet' ? 'mainnet' : 'sepolia'
+      endpointPreset = presetEndpoints(selectedNetwork, nextPreset) ? nextPreset : ''
+      customExecutionRpc = ''
+      customBeaconRpc = ''
+      explorerBase = selectedNetwork === 'mainnet' ? 'https://etherscan.io' : 'https://sepolia.etherscan.io'
+      const label = endpointLabel()
+      resetForEndpointChange('Applying endpoint preset', label ? 'Using ' + label + ' for ' + (selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia') + ' execution and beacon reads.' : 'Returning to environment-configured endpoints.')
+    }
+
+    function applyEndpointInputs() {
+      endpointSettingsOpen = true
+      customExecutionRpc = endpointExecution.value.trim()
+      customBeaconRpc = endpointBeacon.value.trim()
+      endpointPreset = ''
+      resetForEndpointChange('Applying custom endpoints', 'Using the entered execution RPC and beacon API for live blob reads.')
+    }
 
     function setTheme(theme) {
       const light = theme === 'light'
@@ -2583,8 +3469,8 @@ function indexHtml() {
       hour12: false,
     })
 
-    function slotTimeMarkup(timestampMs) {
-      if (!timestampMs) return '<div class="slot-time"><span>Time unavailable</span></div>'
+    function slotTimeMarkup(timestampMs, action = '') {
+      if (!timestampMs) return '<div class="slot-time"><span>Time unavailable</span>' + action + '</div>'
       const when = new Date(Number(timestampMs))
       let label = 'Local'
       let value = ''
@@ -2597,6 +3483,7 @@ function indexHtml() {
       }
       return '<div class="slot-time">' +
         '<span><strong>' + label + '</strong> ' + value + '</span>' +
+        action +
       '</div>'
     }
 
@@ -2639,7 +3526,7 @@ function indexHtml() {
       if (preparing.has(segment.sequence)) return preparing.get(segment.sequence)
       const pending = (async () => {
       const started = performance.now()
-      const response = await fetch(segment.gatewayUrl, { cache: 'no-store' })
+      const response = await fetch(apiUrl(segment.gatewayUrl), { cache: 'no-store' })
       fetchTimings.set(segment.sequence, performance.now() - started)
       if (!response.ok) throw new Error(await response.text())
       const decodeStarted = performance.now()
@@ -2739,33 +3626,71 @@ function indexHtml() {
       playReady(index, ready, 'replay')
     }
 
-    function findSegmentFromExplorerText(value) {
+    async function tuneStreamAndJump(nextStreamId, sequence) {
+      if (!nextStreamId) return
+      if (nextStreamId !== streamId) {
+        streamId = nextStreamId
+        suppressPlayerOverlay = streamId.startsWith('rfe-baked-')
+        updateLocation()
+        segments = []
+        playable = new Map()
+        preparing = new Map()
+        fetchTimings = new Map()
+        decodeTimings = new Map()
+        currentIndex = -1
+        blackoutVideo()
+        renderSegments()
+      }
+      nowTitle.textContent = 'Tuning ' + streamId
+      nowDetail.textContent = sequence != null
+        ? 'Fetching stream playlist, then jumping to seq #' + displaySeq(sequence) + '.'
+        : 'Fetching stream playlist from Station events.'
+      setState('buffering', 'Tuning stream from blobspace', 'The feed found this stream id from blob metadata and is loading its canonical sequence playlist.')
+      await poll(true)
+      if (sequence != null && sequence !== '') await jumpToSequence(sequence)
+    }
+
+    function findSegmentFromExplorerText(value, candidates = segments) {
       const text = String(value || '').trim()
       if (!text) return null
       const hash = text.match(/0x[a-fA-F0-9]{64}/)?.[0]?.toLowerCase()
       if (hash) {
-        const byTx = segments.find((segment) =>
+        const byTx = candidates.find((segment) =>
           String(segment.txHash || segment.transactionHash || '').toLowerCase() === hash
         )
         if (byTx) return byTx
-        return segments.find((segment) =>
+        return candidates.find((segment) =>
           String(segment.blockHash || segment.proof?.block?.hash || '').toLowerCase() === hash
+        ) || candidates.find((segment) =>
+          (segment.blobVersionedHashes || []).some((versionedHash) => String(versionedHash).toLowerCase() === hash)
         ) || null
       }
-      const blockNumber = text.match(/(?:\/block\/|block(?:number)?[=:\s]+)(\d+)/i)?.[1] ||
-        (/^\d{5,}$/.test(text) ? text : '')
+      const blockNumber = text.match(/(?:\\/block\\/|block(?:number)?[=:\\s]+)(\\d+)/i)?.[1] ||
+        (/^\\d{5,}$/.test(text) ? text : '')
       if (blockNumber) {
-        return segments.find((segment) =>
+        return candidates.find((segment) =>
           String(segment.blockNumber || segment.proof?.block?.number || '') === blockNumber
         ) || null
       }
       return null
     }
 
+    async function lookupStationSegment(value) {
+      const params = new URLSearchParams()
+      params.set('value', value)
+      params.set('network', selectedNetwork)
+      if (endpointPreset) params.set('endpointPreset', endpointPreset)
+      const response = await fetch('/api/station/lookup?' + params.toString(), { cache: 'no-store' })
+      if (!response.ok) throw new Error(await response.text())
+      const result = await response.json()
+      return result.segment || null
+    }
+
     async function watchFromExplorerPaste() {
       const value = explorerInput.value.trim()
       if (!value) return
       explorerInput.removeAttribute('aria-invalid')
+      setExplorerMessage('Searching recent Station segments...', '')
       explorerWatch.disabled = true
       try {
         let match = findSegmentFromExplorerText(value)
@@ -2774,13 +3699,24 @@ function indexHtml() {
           match = findSegmentFromExplorerText(value)
         }
         if (!match) {
+          setExplorerMessage('Checking Station transaction...', '')
+          match = await lookupStationSegment(value)
+        }
+        if (!match) {
           explorerInput.setAttribute('aria-invalid', 'true')
+          setExplorerMessage('No Station segment found for that tx, block, or blob hash.', 'error')
           explorerInput.select()
           return
         }
+        if (match.streamId && match.streamId !== streamId) {
+          setExplorerMessage('Found transaction in stream ' + match.streamId + '. Tuning and jumping...', 'ok')
+          await tuneStreamAndJump(match.streamId, match.sequence)
+        } else {
+          setExplorerMessage('Found segment #' + displaySeq(match.sequence) + '. Loading replay...', 'ok')
+          await jumpToSequence(match.sequence)
+        }
         explorerInput.value = ''
         explorerInput.placeholder = 'Paste tx URL, hash, or block'
-        await jumpToSequence(match.sequence)
       } finally {
         explorerWatch.disabled = false
       }
@@ -2813,7 +3749,7 @@ function indexHtml() {
         if (latest) {
           setState('interrupted', 'Segment cadence interrupted', 'Milady blobs were detected, but recent Station announcements stopped arriving. The tuner cuts out instead of replaying stale video.')
         } else if (blobSignal.count > 0) {
-          setState('buffering', 'Milady blob signal detected', 'Ethereum blobspace contains blobs for this stream. The tuner is waiting for matching recent Station announcements and two reconstructed WebM segments before playback.')
+          setState('buffering', 'Station blob signal detected', 'Ethereum blobspace contains Station blobs. The tuner is waiting for stream metadata and two reconstructed WebM segments before playback.')
         } else {
           setState('offline', 'No recent station signal', 'No recent segment announcements are available. The viewer stays idle until Ethereum carries new blobs for this stream.')
         }
@@ -2857,7 +3793,7 @@ function indexHtml() {
 
     function renderSegments() {
       if (!segments.length) {
-        segmentsEl.innerHTML = '<div class="segment-row"><span class="muted empty">No stream segments yet</span></div>'
+        segmentsEl.innerHTML = '<div class="segment-row empty-row"><strong>-</strong><span>Waiting</span><span class="muted">No stream segments yet</span><span>-</span><span>-</span></div>'
         return
       }
       segmentsEl.innerHTML = segments.map((segment, index) => {
@@ -2867,14 +3803,29 @@ function indexHtml() {
         return '<div class="segment-row' + current + '">' +
           '<strong>#' + displaySeq(segment.sequence) + '</strong>' +
           '<span>' + segmentTimeText(segment.createdAt) + '</span>' +
-          '<a class="tx-link" href="' + txUrl(segment.txHash) + '" target="_blank" rel="noopener noreferrer">' + shortHash(segment.txHash) + '</a>' +
+          '<a class="tx-link" href="' + txUrl(segment.txHash) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(shortHash(segment.txHash)) + '</a>' +
           '<span>' + blobLabel(segment.blobCount) + '</span>' +
-          '<button class="segment-jump" type="button" data-sequence="' + segment.sequence + '">JUMP</button>' +
+          '<button class="segment-jump" type="button" data-sequence="' + escapeHtml(segment.sequence) + '">JUMP</button>' +
         '</div>'
       }).join('')
     }
 
     function renderRail(blobspace) {
+      renderEndpointPanel(blobspace)
+      if (blobspace.chain) {
+        selectedNetwork = blobspace.chain === 'mainnet' ? 'mainnet' : 'sepolia'
+        explorerBase = blobspace.explorerBase || (selectedNetwork === 'mainnet' ? 'https://etherscan.io' : 'https://sepolia.etherscan.io')
+        const label = blobspace.networkLabel || (selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia')
+        setNetworkToggle()
+        if (blobspace.station) {
+          stationLink.href = explorerBase + '/address/' + encodeURIComponent(blobspace.station)
+          stationLink.textContent = label
+          stationLink.classList.remove('hidden')
+        } else {
+          stationLink.href = explorerBase
+          stationLink.textContent = label
+        }
+      }
       railMode.textContent = blobspace.mode === 'live'
         ? 'Live beacon sidecars from /eth/v1/beacon/blob_sidecars/{slot}.'
         : blobspace.mode === 'warming'
@@ -2887,21 +3838,20 @@ function indexHtml() {
       slotsEl.innerHTML = rows.map((row) => {
         const blobs = row.blobs || row.sidecars || []
         const max = row.maxBlobs || fallbackMax
-        const blobMatchesStream = (blob) => {
-          const blobStreamId = blob?.stream?.streamId || blob?.streamId
-          return Boolean(blob?.isStreamBlob && !blobStreamId) || blobStreamId === streamId
-        }
+        const blobMatchesStream = (blob) => Boolean(blob?.isStreamBlob)
         const streamBlobs = blobs.filter(blobMatchesStream)
-        const jumpSequence = streamBlobs
-          .map((blob) => blob?.stream?.sequence ?? blob?.sequence)
-          .find((sequence) => sequence != null)
+        const jumpBlob = streamBlobs.find((blob) => (blob?.stream?.sequence ?? blob?.sequence) != null)
+        const jumpSequence = jumpBlob?.stream?.sequence ?? jumpBlob?.sequence
+        const jumpStreamId = jumpBlob?.stream?.streamId || jumpBlob?.streamId || ''
+        const watchBlob = streamBlobs.find((blob) => blob?.stream?.txHash || blob?.txHash)
+        const watchTx = watchBlob?.stream?.txHash || watchBlob?.txHash || ''
         const byIndex = new Map(blobs.map((blob) => [Number(blob.index), blob]))
         const cells = Array.from({ length: max }, (_, index) => {
           const blob = byIndex.get(index)
           const isStreamBlob = blobMatchesStream(blob)
           const kind = isStreamBlob ? 'milady' : blob ? 'other' : ''
           const text = ''
-          const title = blob ? ' title="' + (blob.versionedHash || 'blob') + '"' : ''
+          const title = blob ? ' title="' + escapeHtml(blob.versionedHash || 'blob') + '"' : ''
           const blobTx = blob?.stream?.txHash || blob?.txHash
           if (blobTx) {
             return '<a class="blob-cell ' + kind + '"' + title + ' href="' + txUrl(blobTx) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>'
@@ -2912,40 +3862,71 @@ function indexHtml() {
         const streamUsed = streamBlobs.length
         streamBlobTotal += Number(streamUsed || 0)
         if (streamUsed && latestStreamSlot == null) latestStreamSlot = row.slot
-        const jump = jumpSequence != null
-          ? '<button class="slot-jump" type="button" data-sequence="' + jumpSequence + '">JUMP</button>'
-          : ''
+        const action = jumpSequence != null
+          ? '<button class="slot-jump" type="button" data-sequence="' + escapeHtml(jumpSequence) + '" data-stream-id="' + escapeHtml(jumpStreamId) + '" title="Tune this stream and jump to this segment">JUMP</button>'
+          : watchTx
+            ? '<button class="slot-jump" type="button" data-tx-hash="' + escapeHtml(watchTx) + '" title="Find and jump to the Station segment for this blob transaction">JUMP</button>'
+            : ''
         return '<section class="slot">' +
-          '<div class="slot-top"><strong>Slot ' + row.slot + '</strong><span>' + used + ' / ' + max + ' blobs' + (streamUsed ? ' · ' + streamUsed + ' Milady' : '') + '</span></div>' +
-          jump +
-          slotTimeMarkup(row.timestampMs) +
+          '<div class="slot-top"><strong>Slot ' + row.slot + '</strong><span>' + used + ' / ' + max + ' blobs' + (streamUsed ? ' · ' + streamUsed + ' Station/Milady' : '') + '</span></div>' +
+          slotTimeMarkup(row.timestampMs, action) +
           '<div class="blob-grid">' + cells + '</div>' +
-          (row.error ? '<div class="slot-error">' + row.error + '</div>' : '') +
+          (row.error ? '<div class="slot-error">' + escapeHtml(row.error) + '</div>' : '') +
         '</section>'
-      }).join('') || '<div class="muted">No blob sidecar rows available yet.</div>'
+      }).join('') || '<div class="muted">' + escapeHtml(blobspace.warning || 'No blob sidecar rows available yet.') + '</div>'
       blobSignal = { count: streamBlobTotal, latestSlot: latestStreamSlot }
     }
 
     function setSegmentsPaneHeight(height) {
       const railRect = rail.getBoundingClientRect()
-      const min = 96
-      const max = Math.max(min, railRect.height - 245)
+      const min = 176
+      const max = Math.max(min, railRect.height - 190)
       const next = Math.round(Math.min(max, Math.max(min, height)))
       rail.style.setProperty('--segments-pane-height', next + 'px')
+      return next
+    }
+
+    function restoreSegmentsPaneHeight() {
+      let saved = ''
+      try { saved = localStorage.getItem(segmentsPaneHeightKey) || '' } catch {}
+      const height = Number(saved)
+      if (Number.isFinite(height) && height > 0) setSegmentsPaneHeight(height)
+    }
+
+    function setSegmentsPaneHeightFromClientY(clientY) {
+      const railRect = rail.getBoundingClientRect()
+      const railPaddingBottom = Number.parseFloat(getComputedStyle(rail).paddingBottom) || 0
+      return setSegmentsPaneHeight(railRect.bottom - railPaddingBottom - clientY)
+    }
+
+    function persistSegmentsPaneHeight() {
+      try {
+        const value = getComputedStyle(rail).getPropertyValue('--segments-pane-height').trim()
+        if (value) localStorage.setItem(segmentsPaneHeightKey, value.replace('px', ''))
+      } catch {}
+    }
+
+    function isSegmentsResizeEdge(event) {
+      const rect = segmentsPanel.getBoundingClientRect()
+      return event.clientY >= rect.top - 8 && event.clientY <= rect.top + 12
     }
 
     function startRailResize(event) {
-      if (!railResizer || window.matchMedia('(max-width: 980px)').matches) return
+      if (!segmentsPanel || window.matchMedia('(max-width: 980px)').matches) return
+      if (!isSegmentsResizeEdge(event)) return
+      if (rail.classList.contains('resizing')) return
       event.preventDefault()
-      const startY = event.clientY
-      const startHeight = document.querySelector('.segments').getBoundingClientRect().height
       rail.classList.add('resizing')
-      railResizer.setPointerCapture?.(event.pointerId)
+      segmentsPanel.setPointerCapture?.(event.pointerId)
+      const startY = event.clientY
+      const startHeight = segmentsPanel.getBoundingClientRect().height
       const onMove = (moveEvent) => {
         setSegmentsPaneHeight(startHeight - (moveEvent.clientY - startY))
       }
       const onUp = () => {
         rail.classList.remove('resizing')
+        segmentsPanel.releasePointerCapture?.(event.pointerId)
+        persistSegmentsPaneHeight()
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
       }
@@ -2953,23 +3934,74 @@ function indexHtml() {
       window.addEventListener('pointerup', onUp, { once: true })
     }
 
-    async function poll() {
-      if (polling) return
+    function startRailMouseResize(event) {
+      if (!segmentsPanel || window.matchMedia('(max-width: 980px)').matches) return
+      if (!isSegmentsResizeEdge(event)) return
+      if (rail.classList.contains('resizing')) return
+      event.preventDefault()
+      rail.classList.add('resizing')
+      const startY = event.clientY
+      const startHeight = segmentsPanel.getBoundingClientRect().height
+      const onMove = (moveEvent) => {
+        setSegmentsPaneHeight(startHeight - (moveEvent.clientY - startY))
+      }
+      const onUp = () => {
+        rail.classList.remove('resizing')
+        persistSegmentsPaneHeight()
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp, { once: true })
+    }
+
+    async function poll(force = false) {
+      if (polling && !force) return
       polling = true
       clearTimeout(refreshSpinTimer)
       refresh.classList.add('is-spinning')
+      const tunedStreamId = streamId
+      const tunedNetwork = selectedNetwork
       try {
-        const data = await fetchJson('/api/streams/' + encodeURIComponent(streamId) + '/live')
+        const data = await fetchJson(apiUrl('/api/streams/' + encodeURIComponent(tunedStreamId) + '/live'))
+        if (tunedStreamId !== streamId || tunedNetwork !== selectedNetwork) return
+        const latestStation = data.stationLatest || null
+        if (liveMode && latestStation?.streamId && latestStation.streamId !== streamId) {
+          streamId = latestStation.streamId
+          suppressPlayerOverlay = streamId.startsWith('rfe-baked-')
+          updateLocation()
+          segments = []
+          playable = new Map()
+          preparing = new Map()
+          fetchTimings = new Map()
+          decodeTimings = new Map()
+          currentIndex = -1
+          blackoutVideo()
+          renderSegments()
+          setState('buffering', 'Following latest Station stream', 'New Station blobs are publishing under ' + streamId + '.')
+          void poll(true)
+          return
+        }
         segments = data.segments || []
         if (segments.length) lastEventAt = Date.parse(segments.at(-1).createdAt || Date.now())
         renderRail(data.blobspace || { rows: [], maxBlobsPerBlock: 21 })
+        lastBlobspaceUpdateAt = Date.now()
         renderSegments()
-        await fillBuffer()
+        await fillBuffer().catch((error) => {
+          nowDetail.textContent = 'Blobspace feed is live; media prefetch is retrying: ' + error.message
+        })
         renderSegments()
         chooseState()
       } catch (error) {
-        blackoutVideo()
-        setState('interrupted', 'Tuner interrupted', error.message)
+        if (lastBlobspaceUpdateAt && Date.now() - lastBlobspaceUpdateAt < 15_000) {
+          statusEl.textContent = 'retrying'
+          nowDetail.textContent = 'Blobspace feed is still visible; retrying API fetch: ' + error.message
+          overlayTitle.textContent = 'Retrying tuner fetch'
+          overlayCopy.textContent = error.message
+        } else {
+          blackoutVideo()
+          setState('interrupted', 'Tuner interrupted', error.message)
+        }
       } finally {
         polling = false
         refreshSpinTimer = setTimeout(() => refresh.classList.remove('is-spinning'), 650)
@@ -3024,14 +4056,25 @@ function indexHtml() {
     slotsEl.addEventListener('click', (event) => {
       const button = event.target.closest('.slot-jump')
       if (!button) return
-      void jumpToSequence(button.dataset.sequence)
+      if (button.dataset.txHash) {
+        explorerInput.value = button.dataset.txHash
+        void watchFromExplorerPaste()
+        return
+      }
+      if (!button.dataset.streamId) {
+        setState('interrupted', 'Stream metadata unavailable', 'This blob slot is marked as stream data, but the Station event metadata has not resolved a stream id yet.')
+        return
+      }
+      void tuneStreamAndJump(button.dataset.streamId, button.dataset.sequence)
     })
-    railResizer.addEventListener('pointerdown', startRailResize)
+    segmentsPanel.addEventListener('pointerdown', startRailResize)
+    segmentsPanel.addEventListener('mousedown', startRailMouseResize)
     explorerWatch.addEventListener('click', () => {
       void watchFromExplorerPaste()
     })
     explorerInput.addEventListener('input', () => {
       explorerInput.removeAttribute('aria-invalid')
+      setExplorerMessage('', '')
     })
     explorerInput.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter') return
@@ -3041,17 +4084,58 @@ function indexHtml() {
     themeToggle.addEventListener('click', () => {
       setTheme(document.body.classList.contains('light') ? 'dark' : 'light')
     })
+    networkToggle.addEventListener('click', () => {
+      setNetwork(selectedNetwork === 'mainnet' ? 'sepolia' : 'mainnet')
+    })
+    endpointSettings.addEventListener('click', () => {
+      endpointSettingsOpen = !endpointSettingsOpen
+      endpointPanel.classList.toggle('is-visible', endpointSettingsOpen)
+      endpointSettings.setAttribute('aria-expanded', endpointSettingsOpen ? 'true' : 'false')
+      if (endpointSettingsOpen) syncEndpointInputs()
+    })
+    endpointPanel.addEventListener('click', (event) => {
+      const button = event.target.closest('.endpoint-preset')
+      if (!button) return
+      setEndpointPreset(button.dataset.preset || '', button.dataset.network || selectedNetwork)
+    })
+    endpointApply.addEventListener('click', applyEndpointInputs)
+    endpointExecution.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      applyEndpointInputs()
+    })
+    endpointBeacon.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      applyEndpointInputs()
+    })
     mute.addEventListener('click', () => {
       video.muted = !video.muted
       renderMuteIcon()
     })
+    volume.addEventListener('input', () => {
+      video.volume = Number(volume.value)
+      if (video.volume > 0 && video.muted) video.muted = false
+      renderMuteIcon()
+    })
+    video.addEventListener('volumechange', () => {
+      if (Math.abs(Number(volume.value) - video.volume) > 0.01) volume.value = String(video.volume)
+      renderMuteIcon()
+    })
     initTheme()
+    setNetworkToggle()
+    syncEndpointInputs()
+    updateLocation()
+    restoreSegmentsPaneHeight()
+    video.volume = Number(volume.value)
+    updateUtcClock()
     renderMuteIcon()
     setLiveButton()
     setLoopButton()
 
     poll()
     setInterval(poll, pollMs)
+    setInterval(updateUtcClock, 1000)
     setInterval(() => {
       if (!suppressPlayerOverlay && lastEventAt && Date.now() - lastEventAt > segmentTimeoutMs && (state === 'live' || state === 'lagging')) {
         blackoutVideo()
@@ -3065,6 +4149,11 @@ function indexHtml() {
 
 const server = http.createServer(async (request, response) => {
   const parsed = new URL(request.url, 'http://127.0.0.1')
+  const ctx = networkContext(parsed.searchParams.get('network') || defaultNetwork, {
+    endpointPreset: parsed.searchParams.get('endpointPreset') || '',
+    executionRpcUrl: parsed.searchParams.get('ethRpcUrl') || '',
+    beaconRpcUrl: parsed.searchParams.get('beaconRpcUrl') || '',
+  })
 
   try {
     if (parsed.pathname === '/') {
@@ -3079,6 +4168,18 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, overlayPreviewHtml(), { 'content-type': 'text/html; charset=utf-8' })
     }
 
+    if (parsed.pathname === '/api/station/lookup') {
+      const value = parsed.searchParams.get('value') || ''
+      const segment = await lookupStationSegmentTargeted(value, ctx)
+      const cached = stationSegmentsCache.get(contextCacheKey(ctx))?.segments || []
+      const cachedSegment = findSegmentFromText(value, cached)
+      const result = segment || (cachedSegment ? summarizeSegment(cachedSegment) : null)
+      return sendJson(response, {
+        ok: Boolean(result),
+        segment: result,
+      })
+    }
+
     const assetMatch = parsed.pathname.match(/^\/rfe-assets\/([^/]+)$/)
     if (assetMatch) {
       return sendOverlayAsset(response, decodeURIComponent(assetMatch[1]))
@@ -3087,41 +4188,50 @@ const server = http.createServer(async (request, response) => {
     const streamMatch = parsed.pathname.match(/^\/api\/streams\/([^/]+)\/live$/)
     if (streamMatch) {
       const id = decodeURIComponent(streamMatch[1])
-      const allSegments = await segmentFeed()
+      const allSegments = await segmentFeed(ctx)
       const segments = allSegments.filter((segment) => segment.streamId === id).map(summarizeSegment)
+      const latestStationSegment = latestPublishedSegment(allSegments)
+      const stationLatest = latestStationSegment ? summarizeSegment(latestStationSegment) : null
       return sendJson(response, {
         streamId: id,
+        network: ctx.name,
+        networkLabel: ctx.label,
         transport: {
-          executionRpcConfigured: Boolean(publicClient),
-          beaconApiConfigured: Boolean(beaconUrl),
-          stationConfigured: Boolean(stationAddress && stationAbi),
-          station: stationAddress ? getAddress(stationAddress) : null,
-          stationFromBlock: stationFromBlock.toString(),
+          network: ctx.name,
+          networkLabel: ctx.label,
+          endpointPreset: ctx.endpointPreset || '',
+          endpointPresetLabel: ctx.endpointPreset ? endpointPresets[ctx.endpointPreset]?.label || ctx.endpointPreset : '',
+          executionRpcConfigured: Boolean(ctx.publicClient),
+          beaconApiConfigured: Boolean(ctx.beaconUrl),
+          stationConfigured: Boolean(ctx.stationAddress && ctx.stationAbi),
+          station: ctx.stationAddress ? getAddress(ctx.stationAddress) : null,
+          stationFromBlock: ctx.stationFromBlock.toString(),
           blobSidecarsPath: '/eth/v1/beacon/blob_sidecars/{slot}',
           reconstruction: 'drop byte 0 from each 32-byte field element, concat 31-byte chunks, trim to payloadBytes, verify sha256',
         },
         segments,
-        blobspace: await slotMetrics(slotWindow),
+        stationLatest,
+        blobspace: await slotMetrics(slotWindow, ctx),
       })
     }
 
     const healthMatch = parsed.pathname.match(/^\/api\/streams\/([^/]+)\/health$/)
     if (healthMatch) {
       const id = decodeURIComponent(healthMatch[1])
-      const allSegments = await segmentFeed()
-      const blobspace = await slotMetrics(slotWindow)
-      return sendJson(response, summarizeHealth(id, allSegments, blobspace))
+      const allSegments = await segmentFeed(ctx)
+      const blobspace = await slotMetrics(slotWindow, ctx)
+      return sendJson(response, summarizeHealth(id, allSegments, blobspace, ctx))
     }
 
     const payloadMatch = parsed.pathname.match(/^\/api\/segments\/([^/]+)\/(\d+)\/payload$/)
     if (payloadMatch) {
       const id = decodeURIComponent(payloadMatch[1])
       const sequence = Number(payloadMatch[2])
-      const segment = (await segmentFeed()).find(
+      const segment = (await segmentFeed(ctx)).find(
         (candidate) => candidate.streamId === id && Number(candidate.sequence) === sequence,
       )
       if (!segment) return send(response, 404, 'segment not found')
-      const mediaPath = await ensureMedia(segment)
+      const mediaPath = await ensureMedia(segment, ctx)
       return sendMedia(request, response, mediaPath)
     }
 
@@ -3148,10 +4258,15 @@ const server = http.createServer(async (request, response) => {
 })
 
 server.listen(port, '127.0.0.1', () => {
+  const sepoliaCtx = networkContext('sepolia')
+  const mainnetCtx = networkContext('mainnet')
   console.log(`Radio Free Ethereum: http://127.0.0.1:${port}/`)
   console.log(`stream id: ${streamId}`)
-  console.log(`execution RPC: ${publicClient ? 'configured' : 'not configured'}`)
-  console.log(`beacon API: ${beaconUrl ? 'configured' : 'not configured'}`)
-  void refreshStationSegments()
-  void refreshSlotMetrics(slotWindow)
+  console.log(`sepolia execution RPC: ${sepoliaCtx.publicClient ? 'configured' : 'not configured'}`)
+  console.log(`sepolia beacon API: ${sepoliaCtx.beaconUrl ? 'configured' : 'not configured'}`)
+  console.log(`mainnet execution RPC: ${mainnetCtx.publicClient ? 'configured' : 'not configured'}`)
+  console.log(`mainnet beacon API: ${mainnetCtx.beaconUrl ? 'configured' : 'not configured'}`)
+  void refreshStationSegments(sepoliaCtx)
+  void refreshSlotMetrics(slotWindow, sepoliaCtx)
+  if (mainnetCtx.publicClient || mainnetCtx.beaconUrl) void refreshSlotMetrics(slotWindow, mainnetCtx)
 })
