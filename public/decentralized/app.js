@@ -34,6 +34,13 @@ const DB_NAME = 'radio-free-ethereum'
 const DB_VERSION = 3
 const MAX_BLOBS_PER_BLOCK = 21
 const SLOT_WINDOW = 10
+const DEFAULT_BLOBSPACE_ROWS = [
+  { slot: 14725457, blobCount: 0 },
+  { slot: 14725456, blobCount: 6 },
+  { slot: 14725455, blobCount: 4 },
+  { slot: 14725454, blobCount: 0 },
+  { slot: 14725453, blobCount: 6 },
+]
 const els = {
   form: document.querySelector('#settings'),
   chainPreset: document.querySelector('#chain-preset'),
@@ -87,7 +94,7 @@ let state = {
   objectUrls: new Map(),
   activeExecutionRpc: '',
   activeBeaconApi: '',
-  blobspace: { mode: 'warming', rows: [], warning: '' },
+  blobspace: { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' },
   metadataUpdatedAt: '',
   currentRecordKey: '',
   streaming: false,
@@ -128,6 +135,22 @@ function saveConfig(config) {
 
 function setStatus(value) {
   els.status.textContent = value
+}
+
+function defaultBlobspaceRows() {
+  return DEFAULT_BLOBSPACE_ROWS.map((row) => ({
+    ...row,
+    timestampMs: null,
+    maxBlobs: MAX_BLOBS_PER_BLOCK,
+    streamBlobCount: 0,
+    blobs: Array.from({ length: row.blobCount }, (_, index) => ({
+      index,
+      versionedHash: '',
+      isStreamBlob: false,
+      stream: null,
+    })),
+    error: '',
+  }))
 }
 
 function on(element, eventName, handler) {
@@ -588,7 +611,7 @@ async function clearCache() {
   state.verified.clear()
   state.segments = []
   state.metadataUpdatedAt = ''
-  state.blobspace = { mode: 'warming', rows: [], warning: '' }
+  state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
   for (const url of state.objectUrls.values()) URL.revokeObjectURL(url)
   state.objectUrls.clear()
   await refreshCacheStats()
@@ -723,7 +746,7 @@ function streamBlobMap() {
 async function refreshBlobspace() {
   const known = streamBlobMap()
   if (!known.size) {
-    state.blobspace = { mode: 'warming', rows: [], warning: 'Waiting for Station metadata.' }
+    state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: 'Waiting for Station metadata.' }
     return
   }
 
@@ -975,7 +998,7 @@ on(els.form, 'submit', (event) => {
   state.activeExecutionRpc = ''
   state.activeBeaconApi = ''
   state.metadataUpdatedAt = ''
-  state.blobspace = { mode: 'warming', rows: [], warning: '' }
+  state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
   els.headBlock.textContent = '-'
   els.headSlot.textContent = '-'
   render()
