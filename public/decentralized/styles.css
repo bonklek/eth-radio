@@ -369,6 +369,15 @@ video {
   font-weight: 800;
 }
 
+.metrics span,
+.stats span,
+.segment-head span,
+.slot-top strong,
+.slot-meta strong,
+.segments-heading strong {
+  text-shadow: 1px 0 rgba(255, 111, 185, 0.42), -1px 0 rgba(116, 201, 255, 0.38);
+}
+
 .metrics strong,
 .stats strong {
   min-width: 0;
