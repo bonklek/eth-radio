@@ -2173,6 +2173,47 @@ function indexHtml() {
       font-size: 13px;
       font-weight: 900;
       text-shadow: 1px 1px 0 #000;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+    }
+    .explorer-jump {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 5px;
+      min-width: 0;
+    }
+    .explorer-input {
+      min-width: 0;
+      height: 24px;
+      border: 1px solid #30364e;
+      border-right-color: #07080d;
+      border-bottom-color: #07080d;
+      border-radius: 3px;
+      background: #080a10;
+      color: #d7dbff;
+      font: 700 10px/1 var(--mono);
+      padding: 0 7px;
+      outline: none;
+    }
+    .explorer-input::placeholder {
+      color: rgba(244, 241, 247, .46);
+    }
+    .explorer-input[aria-invalid="true"] {
+      border-color: #ff6f9f;
+    }
+    .explorer-watch {
+      height: 24px;
+      border: 1px solid #ffd3e1;
+      border-right-color: #64243c;
+      border-bottom-color: #64243c;
+      border-radius: 3px;
+      background: #ffbdd4;
+      color: #201014;
+      font: 900 10px/1 var(--mono);
+      padding: 0 7px;
+      cursor: pointer;
     }
     #segments {
       min-height: 0;
@@ -2278,6 +2319,14 @@ function indexHtml() {
     }
     body.light .segments-title {
       text-shadow: none;
+    }
+    body.light .explorer-input {
+      background: #ffffff;
+      color: #201b33;
+      border-color: #b9b3d2 #6f688c #6f688c #ffffff;
+    }
+    body.light .explorer-input::placeholder {
+      color: rgba(31, 29, 42, .52);
     }
     body.light .blob-cell {
       background: #e4dfec;
@@ -2410,7 +2459,13 @@ function indexHtml() {
       <div id="slots" aria-label="recent blob slots"></div>
       <div class="rail-resizer" id="rail-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize segment list"></div>
       <div class="segments" aria-label="station segment arrivals">
-        <div class="segments-title">Stream Segments</div>
+        <div class="segments-title">
+          <span>Stream Segments</span>
+          <div class="explorer-jump">
+            <input class="explorer-input" id="explorer-input" type="text" autocomplete="off" spellcheck="false" placeholder="Paste tx URL, hash, or block" aria-label="Paste block explorer transaction or block" />
+            <button class="explorer-watch" id="explorer-watch" type="button">WATCH</button>
+          </div>
+        </div>
         <div class="segments-head"><span>Seq</span><span>Arrived</span><span>Tx</span><span>Blobs</span><span>Play</span></div>
         <div id="segments"></div>
       </div>
@@ -2439,6 +2494,8 @@ function indexHtml() {
     const rail = document.querySelector('.rail')
     const railResizer = document.querySelector('#rail-resizer')
     const railMode = document.querySelector('#rail-mode')
+    const explorerInput = document.querySelector('#explorer-input')
+    const explorerWatch = document.querySelector('#explorer-watch')
     const themeToggle = document.querySelector('#theme-toggle')
     const sunIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg>'
     const moonIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>'
@@ -2682,6 +2739,53 @@ function indexHtml() {
       playReady(index, ready, 'replay')
     }
 
+    function findSegmentFromExplorerText(value) {
+      const text = String(value || '').trim()
+      if (!text) return null
+      const hash = text.match(/0x[a-fA-F0-9]{64}/)?.[0]?.toLowerCase()
+      if (hash) {
+        const byTx = segments.find((segment) =>
+          String(segment.txHash || segment.transactionHash || '').toLowerCase() === hash
+        )
+        if (byTx) return byTx
+        return segments.find((segment) =>
+          String(segment.blockHash || segment.proof?.block?.hash || '').toLowerCase() === hash
+        ) || null
+      }
+      const blockNumber = text.match(/(?:\/block\/|block(?:number)?[=:\s]+)(\d+)/i)?.[1] ||
+        (/^\d{5,}$/.test(text) ? text : '')
+      if (blockNumber) {
+        return segments.find((segment) =>
+          String(segment.blockNumber || segment.proof?.block?.number || '') === blockNumber
+        ) || null
+      }
+      return null
+    }
+
+    async function watchFromExplorerPaste() {
+      const value = explorerInput.value.trim()
+      if (!value) return
+      explorerInput.removeAttribute('aria-invalid')
+      explorerWatch.disabled = true
+      try {
+        let match = findSegmentFromExplorerText(value)
+        if (!match) {
+          await poll()
+          match = findSegmentFromExplorerText(value)
+        }
+        if (!match) {
+          explorerInput.setAttribute('aria-invalid', 'true')
+          explorerInput.select()
+          return
+        }
+        explorerInput.value = ''
+        explorerInput.placeholder = 'Paste tx URL, hash, or block'
+        await jumpToSequence(match.sequence)
+      } finally {
+        explorerWatch.disabled = false
+      }
+    }
+
     function playIndex(index) {
       const segment = segments[index]
       const ready = segment && playable.get(segment.sequence)
@@ -2923,6 +3027,17 @@ function indexHtml() {
       void jumpToSequence(button.dataset.sequence)
     })
     railResizer.addEventListener('pointerdown', startRailResize)
+    explorerWatch.addEventListener('click', () => {
+      void watchFromExplorerPaste()
+    })
+    explorerInput.addEventListener('input', () => {
+      explorerInput.removeAttribute('aria-invalid')
+    })
+    explorerInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      void watchFromExplorerPaste()
+    })
     themeToggle.addEventListener('click', () => {
       setTheme(document.body.classList.contains('light') ? 'dark' : 'light')
     })

@@ -17,6 +17,7 @@
     "live:publish:pipelined": "node scripts/publish-live-segments-pipelined.mjs",
     "live:run": "node scripts/run-live-station.mjs",
     "live:monitor": "node scripts/monitor-live-stream.mjs",
+    "live:latency": "node scripts/monitor-stream-latency.mjs",
     "blob:publish": "node scripts/publish-blob-chunk.mjs",
     "blob:fetch": "node scripts/fetch-blob-sidecars.mjs",
     "blob:reconstruct": "node scripts/reconstruct-blob-media.mjs",
