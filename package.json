@@ -11,8 +11,6 @@
     "station:segments": "node scripts/list-station-segments.mjs",
     "slots:metrics": "node scripts/blob-slot-metrics.mjs",
     "media:segment": "node scripts/segment-av1-webm.mjs",
-    "media:clock": "node scripts/generate-clock-segments.mjs",
-    "media:proof": "node scripts/segment-proof-video.mjs",
     "live:publish": "node scripts/publish-live-segments.mjs",
     "live:publish:pipelined": "node scripts/publish-live-segments-pipelined.mjs",
     "live:run": "node scripts/run-live-station.mjs",
@@ -22,10 +20,8 @@
     "blob:fetch": "node scripts/fetch-blob-sidecars.mjs",
     "blob:reconstruct": "node scripts/reconstruct-blob-media.mjs",
     "demo:live": "node scripts/serve-live-demo.mjs",
-    "nft:archive": "node scripts/archive-nft-media.mjs",
-    "avatar:prepare": "node scripts/prepare-fumo-avatar-assets.mjs",
-    "audio:kokoro": "node scripts/generate-kokoro-narration.mjs",
-    "avatar:build": "node scripts/run-blender-avatar-build.mjs"
+    "web:build": "node scripts/build-static-client.mjs",
+    "web:static": "node scripts/verify-static-client.mjs"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

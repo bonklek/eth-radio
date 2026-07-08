@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Radio Free Ethereum</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="tuner">
+      <div class="screen">
+        <video id="player" controls playsinline></video>
+        <div id="empty-state" class="empty-state">
+          <strong>Radio Free Ethereum</strong>
+          <span>Waiting for a verified blob segment.</span>
+        </div>
+      </div>
+      <div class="transport">
+        <button id="refresh" type="button">Refresh</button>
+        <button id="stream-toggle" type="button">Start stream</button>
+        <button id="play-latest" type="button">Play latest</button>
+        <span id="status" role="status">Idle</span>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <h1>Radio Free Ethereum</h1>
+      <form id="settings" class="settings">
+        <label>
+          Stream
+          <input id="stream-id" name="streamId" autocomplete="off" />
+        </label>
+        <label>
+          Station
+          <input id="station-address" name="stationAddress" autocomplete="off" />
+        </label>
+        <label>
+          From block
+          <input id="from-block" name="fromBlock" inputmode="numeric" />
+        </label>
+        <label>
+          Execution RPCs
+          <textarea id="execution-rpcs" name="executionRpcs" rows="3" spellcheck="false"></textarea>
+        </label>
+        <label>
+          Beacon APIs
+          <textarea id="beacon-apis" name="beaconApis" rows="3" spellcheck="false"></textarea>
+        </label>
+        <label>
+          Archive payload URLs
+          <textarea id="archive-templates" name="archiveTemplates" rows="3" spellcheck="false"></textarea>
+        </label>
+        <label>
+          Cache limit MB
+          <input id="cache-limit" name="cacheLimitMb" inputmode="numeric" />
+        </label>
+        <button type="submit">Save and reload</button>
+      </form>
+
+      <div class="stats">
+        <div><span>Known</span><strong id="known-count">0</strong></div>
+        <div><span>Verified</span><strong id="verified-count">0</strong></div>
+        <div><span>Head</span><strong id="head-block">-</strong></div>
+        <div><span>Cache</span><strong id="cache-size">0 MB</strong></div>
+        <div><span>Execution</span><strong id="execution-health">-</strong></div>
+        <div><span>Beacon</span><strong id="beacon-health">-</strong></div>
+      </div>
+
+      <div class="cache-actions">
+        <button id="export-index" type="button">Export index</button>
+        <button id="clear-cache" type="button">Clear cache</button>
+      </div>
+
+      <div id="segments" class="segments"></div>
+    </aside>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
