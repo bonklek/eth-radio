@@ -15,6 +15,7 @@ flows.
 Implemented in this repo:
 
 - Media segmentation to AV1/Opus WebM via `scripts/segment-av1-webm.mjs`.
+- Incremental live segment generation via `scripts/live-segment-av1-webm.mjs`.
 - Segment publishing via `scripts/publish-live-segments.mjs`.
 - Pipelined publishing via `scripts/publish-live-segments-pipelined.mjs`.
 - Blob/chunk publishing via `scripts/publish-blob-chunk.mjs`.
@@ -46,13 +47,16 @@ and not a browser/player UI.
 
 Live publishing pipeline:
 
-1. Read source/avatar video frames for one slot-aligned segment.
-2. Select the terminal shell PNG matching the output profile.
-3. Clear dynamic regions.
-4. Render live metadata for that segment.
-5. Composite source frames and terminal shell into final frames.
-6. Encode that segment as AV1/Opus WebM.
-7. Publish that already-composited segment through Station.
+1. Start the pipelined publisher first, watching an initially empty segment
+   output directory.
+2. Read source/avatar video frames for one slot-aligned segment.
+3. Select the terminal shell PNG matching the output profile.
+4. Clear dynamic regions.
+5. Render live metadata for that segment.
+6. Composite source frames and terminal shell into final frames.
+7. Encode that segment as AV1/Opus WebM.
+8. Atomically write the segment file and update the segment manifest entry.
+9. Let the already-running publisher publish the stable segment immediately.
 
 Offline sample pipeline:
 
@@ -64,6 +68,11 @@ For live publishing, prefer the first architecture. The compositor should emit
 final segment files directly, and the publisher should consume those files. If a
 downloaded or reconstructed segment is played by itself, the overlay must
 already be visible in the decoded video pixels.
+
+Do not pre-segment a full long video before starting the publisher. Full-stream
+pre-work is allowed only for cost estimation with `--stream-duration-ms` or
+`--expected-segments`; actual segment files must arrive one sequence at a time
+while the publisher is already watching.
 
 ## Portable Assets
 
@@ -217,6 +226,7 @@ Required compositor behavior:
 6. Composite source frames and shell into final frames.
 7. Encode final frames into an AV1/Opus WebM segment.
 8. Write the segment into the publisher watch directory.
+9. Update the manifest entry for that sequence before moving to the next one.
 
 Placeholder command shape for a future live compositor:
 
@@ -245,6 +255,29 @@ pnpm media:segment -- `
   --video-bitrate <bitrate> `
   --audio-bitrate <bitrate>
 ```
+
+For raw or already-composited input tests where no burn-in compositor is being
+used, use the incremental live generator instead of pre-segmenting the whole
+input:
+
+```powershell
+pnpm live:segment -- `
+  --input <already-composited-video-input> `
+  --out-dir <segment-output-dir> `
+  --stream-id <stream-id> `
+  --segment-ms <slot-aligned-ms> `
+  --width <width> `
+  --height <height> `
+  --fps <fps> `
+  --video-bitrate <bitrate> `
+  --audio-bitrate <bitrate> `
+  --max-blobs <blob-cap> `
+  --max-bytes <byte-cap> `
+  --pace
+```
+
+`pnpm live:run -- --publish` is not the correct long live-stream path because
+it segments first and publishes afterward.
 
 ## Cadence And Cost
 
@@ -304,13 +337,19 @@ pnpm live:publish:pipelined -- `
   --adaptive-pending `
   --max-pending-max <operator-approved-pending-cap> `
   --state <publish-state-file> `
-  --max-cost-eth <operator-approved-budget>
+  --max-cost-eth <operator-approved-budget> `
+  --stream-duration-ms <total-stream-duration-ms> `
+  --require-manifest
 ```
 
-Use the pipelined path when publishing segments as they are generated. Use the
-serial path for simpler controlled runs or debugging. Higher `--max-pending` or
-`--max-pending-max` can reduce gaps but increases outstanding spend risk, so the
-cap must match the approved budget.
+Use the pipelined path when publishing segments as they are generated. Start it
+before the live segment generator or compositor. It is expected to wait for
+future manifest entries; that is healthy. It is not healthy for a generator to
+wait until the full source video has been segmented before the publisher starts.
+
+Use the serial path for simpler controlled runs or debugging. Higher
+`--max-pending` or `--max-pending-max` can reduce gaps but increases outstanding
+spend risk, so the cap must match the approved budget.
 
 ## Safety Checks
 
