@@ -467,6 +467,11 @@ video {
   font-size: 11px;
 }
 
+.slot-meta strong {
+  color: var(--text);
+  font-weight: 900;
+}
+
 .blob-grid {
   display: grid;
   grid-template-columns: repeat(21, minmax(4px, 1fr));
