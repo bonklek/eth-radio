@@ -13,6 +13,7 @@
     "assets:overlays": "node scripts/generate-rfe-overlay-assets.mjs",
     "media:segment": "node scripts/segment-av1-webm.mjs",
     "live:segment": "node scripts/live-segment-av1-webm.mjs",
+    "live:segment:overlay": "node scripts/live-composite-rfe-segments.mjs",
     "live:publish": "node scripts/publish-live-segments.mjs",
     "live:publish:pipelined": "node scripts/publish-live-segments-pipelined.mjs",
     "live:run": "node scripts/run-live-station.mjs",

@@ -3014,6 +3014,13 @@ function indexHtml() {
     const displaySeq = (sequence) => Number(sequence) + 1
     const blobLabel = (count) => count + ' ' + (Number(count) === 1 ? 'blob' : 'blobs')
     const txUrl = (hash) => hash ? explorerBase + '/tx/' + encodeURIComponent(hash) : ''
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[char])
 
     function updateUtcClock() {
       utcClockEl.textContent = new Date().toISOString().slice(11, 19) + ' UTC'
@@ -3422,11 +3429,11 @@ function indexHtml() {
         const queued = preparing.has(segment.sequence)
         const current = index === currentIndex ? ' current' : ''
         return '<div class="segment-row' + current + '">' +
-          '<strong>#' + displaySeq(segment.sequence) + '</strong>' +
-          '<span>' + segmentTimeText(segment.createdAt) + '</span>' +
-          '<a class="tx-link" href="' + txUrl(segment.txHash) + '" target="_blank" rel="noopener noreferrer">' + shortHash(segment.txHash) + '</a>' +
-          '<span>' + blobLabel(segment.blobCount) + '</span>' +
-          '<button class="segment-jump" type="button" data-sequence="' + segment.sequence + '">JUMP</button>' +
+          '<strong>#' + escapeHtml(displaySeq(segment.sequence)) + '</strong>' +
+          '<span>' + escapeHtml(segmentTimeText(segment.createdAt)) + '</span>' +
+          '<a class="tx-link" href="' + escapeHtml(txUrl(segment.txHash)) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(shortHash(segment.txHash)) + '</a>' +
+          '<span>' + escapeHtml(blobLabel(segment.blobCount)) + '</span>' +
+          '<button class="segment-jump" type="button" data-sequence="' + escapeHtml(segment.sequence) + '">JUMP</button>' +
         '</div>'
       }).join('')
     }
@@ -3469,10 +3476,10 @@ function indexHtml() {
           const isStreamBlob = blobMatchesStream(blob)
           const kind = isStreamBlob ? 'milady' : blob ? 'other' : ''
           const text = ''
-          const title = blob ? ' title="' + (blob.versionedHash || 'blob') + '"' : ''
+          const title = blob ? ' title="' + escapeHtml(blob.versionedHash || 'blob') + '"' : ''
           const blobTx = blob?.stream?.txHash || blob?.txHash
           if (blobTx) {
-            return '<a class="blob-cell ' + kind + '"' + title + ' href="' + txUrl(blobTx) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>'
+            return '<a class="blob-cell ' + kind + '"' + title + ' href="' + escapeHtml(txUrl(blobTx)) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>'
           }
           return '<span class="blob-cell ' + kind + '"' + title + '>' + text + '</span>'
         }).join('')
@@ -3481,16 +3488,16 @@ function indexHtml() {
         streamBlobTotal += Number(streamUsed || 0)
         if (streamUsed && latestStreamSlot == null) latestStreamSlot = row.slot
         const jump = jumpSequence != null
-          ? '<button class="slot-jump" type="button" data-sequence="' + jumpSequence + '" data-stream-id="' + jumpStreamId + '" title="Tune this stream and jump to this segment">JUMP</button>'
+          ? '<button class="slot-jump" type="button" data-sequence="' + escapeHtml(jumpSequence) + '" data-stream-id="' + escapeHtml(jumpStreamId) + '" title="Tune this stream and jump to this segment">JUMP</button>'
           : ''
         return '<section class="slot">' +
           '<div class="slot-top"><strong>Slot ' + row.slot + '</strong><span>' + used + ' / ' + max + ' blobs' + (streamUsed ? ' · ' + streamUsed + ' Milady' : '') + '</span></div>' +
           jump +
           slotTimeMarkup(row.timestampMs) +
           '<div class="blob-grid">' + cells + '</div>' +
-          (row.error ? '<div class="slot-error">' + row.error + '</div>' : '') +
+          (row.error ? '<div class="slot-error">' + escapeHtml(row.error) + '</div>' : '') +
         '</section>'
-      }).join('') || '<div class="muted">' + (blobspace.warning || 'No blob sidecar rows available yet.') + '</div>'
+      }).join('') || '<div class="muted">' + escapeHtml(blobspace.warning || 'No blob sidecar rows available yet.') + '</div>'
       blobSignal = { count: streamBlobTotal, latestSlot: latestStreamSlot }
     }
 
