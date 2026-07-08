@@ -863,7 +863,7 @@ function render() {
   els.metricPayload.textContent = activeRecord ? fmtBytes(activeRecord.bytes) : latestSegment ? fmtBytes(latestSegment.payloadBytes) : '-'
   els.metricBlobs.textContent = latestSegment ? String(latestSegment.blobCount || '-') : '-'
   els.metricLatency.textContent = latestSegment ? fmtLatency(latestSegment) : '-'
-  els.metricFetch.textContent = state.activeBeaconApi ? 'ok / ok' : '- / -'
+  els.metricFetch.textContent = latestSegment && state.activeBeaconApi ? 'ok / ok' : '- / -'
   renderHealth()
   renderBlobspace()
   els.segments.innerHTML = state.segments.map((segment) => {
