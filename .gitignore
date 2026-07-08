@@ -16,6 +16,21 @@ __pycache__/
 work/
 video/*.pdf
 
+# Local-only media/avatar/narration generation sidecar files.
+# The public repo keeps the MP4/WebM -> blob transport path only.
+video/ef-mandate-normalized.md
+scripts/archive-nft-media.mjs
+scripts/create-fumo-avatar-scene.py
+scripts/generate-avatar-background-composite-smoke.py
+scripts/generate-clock-segments.mjs
+scripts/generate-kokoro-narration.mjs
+scripts/generate-kokoro-narration.py
+scripts/generate-mandate-scroll-test.py
+scripts/generate-radio-free-ethereum-mockups.py
+scripts/prepare-fumo-avatar-assets.mjs
+scripts/run-blender-avatar-build.mjs
+scripts/segment-proof-video.mjs
+
 # Generated outputs
 dist/
 build/
