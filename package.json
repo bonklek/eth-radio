@@ -22,6 +22,7 @@
     "demo:live": "node scripts/serve-live-demo.mjs",
     "web:build": "node scripts/build-static-client.mjs",
     "web:ipfs:prepare": "node scripts/prepare-ipfs-publish.mjs",
+    "web:serve": "node scripts/serve-static-client.mjs --build --dist",
     "web:static": "node scripts/verify-static-client.mjs"
   },
   "dependencies": {

@@ -124,10 +124,13 @@ Operational notes:
   static app. Station contracts, source, public protocol docs, and published
   media metadata are intended to be public.
 
-To preview locally, open `public/decentralized/index.html` from a static server:
+To preview locally with the same files that are published to IPFS:
 
 ```powershell
-python -m http.server 8080 -d public/decentralized
+pnpm web:serve
 ```
 
-Then visit `http://127.0.0.1:8080/`.
+Then visit the printed local URL. This server is only a static file server; it
+does not provide watcher APIs. Local testing should use the same browser
+execution RPC, beacon API, IndexedDB cache, blobspace rail, and playback path as
+the hosted IPFS client.
