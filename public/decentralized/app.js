@@ -1005,7 +1005,7 @@ on(els.loopToggle, 'click', () => {
 })
 on(els.muteToggle, 'click', () => {
   els.player.muted = !els.player.muted
-  els.muteToggle.textContent = els.player.muted ? 'M' : 'V'
+  els.muteToggle.innerHTML = els.player.muted ? '&#128263;' : '&#128266;'
 })
 on(els.volume, 'input', () => {
   els.player.volume = Number(els.volume.value)
