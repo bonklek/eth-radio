@@ -25,6 +25,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -142,6 +143,7 @@ label {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -152,6 +154,10 @@ textarea {
 }
 
 input {
+  min-height: 36px;
+}
+
+select {
   min-height: 36px;
 }
 

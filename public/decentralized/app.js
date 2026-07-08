@@ -1,4 +1,24 @@
+const CHAIN_PRESETS = {
+  sepolia: {
+    label: 'Sepolia',
+    streamId: 'rfe-baked-clock-pipe-v6',
+    stationAddress: '0x060c51d481808b506dfae72f054f39e11e4f4017',
+    fromBlock: '11226386',
+    executionRpcs: ['https://sepolia.drpc.org', 'https://ethereum-sepolia-rpc.publicnode.com'],
+    beaconApis: ['https://ethereum-sepolia-beacon-api.publicnode.com'],
+  },
+  mainnet: {
+    label: 'Mainnet',
+    streamId: 'rfe-mainnet-live',
+    stationAddress: '',
+    fromBlock: '0',
+    executionRpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth-mainnet.g.alchemy.com/public'],
+    beaconApis: ['https://ethereum-beacon-api.publicnode.com'],
+  },
+}
+
 const DEFAULTS = {
+  chainPreset: 'sepolia',
   streamId: 'rfe-baked-clock-pipe-v6',
   stationAddress: '0x060c51d481808b506dfae72f054f39e11e4f4017',
   fromBlock: '11226386',
@@ -14,6 +34,7 @@ const DB_NAME = 'radio-free-ethereum'
 const DB_VERSION = 2
 const els = {
   form: document.querySelector('#settings'),
+  chainPreset: document.querySelector('#chain-preset'),
   streamId: document.querySelector('#stream-id'),
   stationAddress: document.querySelector('#station-address'),
   fromBlock: document.querySelector('#from-block'),
@@ -62,11 +83,15 @@ function unique(values) {
 
 function loadConfig() {
   const saved = JSON.parse(localStorage.getItem('rfe-static-config') || '{}')
+  const preset = CHAIN_PRESETS[saved.chainPreset] ? saved.chainPreset : DEFAULTS.chainPreset
+  const presetDefaults = CHAIN_PRESETS[preset]
   return {
     ...DEFAULTS,
+    ...presetDefaults,
     ...saved,
-    executionRpcs: unique(saved.executionRpcs || saved.executionRpc ? parseLines(saved.executionRpcs || saved.executionRpc) : DEFAULTS.executionRpcs),
-    beaconApis: unique(saved.beaconApis || saved.beaconApi ? parseLines(saved.beaconApis || saved.beaconApi) : DEFAULTS.beaconApis),
+    chainPreset: preset,
+    executionRpcs: unique(saved.executionRpcs || saved.executionRpc ? parseLines(saved.executionRpcs || saved.executionRpc) : presetDefaults.executionRpcs),
+    beaconApis: unique(saved.beaconApis || saved.beaconApi ? parseLines(saved.beaconApis || saved.beaconApi) : presetDefaults.beaconApis),
     archiveTemplates: unique(saved.archiveTemplates ? parseLines(saved.archiveTemplates) : DEFAULTS.archiveTemplates),
     logWindowBlocks: Number(saved.logWindowBlocks || DEFAULTS.logWindowBlocks),
     cacheLimitMb: Number(saved.cacheLimitMb || DEFAULTS.cacheLimitMb),
@@ -236,6 +261,7 @@ function toBlockHex(block) {
 }
 
 async function fetchLogs() {
+  if (!state.config.stationAddress) throw new Error(`Set a Station address for ${state.config.chainPreset}.`)
   const headHex = await rpc('eth_blockNumber')
   const head = BigInt(headHex)
   els.headBlock.textContent = head.toString()
@@ -578,6 +604,10 @@ function stopStreaming() {
 }
 
 function fillForm() {
+  els.chainPreset.innerHTML = Object.entries(CHAIN_PRESETS)
+    .map(([key, preset]) => `<option value="${key}">${preset.label}</option>`)
+    .join('')
+  els.chainPreset.value = state.config.chainPreset
   els.streamId.value = state.config.streamId
   els.stationAddress.value = state.config.stationAddress
   els.fromBlock.value = state.config.fromBlock
@@ -608,6 +638,7 @@ els.form.addEventListener('submit', (event) => {
   event.preventDefault()
   state.config = {
     ...state.config,
+    chainPreset: els.chainPreset.value,
     streamId: els.streamId.value.trim() || DEFAULTS.streamId,
     stationAddress: els.stationAddress.value.trim() || DEFAULTS.stationAddress,
     fromBlock: els.fromBlock.value.trim() || DEFAULTS.fromBlock,
@@ -623,6 +654,15 @@ els.form.addEventListener('submit', (event) => {
   state.activeBeaconApi = ''
   render()
   void refresh()
+})
+
+els.chainPreset.addEventListener('change', () => {
+  const preset = CHAIN_PRESETS[els.chainPreset.value] || CHAIN_PRESETS[DEFAULTS.chainPreset]
+  els.streamId.value = preset.streamId
+  els.stationAddress.value = preset.stationAddress
+  els.fromBlock.value = preset.fromBlock
+  els.executionRpcs.value = preset.executionRpcs.join('\n')
+  els.beaconApis.value = preset.beaconApis.join('\n')
 })
 
 els.refresh.addEventListener('click', () => void refresh())

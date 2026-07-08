@@ -22,11 +22,15 @@ contract before playback or cache insertion.
 
 ## Endpoint Fallbacks
 
-The client accepts newline-separated execution RPCs and beacon REST APIs. It
-tries each endpoint in order for every request, records the active working
-endpoint in the UI, and keeps going when a provider rejects a browser request or
-temporarily fails. These endpoints must be CORS-friendly because the requests are
-made directly by the browser.
+The client accepts newline-separated execution RPCs and beacon REST APIs. Sepolia
+is the default preset while the project is still proving the end-to-end flow.
+Mainnet presets are present so the UI is ready, but mainnet should not be used
+until a mainnet Station address and deployment block are configured.
+
+The client tries each endpoint in order for every request, records the active
+working endpoint in the UI, and keeps going when a provider rejects a browser
+request or temporarily fails. These endpoints must be CORS-friendly because the
+requests are made directly by the browser.
 
 Execution endpoints must support:
 
@@ -40,11 +44,22 @@ Beacon endpoints must support:
 - `/eth/v1/beacon/genesis`
 - `/eth/v1/beacon/blob_sidecars/{slot}`
 
+Reliability guidance:
+
+- Use at least two execution RPCs and one beacon API per chain.
+- Prefer endpoints that can be called from browsers without custom secret
+  headers. API keys embedded in frontend code are public, not secret.
+- Public endpoints are useful fallbacks, but operators should expect rate limits
+  and method limits. A paid/provider endpoint can be added by the viewer or
+  stream operator when reliability matters.
+- Test the exact methods the client uses; simple ping checks are not enough.
+
 ## Archival Fallbacks
 
-Beacon nodes are not required to serve old blob sidecars forever. For old
-segments, configure archival payload URL templates. The client replaces these
-tokens:
+Beacon nodes are not required to serve old blob sidecars forever. This project is
+currently live-first, so archival mirrors are optional and can stay empty while
+the static IPFS page is being tested. For older durable playback later, configure
+archival payload URL templates. The client replaces these tokens:
 
 - `{streamId}`
 - `{sequence}`
@@ -82,6 +97,21 @@ pnpm web:static
 
 The build output is `dist/decentralized/`. Pin or upload that directory to IPFS,
 Arweave, Filecoin, or another static host.
+
+To prepare for IPFS without publishing yet:
+
+```powershell
+pnpm web:ipfs:prepare
+```
+
+If an IPFS CLI is installed, this prints a dry-run CID and the DNSLink TXT value.
+It does not pin or publish content.
+
+DNSLink for a friend's subdomain should look like:
+
+```text
+_dnslink.radio.example.com TXT "dnslink=/ipfs/<CID>"
+```
 
 Operational notes:
 

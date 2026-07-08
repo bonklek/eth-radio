@@ -22,8 +22,8 @@ Use this checklist when publishing Radio Free Ethereum without a public backend.
 
 - At least one browser-accessible execution RPC with CORS.
 - At least one browser-accessible beacon REST API with CORS.
-- Archive payload mirrors for any segment older than the blob sidecar retention
-  window, unless short-lived playback is acceptable.
+- For the current live-first Sepolia phase, archive mirrors are optional. Old
+  segments may stop playing after blob sidecars fall out of normal availability.
 - A static host or content-addressed network that can serve `index.html`,
   `styles.css`, and `app.js` unchanged.
 
@@ -44,6 +44,12 @@ pnpm web:static
 ```
 
 Pin `dist/decentralized/` to the desired network. For DNS:
+
+Prepare the IPFS publish metadata without pinning:
+
+```powershell
+pnpm web:ipfs:prepare
+```
 
 - IPFS: use DNSLink or a gateway CNAME.
 - Arweave/Filecoin: point the domain or subdomain at the chosen gateway or

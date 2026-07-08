@@ -26,8 +26,10 @@ if (!app.includes('withEndpointFallback')) throw new Error('Static client should
 if (!app.includes('enforceCacheLimit')) throw new Error('Static client should manage browser cache limits')
 
 const html = fs.readFileSync(path.join(staticDir, 'index.html'), 'utf8')
-for (const id of ['execution-rpcs', 'beacon-apis', 'archive-templates', 'cache-limit']) {
+for (const id of ['chain-preset', 'execution-rpcs', 'beacon-apis', 'archive-templates', 'cache-limit']) {
   if (!html.includes(`id="${id}"`)) throw new Error(`Missing static client control: ${id}`)
 }
+if (!app.includes('CHAIN_PRESETS')) throw new Error('Static client should expose chain endpoint presets')
+if (!app.includes('mainnet')) throw new Error('Static client should include mainnet endpoint readiness')
 
 console.log(`static client ok: ${staticDir}`)

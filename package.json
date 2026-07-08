@@ -21,6 +21,7 @@
     "blob:reconstruct": "node scripts/reconstruct-blob-media.mjs",
     "demo:live": "node scripts/serve-live-demo.mjs",
     "web:build": "node scripts/build-static-client.mjs",
+    "web:ipfs:prepare": "node scripts/prepare-ipfs-publish.mjs",
     "web:static": "node scripts/verify-static-client.mjs"
   },
   "dependencies": {
