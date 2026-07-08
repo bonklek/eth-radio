@@ -12,10 +12,15 @@ function usage() {
                        [--width 640] [--height 360] [--fps 24]
                        [--video-bitrate 360k] [--audio-bitrate 32k] [--no-audio]
                        [--max-blobs 6] [--max-bytes 761856] [--pace] [--reset]
+                       (--input-has-overlay | --allow-raw-test)
 
 Writes one slot-aligned segment at a time and updates <stream-id>.segments.json
 after each segment. Start the pipelined publisher before this generator when
 running a live publish.
+
+Overlay is mandatory for broadcast publishing. Use --input-has-overlay only
+when the input video already contains the required RFE overlay in its pixels.
+Use --allow-raw-test only for an explicitly approved raw publish test.
 `)
   process.exit(1)
 }
@@ -101,11 +106,21 @@ const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
 const noAudio = hasFlag('no-audio')
 const pace = hasFlag('pace')
 const reset = hasFlag('reset')
+const inputHasOverlay = hasFlag('input-has-overlay')
+const allowRawTest = hasFlag('allow-raw-test')
 const maxSegmentsArg = arg('max-segments')
 const maxSegments = maxSegmentsArg == null ? null : Number(maxSegmentsArg)
 const segmentSeconds = segmentMs / 1000
 const durationMs = probeDurationMs(inputPath)
 
+if (!inputHasOverlay && !allowRawTest) {
+  throw new Error(
+    'Overlay is mandatory by default. Pass --input-has-overlay for already-overlaid input, or --allow-raw-test only for an explicitly approved raw publish test.',
+  )
+}
+if (inputHasOverlay && allowRawTest) {
+  throw new Error('Choose only one of --input-has-overlay or --allow-raw-test')
+}
 if (!Number.isFinite(segmentMs) || segmentMs <= 0) throw new Error(`Invalid --segment-ms ${segmentMs}`)
 if (!Number.isInteger(startSeq) || startSeq < 0) throw new Error(`Invalid --start-seq ${startSeq}`)
 if (maxSegments != null && (!Number.isInteger(maxSegments) || maxSegments < 1)) {
@@ -130,6 +145,7 @@ let manifest = fs.existsSync(manifestPath)
       videoBitrate,
       audioBitrate: noAudio ? null : audioBitrate,
       codec: noAudio ? 'av1/webm' : 'av1-opus/webm',
+      overlay: inputHasOverlay ? 'input-has-overlay' : 'raw-test-approved',
       createdAt: new Date().toISOString(),
       segments: [],
     }
@@ -137,6 +153,7 @@ let manifest = fs.existsSync(manifestPath)
 manifest = {
   ...manifest,
   outDir,
+  overlay: inputHasOverlay ? 'input-has-overlay' : 'raw-test-approved',
   updatedAt: new Date().toISOString(),
 }
 atomicWriteJson(manifestPath, manifest)

@@ -32,9 +32,11 @@ Still needed or in progress:
 - A production command that takes raw/avatar footage plus live proof metadata
   and emits already-overlaid segment payloads ready for blob publishing.
 
-Until that compositor exists, do not run a public or hackathon publish that
-requires a burned-in overlay. First generate a local segment and play that
-segment directly to prove the overlay is inside the video pixels.
+Overlay is mandatory by default for every public, demo, hackathon, or user-facing
+publish. Until the compositor exists, do not publish unless the input video
+already has the required RFE overlay burned into its pixels, or the operator
+explicitly approves a raw publish test in writing. First generate a local segment
+and play that segment directly to prove the overlay is inside the video pixels.
 
 Do not describe raw-video publishing as complete broadcast overlay publishing.
 `scripts/segment-av1-webm.mjs` segments an already-composited input. It does not
@@ -256,9 +258,9 @@ pnpm media:segment -- `
   --audio-bitrate <bitrate>
 ```
 
-For raw or already-composited input tests where no burn-in compositor is being
-used, use the incremental live generator instead of pre-segmenting the whole
-input:
+For already-overlaid input where no burn-in compositor is being used, use the
+incremental live generator instead of pre-segmenting the whole input. The input
+must already contain the required RFE overlay in its pixels:
 
 ```powershell
 pnpm live:segment -- `
@@ -273,8 +275,13 @@ pnpm live:segment -- `
   --audio-bitrate <bitrate> `
   --max-blobs <blob-cap> `
   --max-bytes <byte-cap> `
-  --pace
+  --pace `
+  --input-has-overlay
 ```
+
+Raw input without overlay is not a valid broadcast path. A raw publish test must
+be explicitly approved by the operator and must pass `--allow-raw-test` so the
+exception is visible in the command and manifest.
 
 `pnpm live:run -- --publish` is not the correct long live-stream path because
 it segments first and publishes afterward.
