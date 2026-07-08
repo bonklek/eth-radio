@@ -305,6 +305,41 @@ video {
 .volume {
   width: 118px;
   accent-color: var(--mint);
+  appearance: none;
+  height: 14px;
+  background: transparent;
+}
+
+.volume::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 1px solid #303744;
+  border-radius: 999px;
+  background: #2a2f38;
+}
+
+.volume::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border: 1px solid #d8e4ff;
+  border-radius: 50%;
+  background: #f4f7ff;
+}
+
+.volume::-moz-range-track {
+  height: 4px;
+  border: 1px solid #303744;
+  border-radius: 999px;
+  background: #2a2f38;
+}
+
+.volume::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 1px solid #d8e4ff;
+  border-radius: 50%;
+  background: #f4f7ff;
 }
 
 .metrics {
