@@ -35,11 +35,11 @@ const DB_VERSION = 3
 const MAX_BLOBS_PER_BLOCK = 21
 const SLOT_WINDOW = 10
 const DEFAULT_BLOBSPACE_ROWS = [
-  { slot: 14725457, blobCount: 0 },
-  { slot: 14725456, blobCount: 6 },
-  { slot: 14725455, blobCount: 4 },
-  { slot: 14725454, blobCount: 0 },
-  { slot: 14725453, blobCount: 6 },
+  { slot: 14725457, blobCount: 0, localTime: 'Jul 8, 12:51:47 PM' },
+  { slot: 14725456, blobCount: 6, localTime: 'Jul 8, 12:51:35 PM' },
+  { slot: 14725455, blobCount: 4, localTime: 'Jul 8, 12:51:23 PM' },
+  { slot: 14725454, blobCount: 0, localTime: 'Jul 8, 12:51:11 PM' },
+  { slot: 14725453, blobCount: 6, localTime: 'Jul 8, 12:50:59 PM' },
 ]
 const els = {
   form: document.querySelector('#settings'),
@@ -850,7 +850,7 @@ function renderBlobspace() {
           <strong>Slot ${escapeHtml(row.slot)}</strong>
           <span>${Number(row.blobCount || blobs.length)} / ${max} blobs${streamCount ? ` - ${streamCount} stream` : ''}</span>
         </div>
-        <div class="slot-meta"><span><strong>Local</strong> ${escapeHtml(fmtLocalTime(row.timestampMs))}</span><span>${row.error ? 'endpoint miss' : ''}</span></div>
+        <div class="slot-meta"><span><strong>Local</strong> ${escapeHtml(row.localTime || fmtLocalTime(row.timestampMs))}</span><span>${row.error ? 'endpoint miss' : ''}</span></div>
         <div class="blob-grid">${cells}</div>
         ${row.error ? `<div class="slot-error">${escapeHtml(row.error)}</div>` : ''}
       </section>
