@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { bytesToHex, toBlobs } from 'viem'
+import { runCostPreflightOrExit, serializableCostReport } from './lib/cost-preflight.mjs'
 
 const profiles = {
   '360p24': { width: 640, height: 360, fps: 24, videoBitrate: '420k', maxBlobs: 6 },
@@ -22,6 +23,7 @@ function usage() {
   pnpm live:run -- --input <video> --stream-id <id> [--profile 360p24] [--segment-ms 12000]
                     [--publish] [--reset] [--no-audio] [--out-dir <dir>]
                     [--max-blobs 6] [--max-bytes 761856] [--no-adaptive]
+                    [--max-cost-eth 0.1] [--cost-safety-multiplier 1.25]
 
 Profiles:
   360p24: 640x360 AV1 WebM @ 420k, 6 blob cap
@@ -340,6 +342,8 @@ try {
     maxBytes,
     maxBlobs,
   })
+  const costReport = await runCostPreflightOrExit({ segments: status.segments, segmentMs: chosen.candidate.segmentMs })
+  if (costReport) status.costPreflight = serializableCostReport(costReport)
 
   if (
     chosen.candidate.profileName !== profileName ||

@@ -1059,6 +1059,7 @@ function overlayHtml() {
       </div>
 
       <section class="lower" aria-label="Current segment">
+        <div class="lower-panel-mask" aria-hidden="true"></div>
         <div class="status-label">Now Reading</div>
         <div id="readingTitle" class="reading-title">The Ethereum Foundation Mandate</div>
         <dl class="telemetry">
@@ -1301,7 +1302,7 @@ function overlayPreviewHtml() {
       background:
         linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
         linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
-        rgba(48, 51, 67, .92);
+        #303343;
       background-size: 8px 8px, 8px 8px, auto;
       box-shadow:
         inset 1px 1px 0 rgba(255, 255, 255, .07),
@@ -1353,42 +1354,12 @@ function overlayPreviewHtml() {
       z-index: 2;
     }
 
-    .status-label {
+    .lower-panel-mask {
       position: absolute;
-      left: 64px;
-      top: 936px;
-      display: none;
-      color: #c6ccff;
-      font: 900 24px/1 Arial, "Segoe UI", sans-serif;
-      text-transform: uppercase;
-    }
-
-    .reading-title {
-      position: absolute;
-      left: 64px;
-      top: 1007px;
-      width: 740px;
-      display: none;
-      color: #f0f1f8;
-      font: 900 42px/1 Arial, "Segoe UI", sans-serif;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      text-shadow: 2px 2px 0 #000;
-    }
-
-    .telemetry {
-      position: absolute;
-      inset: 0;
-      z-index: 3;
-    }
-
-    .telemetry-mask {
-      position: absolute;
-      left: 756px;
-      top: 990px;
-      width: 1068px;
-      height: 90px;
+      left: 36px;
+      top: 916px;
+      width: 1848px;
+      height: 144px;
       border: 1px solid #252838;
       border-radius: 6px;
       background:
@@ -1397,6 +1368,48 @@ function overlayPreviewHtml() {
         #11131a;
       background-size: 8px 8px, 8px 8px, auto;
       box-shadow: inset -3px -3px 0 rgba(0, 0, 0, .42), inset 2px 2px 0 rgba(255, 255, 255, .04);
+      z-index: 2;
+    }
+
+    .status-label {
+      position: absolute;
+      left: 64px;
+      top: 936px;
+      display: block;
+      color: #c6ccff;
+      font: 900 24px/1 Arial, "Segoe UI", sans-serif;
+      text-transform: uppercase;
+      z-index: 3;
+    }
+
+    .reading-title {
+      position: absolute;
+      left: 64px;
+      top: 1007px;
+      width: 740px;
+      display: block;
+      color: #f0f1f8;
+      font: 900 42px/1 Arial, "Segoe UI", sans-serif;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-shadow: 2px 2px 0 #000;
+      z-index: 3;
+    }
+
+    .telemetry {
+      position: absolute;
+      inset: 0;
+      z-index: 4;
+    }
+
+    .telemetry-mask {
+      position: absolute;
+      left: 756px;
+      top: 990px;
+      width: 1068px;
+      height: 90px;
+      background: transparent;
       z-index: 0;
     }
 
@@ -1438,7 +1451,7 @@ function overlayPreviewHtml() {
     .controls {
       position: fixed;
       left: 16px;
-      bottom: 16px;
+      top: 16px;
       display: flex;
       align-items: center;
       gap: 10px;
@@ -1483,7 +1496,7 @@ function overlayPreviewHtml() {
     .debug-drawer {
       position: fixed;
       right: 16px;
-      bottom: 72px;
+      top: 72px;
       width: min(420px, calc(100vw - 32px));
       padding: 12px;
       border: 1px solid var(--border);
@@ -1537,6 +1550,7 @@ function overlayPreviewHtml() {
           <div id="slot" class="chip">SLOT --</div>
           <div id="nonce" class="chip">SEQ --</div>
           <div id="blockHash" class="chip">BLOCK --</div>
+          <div class="lower-panel-mask" aria-hidden="true"></div>
           <div class="status-label">Now Reading</div>
           <div class="reading-title">The Ethereum Foundation Mandate</div>
           <dl class="telemetry">
@@ -2839,6 +2853,7 @@ function indexHtml() {
     let loopReplay = false
     let refreshSpinTimer = null
     const segmentsPaneHeightKey = 'rfe-segments-pane-height'
+    let lastBlobspaceUpdateAt = 0
 
     const fmtBytes = (bytes) => bytes ? (bytes / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' KB' : '-'
     const fmtMs = (ms) => Number.isFinite(ms) ? Math.round(ms) + ' ms' : '-'
@@ -3378,13 +3393,23 @@ function indexHtml() {
         segments = data.segments || []
         if (segments.length) lastEventAt = Date.parse(segments.at(-1).createdAt || Date.now())
         renderRail(data.blobspace || { rows: [], maxBlobsPerBlock: 21 })
+        lastBlobspaceUpdateAt = Date.now()
         renderSegments()
-        await fillBuffer()
+        await fillBuffer().catch((error) => {
+          nowDetail.textContent = 'Blobspace feed is live; media prefetch is retrying: ' + error.message
+        })
         renderSegments()
         chooseState()
       } catch (error) {
-        blackoutVideo()
-        setState('interrupted', 'Tuner interrupted', error.message)
+        if (lastBlobspaceUpdateAt && Date.now() - lastBlobspaceUpdateAt < 15_000) {
+          statusEl.textContent = 'retrying'
+          nowDetail.textContent = 'Blobspace feed is still visible; retrying API fetch: ' + error.message
+          overlayTitle.textContent = 'Retrying tuner fetch'
+          overlayCopy.textContent = error.message
+        } else {
+          blackoutVideo()
+          setState('interrupted', 'Tuner interrupted', error.message)
+        }
       } finally {
         polling = false
         refreshSpinTimer = setTimeout(() => refresh.classList.remove('is-spinning'), 650)
