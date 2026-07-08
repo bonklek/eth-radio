@@ -30,8 +30,9 @@ import {
 
 const chains = { sepolia }
 
-function usage() {
-  console.error(`Usage:
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm live:publish:pipelined -- --dir <segment-dir> --stream-id <id>
        [--segment-ms 24000] [--codec av1-opus/webm] [--start-seq 0]
        [--max-blobs 6] [--max-bytes 761856] [--poll-ms 1000]
@@ -44,7 +45,7 @@ Environment:
   ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=sepolia
   optional ETH_SEND_RPC_URLS comma-separated fallback list
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
 function arg(name, fallback) {
@@ -56,6 +57,8 @@ function arg(name, fallback) {
 function hasFlag(name) {
   return process.argv.includes(`--${name}`)
 }
+
+if (hasFlag('help')) usage(0)
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))

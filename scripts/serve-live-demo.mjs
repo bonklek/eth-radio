@@ -25,6 +25,7 @@ const liveRunDir = path.join(root, 'work', 'blob-radio-testnet', 'live-runs')
 const overlayAssetDir = fs.existsSync(path.join(root, 'public', 'rfe-assets'))
   ? path.join(root, 'public', 'rfe-assets')
   : path.join(root, 'work', 'radio-free-ethereum', 'final')
+const previewVideoFile = process.env.PREVIEW_VIDEO_FILE || ''
 const maxBlobsPerBlock = Number(process.env.MAX_BLOBS_PER_BLOCK || 21)
 const slotWindow = Number(process.env.SLOT_WINDOW || 8)
 const slotMetricsCacheMs = Number(process.env.SLOT_METRICS_CACHE_MS || 2000)
@@ -722,12 +723,12 @@ async function ensureMedia(segment) {
   return promise
 }
 
-function sendMedia(request, response, mediaPath) {
+function sendMedia(request, response, mediaPath, contentType = 'video/webm') {
   const stat = fs.statSync(mediaPath)
   const range = request.headers.range
   if (!range) {
     response.writeHead(200, {
-      'content-type': 'video/webm',
+      'content-type': contentType,
       'content-length': stat.size,
       'accept-ranges': 'bytes',
       'cache-control': 'no-store',
@@ -742,7 +743,7 @@ function sendMedia(request, response, mediaPath) {
   if (start >= stat.size || end >= stat.size || start > end) return send(response, 416, 'range not satisfiable')
 
   response.writeHead(206, {
-    'content-type': 'video/webm',
+    'content-type': contentType,
     'content-length': end - start + 1,
     'content-range': `bytes ${start}-${end}/${stat.size}`,
     'accept-ranges': 'bytes',
@@ -754,6 +755,8 @@ function sendMedia(request, response, mediaPath) {
 function assetContentType(filePath) {
   const ext = path.extname(filePath).toLowerCase()
   if (ext === '.png') return 'image/png'
+  if (ext === '.mp4') return 'video/mp4'
+  if (ext === '.webm') return 'video/webm'
   if (ext === '.json') return 'application/json; charset=utf-8'
   if (ext === '.css') return 'text/css; charset=utf-8'
   if (ext === '.js') return 'text/javascript; charset=utf-8'
@@ -761,9 +764,19 @@ function assetContentType(filePath) {
 }
 
 function sendOverlayAsset(response, name) {
-  const allowed = new Set(['rfe-terminal-final.png', 'rfe-logo-milxdy.png', 'rfe-style-tokens.json'])
-  if (!allowed.has(name)) return send(response, 404, 'asset not found')
-  const filePath = path.join(overlayAssetDir, name)
+  const normalized = name.replace(/\\/g, '/')
+  const allowed = new Set([
+    'rfe-terminal-final.png',
+    'rfe-logo-milxdy.png',
+    'rfe-style-tokens.json',
+    'overlays/rfe-terminal-360p.png',
+    'overlays/rfe-terminal-420p.png',
+    'overlays/rfe-terminal-480p.png',
+    'overlays/rfe-terminal-720p.png',
+    'overlays/rfe-terminal-1080p.png',
+  ])
+  if (!allowed.has(normalized)) return send(response, 404, 'asset not found')
+  const filePath = path.join(overlayAssetDir, ...normalized.split('/'))
   if (!fs.existsSync(filePath)) return send(response, 404, 'asset not found')
   send(response, 200, fs.readFileSync(filePath), {
     'content-type': assetContentType(filePath),
@@ -837,6 +850,7 @@ function overlayHtml() {
       inset: 0;
       width: 1920px;
       height: 1080px;
+      clip-path: inset(0 0 188px 0);
       pointer-events: none;
       user-select: none;
     }
@@ -847,7 +861,7 @@ function overlayHtml() {
       background:
         linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
         linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
-        var(--surface-1);
+        var(--surface-2);
       background-size: 8px 8px, 8px 8px, auto;
       box-shadow:
         inset 1px 1px 0 var(--highlight),
@@ -879,6 +893,17 @@ function overlayHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       letter-spacing: 0;
+      z-index: 2;
+    }
+
+    .top-telemetry-mask {
+      position: absolute;
+      left: 660px;
+      top: 24px;
+      width: 1168px;
+      height: 64px;
+      background: #181a24;
+      z-index: 1;
     }
 
     #timeUtc { left: 672px; width: 236px; }
@@ -888,9 +913,9 @@ function overlayHtml() {
       padding: 0 11px;
       font-size: 22px;
     }
-    #slot { left: 922px; width: 198px; }
-    #nonce { left: 1135px; width: 252px; }
-    #blockHash { left: 1402px; width: 412px; }
+    #slot { left: 922px; width: 238px; }
+    #nonce { left: 1174px; width: 252px; }
+    #blockHash { left: 1440px; width: 374px; }
 
     .network-signal {
       position: absolute;
@@ -913,9 +938,9 @@ function overlayHtml() {
     .lower {
       position: absolute;
       left: 36px;
-      top: 916px;
+      top: 948px;
       width: 1848px;
-      height: 144px;
+      height: 112px;
       pointer-events: none;
       z-index: 3;
     }
@@ -928,7 +953,7 @@ function overlayHtml() {
       background:
         linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
         linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
-        var(--surface);
+        var(--surface-1);
       background-size: 8px 8px, 8px 8px, auto;
       box-shadow: inset -3px -3px 0 rgba(0, 0, 0, .42), inset 2px 2px 0 rgba(255, 255, 255, .04);
       z-index: 0;
@@ -937,7 +962,7 @@ function overlayHtml() {
     .status-label {
       position: absolute;
       left: 28px;
-      top: 19px;
+      top: 18px;
       display: block;
       color: var(--accent);
       font: 900 24px/1 var(--ui);
@@ -949,8 +974,8 @@ function overlayHtml() {
     .reading-title {
       position: absolute;
       left: 28px;
-      top: 91px;
-      width: 740px;
+      top: 59px;
+      width: 690px;
       display: block;
       color: var(--text);
       font: 900 42px/1 var(--ui);
@@ -964,23 +989,29 @@ function overlayHtml() {
     .telemetry {
       position: absolute;
       inset: 0;
+      margin: 0;
       z-index: 3;
     }
 
     .telemetry-mask {
       position: absolute;
-      left: 720px;
-      top: 74px;
-      width: 1068px;
-      height: 98px;
-      background: transparent;
+      left: 792px;
+      top: 39px;
+      width: 1040px;
+      height: 72px;
+      border-radius: 6px;
+      background:
+        linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
+        var(--surface-1);
+      background-size: 8px 8px, 8px 8px, auto;
       z-index: 0;
     }
 
     .telemetry-card {
       position: absolute;
-      top: 93px;
-      height: 42px;
+      top: 50px;
+      height: 54px;
       padding: 0;
       border: 0;
       border-radius: 0;
@@ -997,10 +1028,10 @@ function overlayHtml() {
     .telemetry-card.prev { left: 1512px; width: 244px; }
 
     .telemetry-card dt {
-      margin: 0 0 5px;
+      margin: 0 0 7px;
       color: var(--muted);
       text-transform: uppercase;
-      font: 700 13px/1 var(--mono);
+      font: 800 15px/1 var(--mono);
     }
 
     .telemetry-card dd {
@@ -1010,7 +1041,7 @@ function overlayHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 700 17px/1 var(--mono);
+      font: 800 21px/1 var(--mono);
     }
 
     .ticker-viewport {
@@ -1045,9 +1076,10 @@ function overlayHtml() {
 <body>
   <div class="viewport">
     <main id="overlay" class="overlay" aria-label="Radio Free Ethereum livestream overlay">
-      <img class="reference" src="/rfe-assets/rfe-terminal-final.png" alt="" aria-hidden="true" />
+      <img id="overlayShell" class="reference" src="/rfe-assets/overlays/rfe-terminal-1080p.png" alt="" aria-hidden="true" />
       <div id="networkSignal" class="network-signal">PUBLIC SIGNAL / ${networkLabel(defaultNetwork).toUpperCase()}</div>
       <section class="topbar" aria-label="Live stream telemetry">
+        <div class="top-telemetry-mask" aria-hidden="true"></div>
         <div id="timeUtc" class="chip">--:--:-- UTC</div>
         <div id="slot" class="chip">SLOT --</div>
         <div id="nonce" class="chip">SEQ --</div>
@@ -1061,10 +1093,10 @@ function overlayHtml() {
       <section class="lower" aria-label="Current segment">
         <div class="lower-panel-mask" aria-hidden="true"></div>
         <div class="status-label">Now Reading</div>
-        <div id="readingTitle" class="reading-title">The Ethereum Foundation Mandate</div>
+        <div id="readingTitle" class="reading-title">The EF Mandate</div>
         <dl class="telemetry">
           <div class="telemetry-mask" aria-hidden="true"></div>
-          <div class="telemetry-card tx"><dt>TX</dt><dd id="txHash">--</dd></div>
+          <div class="telemetry-card tx"><dt>Prev TX</dt><dd id="txHash">--</dd></div>
           <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">--</dd></div>
           <div class="telemetry-card hash"><dt>Hash</dt><dd id="contentHash">--</dd></div>
           <div class="telemetry-card prev"><dt>Prev</dt><dd id="previousHash">--</dd></div>
@@ -1080,7 +1112,28 @@ function overlayHtml() {
     let selectedNetworkLabel = selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia'
     const preview = params.has('preview')
     const overlay = document.getElementById('overlay')
+    const overlayShell = document.getElementById('overlayShell')
     if (preview) document.body.classList.add('preview')
+
+    const overlayProfiles = {
+      '360p': { width: 640, height: 360, src: '/rfe-assets/overlays/rfe-terminal-360p.png' },
+      '420p': { width: 746, height: 420, src: '/rfe-assets/overlays/rfe-terminal-420p.png' },
+      '480p': { width: 854, height: 480, src: '/rfe-assets/overlays/rfe-terminal-480p.png' },
+      '720p': { width: 1280, height: 720, src: '/rfe-assets/overlays/rfe-terminal-720p.png' },
+      '1080p': { width: 1920, height: 1080, src: '/rfe-assets/overlays/rfe-terminal-1080p.png' },
+    }
+
+    function overlayShellFor(width, height) {
+      const explicitProfile = (params.get('profile') || '').toLowerCase()
+      if (overlayProfiles[explicitProfile]) return overlayProfiles[explicitProfile].src
+      const explicitWidth = Number(params.get('width') || width || 0)
+      const explicitHeight = Number(params.get('height') || height || 0)
+      const exact = Object.values(overlayProfiles).find((profile) => profile.width === explicitWidth && profile.height === explicitHeight)
+      if (exact) return exact.src
+      return overlayProfiles['1080p'].src
+    }
+
+    overlayShell.src = overlayShellFor()
 
     function scaleOverlay() {
       const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080)
@@ -1153,20 +1206,30 @@ function overlayHtml() {
       utcClock()
     }
 
-    function updateTicker(segment, blobspace) {
+    function updateTicker(segment, blobspace, segments) {
       const proof = segment && segment.proof ? segment.proof : {}
       const blockHash = segment && segment.blockHash ? segment.blockHash : proof.block && proof.block.hash
       const content = segment && (segment.payloadSha256Hex || segment.payloadSha256)
+      const previous = previousSegment(segment, segments)
       const text = [
         document.getElementById('timeUtc').textContent,
         'SLOT ' + ((segment && segment.slot) || (blobspace && blobspace.latestSlot) || '--'),
         'BLOCK ' + shorten(blockHash, 8, 4),
         proofOrSequenceLabel(segment, proof),
-        'TX ' + shorten(segment && segment.txHash, 8, 4),
+        'PREV TX ' + shorten(previous && previous.txHash, 8, 4),
         'PREV ' + shorten(segment && segment.previousSegmentHash, 8, 4),
         'CONTENT ' + shorten(content, 8, 4),
       ].join(' / ')
       document.getElementById('ticker').innerHTML = '<span>' + text + '</span><span aria-hidden="true">' + text + '</span>'
+    }
+
+    function previousSegment(segment, segments) {
+      if (!segment || segment.sequence == null) return null
+      const sequence = Number(segment.sequence)
+      return [...(segments || [])]
+        .filter((candidate) => Number(candidate.sequence) < sequence)
+        .sort((a, b) => Number(a.sequence) - Number(b.sequence))
+        .at(-1) || null
     }
 
     async function poll() {
@@ -1179,17 +1242,18 @@ function overlayHtml() {
         const proof = segment && segment.proof ? segment.proof : {}
         const blockHash = segment && segment.blockHash ? segment.blockHash : proof.block && proof.block.hash
         const latestSlot = data.blobspace && data.blobspace.latestSlot
+        const previous = previousSegment(segment, data.segments)
         updateStreamClock(segment)
         overlay.classList.toggle('offline', !segment)
         document.getElementById('slot').textContent = 'SLOT ' + (segment && segment.slot || latestSlot || '--')
         document.getElementById('nonce').textContent = proofOrSequenceLabel(segment, proof)
         document.getElementById('blockHash').textContent = 'BLOCK ' + shorten(blockHash, 8, 4)
-        document.getElementById('txHash').textContent = shorten(segment && segment.txHash, 10, 6)
+        document.getElementById('txHash').textContent = shorten(previous && previous.txHash, 10, 6)
         document.getElementById('payloadSize').textContent = formatBytes(segment && segment.payloadBytes)
         const content = segment && (segment.payloadSha256Hex || segment.payloadSha256)
         document.getElementById('contentHash').textContent = shorten(content, 10, 6)
         document.getElementById('previousHash').textContent = shorten(segment && segment.previousSegmentHash, 10, 6)
-        updateTicker(segment, data.blobspace)
+        updateTicker(segment, data.blobspace, data.segments)
       } catch (error) {
         overlay.classList.add('offline')
         document.getElementById('contentHash').textContent = error.message
@@ -1292,6 +1356,7 @@ function overlayPreviewHtml() {
       inset: 0;
       width: 1920px;
       height: 1080px;
+      clip-path: inset(0 0 188px 0);
       pointer-events: none;
       user-select: none;
     }
@@ -1323,6 +1388,17 @@ function overlayPreviewHtml() {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      z-index: 2;
+    }
+
+    .top-telemetry-mask {
+      position: absolute;
+      left: 660px;
+      top: 24px;
+      width: 1168px;
+      height: 64px;
+      background: #181a24;
+      z-index: 1;
     }
 
     #timeUtc { left: 672px; width: 236px; }
@@ -1332,9 +1408,9 @@ function overlayPreviewHtml() {
       padding: 0 11px;
       font-size: 22px;
     }
-    #slot { left: 922px; width: 198px; }
-    #nonce { left: 1135px; width: 252px; }
-    #blockHash { left: 1402px; width: 412px; }
+    #slot { left: 922px; width: 238px; }
+    #nonce { left: 1174px; width: 252px; }
+    #blockHash { left: 1440px; width: 374px; }
 
     .network-signal {
       position: absolute;
@@ -1357,9 +1433,9 @@ function overlayPreviewHtml() {
     .lower-panel-mask {
       position: absolute;
       left: 36px;
-      top: 916px;
+      top: 948px;
       width: 1848px;
-      height: 144px;
+      height: 112px;
       border: 1px solid #252838;
       border-radius: 6px;
       background:
@@ -1374,7 +1450,7 @@ function overlayPreviewHtml() {
     .status-label {
       position: absolute;
       left: 64px;
-      top: 936px;
+      top: 966px;
       display: block;
       color: #c6ccff;
       font: 900 24px/1 Arial, "Segoe UI", sans-serif;
@@ -1386,7 +1462,7 @@ function overlayPreviewHtml() {
       position: absolute;
       left: 64px;
       top: 1007px;
-      width: 740px;
+      width: 690px;
       display: block;
       color: #f0f1f8;
       font: 900 42px/1 Arial, "Segoe UI", sans-serif;
@@ -1400,23 +1476,29 @@ function overlayPreviewHtml() {
     .telemetry {
       position: absolute;
       inset: 0;
+      margin: 0;
       z-index: 4;
     }
 
     .telemetry-mask {
       position: absolute;
-      left: 756px;
-      top: 990px;
-      width: 1068px;
-      height: 90px;
-      background: transparent;
+      left: 792px;
+      top: 987px;
+      width: 1040px;
+      height: 72px;
+      border-radius: 6px;
+      background:
+        linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
+        #11131a;
+      background-size: 8px 8px, 8px 8px, auto;
       z-index: 0;
     }
 
     .telemetry-card {
       position: absolute;
-      top: 1009px;
-      height: 42px;
+      top: 998px;
+      height: 54px;
       padding: 0;
       border: 0;
       border-radius: 0;
@@ -1433,10 +1515,10 @@ function overlayPreviewHtml() {
     .telemetry-card.prev { left: 1548px; width: 244px; }
 
     .telemetry-card dt {
-      margin: 0 0 5px;
+      margin: 0 0 7px;
       color: rgba(186, 190, 214, .82);
       text-transform: uppercase;
-      font: 700 13px/1 Consolas, ui-monospace, monospace;
+      font: 800 15px/1 Consolas, ui-monospace, monospace;
     }
 
     .telemetry-card dd {
@@ -1445,7 +1527,7 @@ function overlayPreviewHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 700 17px/1 Consolas, ui-monospace, monospace;
+      font: 800 21px/1 Consolas, ui-monospace, monospace;
     }
 
     .controls {
@@ -1509,6 +1591,23 @@ function overlayPreviewHtml() {
     }
 
     .debug-drawer[hidden] { display: none; }
+    body.clean-preview .controls,
+    body.clean-preview .debug-drawer {
+      display: none;
+    }
+
+    body.layer-video .preview-overlay {
+      display: none;
+    }
+
+    body.layer-overlay video {
+      visibility: hidden;
+    }
+
+    body.layer-overlay .frame {
+      background: #2b2f3a;
+    }
+
     .debug-drawer h2 {
       margin: 0 0 10px;
       color: var(--link);
@@ -1544,18 +1643,19 @@ function overlayPreviewHtml() {
       <video id="video" controls autoplay playsinline></video>
       <div class="preview-overlay" aria-label="Radio Free Ethereum overlay preview">
         <div id="previewDesign" class="overlay-design">
-          <img class="reference" src="/rfe-assets/rfe-terminal-final.png" alt="" aria-hidden="true" />
+          <img id="overlayShell" class="reference" src="/rfe-assets/overlays/rfe-terminal-1080p.png" alt="" aria-hidden="true" />
           <div id="networkSignal" class="network-signal">PUBLIC SIGNAL / ${networkLabel(defaultNetwork).toUpperCase()}</div>
+          <div class="top-telemetry-mask" aria-hidden="true"></div>
           <div id="timeUtc" class="chip">--:--:-- UTC</div>
           <div id="slot" class="chip">SLOT --</div>
           <div id="nonce" class="chip">SEQ --</div>
           <div id="blockHash" class="chip">BLOCK --</div>
           <div class="lower-panel-mask" aria-hidden="true"></div>
           <div class="status-label">Now Reading</div>
-          <div class="reading-title">The Ethereum Foundation Mandate</div>
+          <div class="reading-title">The EF Mandate</div>
           <dl class="telemetry">
             <div class="telemetry-mask" aria-hidden="true"></div>
-            <div class="telemetry-card tx"><dt>TX</dt><dd id="txHash">--</dd></div>
+            <div class="telemetry-card tx"><dt>Prev TX</dt><dd id="txHash">--</dd></div>
             <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">--</dd></div>
             <div class="telemetry-card hash"><dt>Hash</dt><dd id="contentHash">--</dd></div>
             <div class="telemetry-card prev"><dt>Prev</dt><dd id="previousHash">--</dd></div>
@@ -1585,11 +1685,16 @@ function overlayPreviewHtml() {
   <script>
     const params = new URLSearchParams(location.search)
     const streamId = params.get('streamId') || '${streamId}'
+    if (params.get('source') === 'clean') document.body.classList.add('clean-preview')
+    if (params.get('layer') === 'video') document.body.classList.add('layer-video')
+    if (params.get('layer') === 'overlay') document.body.classList.add('layer-overlay')
+    const localVideoMode = params.get('video') === 'local'
     let selectedNetwork = (params.get('network') || ${JSON.stringify(defaultNetwork)}).toLowerCase() === 'mainnet' ? 'mainnet' : 'sepolia'
     let selectedNetworkLabel = selectedNetwork === 'mainnet' ? 'Mainnet' : 'Sepolia'
     const video = document.getElementById('video')
     const frame = document.querySelector('.frame')
     const previewDesign = document.getElementById('previewDesign')
+    const overlayShell = document.getElementById('overlayShell')
     const status = document.getElementById('status')
     const liveStrip = document.getElementById('liveStrip')
     const debugToggle = document.getElementById('debugToggle')
@@ -1602,6 +1707,30 @@ function overlayPreviewHtml() {
     let activeSegment = null
     let isPlaying = false
     let streamClock = { key: null, startMs: null, durationMs: null, anchorWallMs: null }
+
+    const overlayProfiles = {
+      '360p': { width: 640, height: 360, src: '/rfe-assets/overlays/rfe-terminal-360p.png' },
+      '420p': { width: 746, height: 420, src: '/rfe-assets/overlays/rfe-terminal-420p.png' },
+      '480p': { width: 854, height: 480, src: '/rfe-assets/overlays/rfe-terminal-480p.png' },
+      '720p': { width: 1280, height: 720, src: '/rfe-assets/overlays/rfe-terminal-720p.png' },
+      '1080p': { width: 1920, height: 1080, src: '/rfe-assets/overlays/rfe-terminal-1080p.png' },
+    }
+
+    function overlayShellFor(width, height) {
+      const explicitProfile = (params.get('profile') || '').toLowerCase()
+      if (overlayProfiles[explicitProfile]) return overlayProfiles[explicitProfile].src
+      const explicitWidth = Number(params.get('width') || width || 0)
+      const explicitHeight = Number(params.get('height') || height || 0)
+      const exact = Object.values(overlayProfiles).find((profile) => profile.width === explicitWidth && profile.height === explicitHeight)
+      if (exact) return exact.src
+      return overlayProfiles['1080p'].src
+    }
+
+    function updateOverlayShell(width, height) {
+      overlayShell.src = overlayShellFor(width, height)
+    }
+
+    updateOverlayShell()
 
     function scalePreviewOverlay() {
       const rect = frame.getBoundingClientRect()
@@ -1661,6 +1790,13 @@ function overlayPreviewHtml() {
       return orderedSegments().at(-1) || null
     }
 
+    function previousSegment(segment) {
+      if (!segment || segment.sequence == null) return null
+      return orderedSegments()
+        .filter((candidate) => Number(candidate.sequence) < Number(segment.sequence))
+        .at(-1) || null
+    }
+
     function segmentUrl(sequence) {
       return '/api/segments/' + encodeURIComponent(streamId) + '/' + encodeURIComponent(sequence) + '/payload'
     }
@@ -1712,11 +1848,12 @@ function overlayPreviewHtml() {
       }
       const proof = segment.proof || {}
       const blockHash = segment.blockHash || (proof.block && proof.block.hash)
+      const previous = previousSegment(segment)
       updateStreamClock(segment)
       document.getElementById('slot').textContent = 'SLOT ' + (segment.slot || (data && data.blobspace && data.blobspace.latestSlot) || '--')
       document.getElementById('nonce').textContent = proofOrSequenceLabel(segment, proof)
       document.getElementById('blockHash').textContent = 'BLOCK ' + shorten(blockHash, 8, 4)
-      document.getElementById('txHash').textContent = shorten(segment.txHash, 10, 6)
+      document.getElementById('txHash').textContent = shorten(previous && previous.txHash, 10, 6)
       document.getElementById('payloadSize').textContent = formatBytes(segment.payloadBytes)
       document.getElementById('contentHash').textContent = shorten(segment.payloadSha256Hex || segment.payloadSha256, 10, 6)
       document.getElementById('previousHash').textContent = shorten(segment.previousSegmentHash, 10, 6)
@@ -1735,6 +1872,11 @@ function overlayPreviewHtml() {
       }
       const latest = latestSegment()
       updateTelemetry(activeSegment || latest, data)
+      if (localVideoMode) {
+        status.textContent = latest ? 'playing local preview video / seq ' + latest.sequence : 'playing local preview video'
+        setStatusStrip(latest, 'PREVIEW')
+        return
+      }
       if (!latest) {
         status.textContent = 'waiting for Station metadata'
         return
@@ -1822,6 +1964,17 @@ function overlayPreviewHtml() {
       debugDrawer.toggleAttribute('hidden', !open)
       debugToggle.classList.toggle('is-on', open)
       debugToggle.setAttribute('aria-expanded', String(open))
+    })
+    if (localVideoMode) {
+      video.loop = true
+      video.muted = true
+      video.src = apiUrl('/preview-video')
+      video.play().catch(() => {
+        status.textContent = 'local preview video ready / press play'
+      })
+    }
+    video.addEventListener('loadedmetadata', () => {
+      updateOverlayShell(video.videoWidth, video.videoHeight)
     })
     video.addEventListener('playing', () => {
       isPlaying = true
@@ -3543,7 +3696,13 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, overlayPreviewHtml(), { 'content-type': 'text/html; charset=utf-8' })
     }
 
-    const assetMatch = parsed.pathname.match(/^\/rfe-assets\/([^/]+)$/)
+    if (parsed.pathname === '/preview-video') {
+      if (!previewVideoFile) return send(response, 404, 'PREVIEW_VIDEO_FILE not configured')
+      if (!fs.existsSync(previewVideoFile)) return send(response, 404, 'preview video not found')
+      return sendMedia(request, response, previewVideoFile, assetContentType(previewVideoFile))
+    }
+
+    const assetMatch = parsed.pathname.match(/^\/rfe-assets\/(.+)$/)
     if (assetMatch) {
       return sendOverlayAsset(response, decodeURIComponent(assetMatch[1]))
     }

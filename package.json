@@ -10,6 +10,7 @@
     "station:deploy": "node scripts/deploy-station.mjs",
     "station:segments": "node scripts/list-station-segments.mjs",
     "slots:metrics": "node scripts/blob-slot-metrics.mjs",
+    "assets:overlays": "node scripts/generate-rfe-overlay-assets.mjs",
     "media:segment": "node scripts/segment-av1-webm.mjs",
     "live:publish": "node scripts/publish-live-segments.mjs",
     "live:publish:pipelined": "node scripts/publish-live-segments-pipelined.mjs",
