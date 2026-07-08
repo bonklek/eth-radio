@@ -1,0 +1,38 @@
+{
+  "name": "eth-radio",
+  "version": "0.1.0",
+  "private": true,
+  "license": "VPL-1.0",
+  "type": "module",
+  "scripts": {
+    "wallet:balance": "node scripts/check-wallet.mjs",
+    "station:compile": "node scripts/compile-station.mjs",
+    "station:deploy": "node scripts/deploy-station.mjs",
+    "station:segments": "node scripts/list-station-segments.mjs",
+    "slots:metrics": "node scripts/blob-slot-metrics.mjs",
+    "media:segment": "node scripts/segment-av1-webm.mjs",
+    "media:clock": "node scripts/generate-clock-segments.mjs",
+    "media:proof": "node scripts/segment-proof-video.mjs",
+    "live:publish": "node scripts/publish-live-segments.mjs",
+    "live:publish:pipelined": "node scripts/publish-live-segments-pipelined.mjs",
+    "live:run": "node scripts/run-live-station.mjs",
+    "live:monitor": "node scripts/monitor-live-stream.mjs",
+    "blob:publish": "node scripts/publish-blob-chunk.mjs",
+    "blob:fetch": "node scripts/fetch-blob-sidecars.mjs",
+    "blob:reconstruct": "node scripts/reconstruct-blob-media.mjs",
+    "demo:live": "node scripts/serve-live-demo.mjs",
+    "nft:archive": "node scripts/archive-nft-media.mjs",
+    "avatar:prepare": "node scripts/prepare-fumo-avatar-assets.mjs",
+    "audio:kokoro": "node scripts/generate-kokoro-narration.mjs",
+    "avatar:build": "node scripts/run-blender-avatar-build.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "kzg-wasm": "^1.0.0",
+    "viem": "^2.45.2"
+  },
+  "devDependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "solc": "^0.8.35"
+  }
+}

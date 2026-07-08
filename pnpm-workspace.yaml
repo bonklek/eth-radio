@@ -1,0 +1,7 @@
+allowBuilds:
+  c-kzg: true
+  ffmpeg-static: true
+onlyBuiltDependencies:
+  - ffmpeg-static
+overrides:
+  tmp: ^0.2.6

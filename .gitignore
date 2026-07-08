@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python/runtime caches
+.venv*/
+__pycache__/
+*.py[cod]
+
+# Local generated media, testnet state, research worktrees, and experiments.
+# These are preserved on disk but intentionally kept out of the published repo.
+work/
+video/*.pdf
+
+# Generated outputs
+dist/
+build/
+coverage/
+*.log

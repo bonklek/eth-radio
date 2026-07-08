@@ -1,0 +1,69 @@
+{
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "palette": {
+    "accent": "#8f97e8",
+    "link": "#c6ccff",
+    "text": "#f0f1f8",
+    "muted": "rgba(186, 190, 214, 0.82)",
+    "surface1": "rgba(17, 19, 26, 0.95)",
+    "surface2": "rgba(48, 51, 67, 0.92)",
+    "surface3": "rgba(24, 26, 36, 0.97)",
+    "border": "#252838",
+    "bevel": "#06070c",
+    "highlight": "rgba(255, 255, 255, 0.07)",
+    "shadow": "rgba(0, 0, 0, 0.42)"
+  },
+  "typography": {
+    "ui": "Arial, Segoe UI, sans-serif",
+    "mono": "Consolas, ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+    "brandSize": 34,
+    "telemetrySize": 29,
+    "panelTitleSize": 27,
+    "labelSize": 24,
+    "lowerTitleSize": 42,
+    "smallSize": 21
+  },
+  "layout": {
+    "topBar": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 112
+    },
+    "logo": {
+      "x": 20,
+      "y": 18,
+      "size": 76
+    },
+    "topTelemetryChips": [
+      { "label": "timeUtc", "x": 672, "y": 31, "width": 236, "height": 48 },
+      { "label": "slot", "x": 922, "y": 31, "width": 238, "height": 48 },
+      { "label": "nonce", "x": 1174, "y": 31, "width": 252, "height": 48 },
+      { "label": "blockHash", "x": 1440, "y": 31, "width": 374, "height": 48 }
+    ],
+    "lowerThird": {
+      "x": 36,
+      "y": 916,
+      "width": 1848,
+      "height": 144,
+      "headerHeight": 58
+    }
+  },
+  "effects": {
+    "panelRadius": 6,
+    "chipRadius": 6,
+    "gridSpacing": 8,
+    "bevelRightWidth": 3,
+    "bevelBottomWidth": 4,
+    "shadowOffset": 6
+  },
+  "animation": {
+    "clockUpdateMs": 1000,
+    "dataPollMs": 4000,
+    "tickerDurationSeconds": 34,
+    "blobPulseMs": 900
+  }
+}
