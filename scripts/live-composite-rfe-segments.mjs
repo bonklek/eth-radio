@@ -109,6 +109,11 @@ function formatBytes(value) {
   return n ? `${n.toLocaleString('en-US')} B` : '--'
 }
 
+function formatKilobytes(value) {
+  const n = Number(value || 0)
+  return n ? `${(n / 1000).toFixed(1)} KB` : '--'
+}
+
 function xml(value) {
   return String(value ?? '--')
     .replace(/&/g, '&amp;')
@@ -239,78 +244,79 @@ function drawTextFilter({ text, x, y, size, color = '0xc6ccff@1', font = 'Consol
 }
 
 function proofLayerFilters({ width, height, fields }) {
-  const chipSource = {
-    timeUtc: { x: 672, y: 31, width: 236, height: 48 },
-    slot: { x: 922, y: 35, width: 238, height: 40 },
-    nonce: { x: 1174, y: 35, width: 252, height: 40 },
-    blockHash: { x: 1440, y: 35, width: 374, height: 40 },
+  if (width !== 640 || height !== 360) {
+    throw new Error('Proof compositor currently has exact raster boxes only for the 360p overlay shell')
   }
-  const sx = width / 1920
-  const sy = height / 1080
-  const filters = [
-    drawBoxFilter(scaleBox({ x: 660, y: 24, width: 1168, height: 64 }, width, height)),
-    drawBoxFilter(scaleBox({ x: 113, y: 66, width: 520, height: 31 }, width, height)),
-  ]
-  const network = scaleBox({ x: 113, y: 66, width: 520, height: 31 }, width, height)
+
+  const filters = []
   filters.push(drawTextFilter({
-    text: fields.networkSignal,
-    x: network.x,
-    y: network.y + Math.round(3 * sy),
-    size: Math.max(9, Math.round(26 * sy)),
-  }))
-  for (const [name, sourceBox] of Object.entries(chipSource)) {
-    const box = scaleBox(sourceBox, width, height)
-    filters.push(drawBoxFilter({ ...box, color: '0x303343@1' }))
-    filters.push(drawTextFilter({
-      text: fit(fields[name] || '--', name === 'blockHash' ? 18 : 14),
-      x: box.x + Math.round(12 * sx),
-      y: box.y + Math.round((name === 'timeUtc' ? 10 : 8) * sy),
-      size: name === 'timeUtc' ? Math.max(9, Math.round(29 * sy)) : Math.max(8, Math.round(22 * sy)),
-    }))
-  }
-  const lower = scaleBox({ x: 36, y: 948, width: 1848, height: 112 }, width, height)
-  filters.push(drawBoxFilter({ ...lower, color: '0x11131a@1' }))
-  filters.push(drawTextFilter({
-    text: 'Now Reading',
-    x: lower.x + Math.round(28 * sx),
-    y: lower.y + Math.round(18 * sy),
-    size: Math.max(9, Math.round(24 * sy)),
-    color: '0x8f97e8@1',
-    font: 'Arial',
-  }))
-  filters.push(drawTextFilter({
-    text: 'The Ethereum Foundation Mandate',
-    x: lower.x + Math.round(28 * sx),
-    y: lower.y + Math.round(58 * sy),
-    size: Math.max(12, Math.round(42 * sy)),
+    text: 'RADIO FREE ETHEREUM',
+    x: 38,
+    y: 8,
+    size: 12,
     color: '0xf0f1f8@1',
     font: 'Arial',
   }))
-  const cards = {
-    tx: scaleBox({ x: 784, y: 998, width: 252, height: 54 }, width, height),
-    payload: scaleBox({ x: 1060, y: 998, width: 196, height: 54 }, width, height),
-    hash: scaleBox({ x: 1280, y: 998, width: 244, height: 54 }, width, height),
-    prev: scaleBox({ x: 1548, y: 998, width: 244, height: 54 }, width, height),
+  filters.push(drawTextFilter({
+    text: fields.networkSignal,
+    x: 38,
+    y: 23,
+    size: 6,
+    color: '0xc6ccff@1',
+    font: 'Arial',
+  }))
+
+  const topFields = [
+    ['timeUtc', { x: 224, y: 10, width: 80, height: 17 }, fields.timeUtc, 10, 5],
+    ['slot', { x: 309, y: 10, width: 78, height: 17 }, fit(fields.slot, 14), 8, 4],
+    ['nonce', { x: 391, y: 10, width: 85, height: 17 }, fit(fields.nonce, 14), 8, 4],
+    ['blockHash', { x: 480, y: 10, width: 126, height: 17 }, fit(fields.blockHash, 18), 8, 4],
+  ]
+  for (const [, box, value, size, xPad] of topFields) {
+    filters.push(drawBoxFilter({ ...box, color: '0x303343@1' }))
+    filters.push(drawTextFilter({
+      text: value,
+      x: box.x + xPad,
+      y: box.y + 4,
+      size,
+    }))
   }
-  for (const [key, label, value] of [
-    ['tx', 'PREV TX', fields.prevTx],
-    ['payload', 'PAYLOAD', fields.payload],
-    ['hash', 'HASH', fields.hash],
-    ['prev', 'PREV', fields.prevHash],
-  ]) {
-    const box = cards[key]
+
+  filters.push(drawTextFilter({
+    text: 'NOW READING',
+    x: 20,
+    y: 312,
+    size: 7,
+    color: '0xc6ccff@1',
+  }))
+  filters.push(drawTextFilter({
+    text: 'The Ethereum Foundation Mandate',
+    x: 20,
+    y: 334,
+    size: 12,
+    color: '0xf0f1f8@1',
+    font: 'Arial',
+  }))
+
+  const telemetryCards = [
+    [{ x: 276, y: 313, width: 91, height: 31 }, 'PREV TX', short(fields.prevTx, 10, 6)],
+    [{ x: 372, y: 313, width: 95, height: 31 }, 'PAYLOAD', fields.payload],
+    [{ x: 472, y: 313, width: 109, height: 31 }, 'HASH', fit(fields.hash, 18)],
+  ]
+  for (const [box, label, value] of telemetryCards) {
+    filters.push(drawBoxFilter({ ...box, color: '0x11131a@1' }))
     filters.push(drawTextFilter({
       text: label,
-      x: box.x,
-      y: box.y,
-      size: Math.max(7, Math.round(15 * sy)),
+      x: box.x + 2,
+      y: box.y + 2,
+      size: 7,
       color: '0xbabed6@1',
     }))
     filters.push(drawTextFilter({
-      text: fit(value, key === 'payload' ? 16 : 18),
-      x: box.x,
-      y: box.y + Math.round(24 * sy),
-      size: Math.max(8, Math.round(21 * sy)),
+      text: value || '--',
+      x: box.x + 2,
+      y: box.y + 15,
+      size: 7,
     }))
   }
   return filters
@@ -472,72 +478,83 @@ for (let sequence = startSeq; ; sequence += 1) {
   manifest = readJsonIfExists(manifestPath) || manifest
   const proof = await sampleProofContext({ publicClient, chainName, beaconUrl, account })
   const previous = readPreviousFacts({ sequence, manifest, statePath })
-  const proofFilters = proofLayerFilters({
-    width: profile.width,
-    height: profile.height,
-    fields: {
-      networkSignal: `PUBLIC SIGNAL / ${proof.networkLabel.toUpperCase()}`,
-      timeUtc: `${proof.generatedAt.slice(11, 19)} UTC`,
-      slot: proof.proofSlot ? `PROOF SLOT ${proof.proofSlot}` : `BLOCK ${proof.executionBlock.number}`,
-      nonce: proof.proofNonce ? `NONCE ${proof.proofNonce}` : `SEQ ${sequence}`,
-      blockHash: `BLOCK ${short(proof.executionBlock.hash, 8, 4)}`,
-      prevTx: short(previous.previousTxHash, 10, 6),
-      payload: 'AFTER ENCODE',
-      hash: 'MANIFEST',
-      prevHash: short(previous.previousSegmentHash, 10, 6),
-    },
-  })
+  function ffmpegArgs({ payloadLabel, outputPath }) {
+    const proofFilters = proofLayerFilters({
+      width: profile.width,
+      height: profile.height,
+      fields: {
+        networkSignal: `PUBLIC SIGNAL / ${proof.networkLabel.toUpperCase()}`,
+        timeUtc: `${proof.generatedAt.slice(11, 19)} UTC`,
+        slot: proof.proofSlot ? `PROOF SLOT ${proof.proofSlot}` : `BLOCK ${proof.executionBlock.number}`,
+        nonce: proof.proofNonce ? `NONCE ${proof.proofNonce}` : `SEQ ${sequence}`,
+        blockHash: `BLOCK ${short(proof.executionBlock.hash, 8, 4)}`,
+        prevTx: short(previous.previousTxHash, 10, 6),
+        payload: payloadLabel,
+        hash: 'MANIFEST',
+        prevHash: short(previous.previousSegmentHash, 10, 6),
+      },
+    })
 
-  const filter = [
-    `[0:v]fps=${fps},scale=${profile.width}:${profile.height}:force_original_aspect_ratio=decrease,pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2,format=rgba[base]`,
-    '[1:v]format=rgba[shell]',
-    '[base][shell]overlay=0:0:format=auto[withshell]',
-    `[withshell]${proofFilters.join(',')},format=yuv420p[v]`,
-  ].join(';')
+    const filter = [
+      `[0:v]fps=${fps},scale=${profile.width}:${profile.height}:force_original_aspect_ratio=decrease,pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2,format=rgba[base]`,
+      '[1:v]format=rgba[shell]',
+      '[base][shell]overlay=0:0:format=auto[withshell]',
+      `[withshell]${proofFilters.join(',')},format=yuv420p[v]`,
+    ].join(';')
 
-  const args = [
-    '-hide_banner',
-    '-y',
-    '-ss',
-    String(startMs / 1000),
-    '-t',
-    String(segmentSeconds),
-    '-i',
-    inputPath,
-    '-loop',
-    '1',
-    '-framerate',
-    String(fps),
-    '-i',
-    overlayPath,
-    '-filter_complex',
-    filter,
-    '-map',
-    '[v]',
-  ]
-  if (noAudio) args.push('-an')
-  else args.push('-map', '0:a:0?', '-c:a', 'libopus', '-b:a', audioBitrate)
-  args.push(
-    '-c:v',
-    'libaom-av1',
-    '-cpu-used',
-    '8',
-    '-b:v',
-    videoBitrate,
-    '-g',
-    String(Math.max(1, Math.round(fps * segmentSeconds))),
-    '-keyint_min',
-    String(Math.max(1, Math.round(fps * segmentSeconds))),
-    '-row-mt',
-    '1',
-    '-shortest',
-    '-f',
-    'webm',
-    tempPath,
-  )
+    const args = [
+      '-hide_banner',
+      '-y',
+      '-ss',
+      String(startMs / 1000),
+      '-t',
+      String(segmentSeconds),
+      '-i',
+      inputPath,
+      '-loop',
+      '1',
+      '-framerate',
+      String(fps),
+      '-i',
+      overlayPath,
+      '-filter_complex',
+      filter,
+      '-map',
+      '[v]',
+    ]
+    if (noAudio) args.push('-an')
+    else args.push('-map', '0:a:0?', '-c:a', 'libopus', '-b:a', audioBitrate)
+    args.push(
+      '-c:v',
+      'libaom-av1',
+      '-cpu-used',
+      '8',
+      '-b:v',
+      videoBitrate,
+      '-g',
+      String(Math.max(1, Math.round(fps * segmentSeconds))),
+      '-keyint_min',
+      String(Math.max(1, Math.round(fps * segmentSeconds))),
+      '-row-mt',
+      '1',
+      '-shortest',
+      '-f',
+      'webm',
+      outputPath,
+    )
+    return args
+  }
 
   console.log(`\n== compositing seq ${sequence} @ ${startMs}ms ==`)
-  await run(ffmpegPath, args)
+  let visiblePayloadLabel = 'ENCODING'
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true })
+    await run(ffmpegPath, ffmpegArgs({ payloadLabel: visiblePayloadLabel, outputPath: tempPath }))
+    if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) break
+    const nextLabel = formatKilobytes(fs.statSync(tempPath).size)
+    if (nextLabel === visiblePayloadLabel) break
+    visiblePayloadLabel = nextLabel
+  }
   if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) {
     if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true })
     console.log(`no segment produced for seq ${sequence}; stopping`)
@@ -569,9 +586,10 @@ for (let sequence = startSeq; ; sequence += 1) {
       previousSegmentHash: previous.previousSegmentHash,
       previousTxHash: previous.previousTxHash,
       payloadFields: {
-        visiblePayloadLabel: 'AFTER ENCODE',
+        visiblePayloadLabel,
         visibleHashLabel: 'MANIFEST',
         finalPayloadBytes: bytes,
+        finalPayloadKilobytes: formatKilobytes(bytes),
         finalPayloadSha256: payloadSha256,
       },
     },

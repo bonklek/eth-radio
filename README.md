@@ -72,6 +72,11 @@ If `MAX_FEE_PER_GAS_GWEI` and `MAX_FEE_PER_BLOB_GAS_GWEI` are set, the preflight
 estimates against those caps. Otherwise it queries `ETH_RPC_URL` for current
 execution gas and blob base fee.
 
+When `PRIVATE_KEY` is configured, the preflight also checks the publisher wallet
+balance against the safety-budgeted estimate before any live publish loop starts.
+Use `--skip-wallet-balance-check` only when the balance lookup RPC is unavailable
+and the wallet has been verified separately.
+
 ### Speed Tuning
 
 Use the pipelined publisher for low-latency live tests:

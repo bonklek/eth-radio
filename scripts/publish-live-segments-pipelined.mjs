@@ -36,7 +36,7 @@ function usage(exitCode = 1) {
        [--max-pending 2] [--max-pending-min 1] [--max-pending-max 4] [--adaptive-pending]
        [--send-retries 8] [--retry-ms 5000]
        [--require-manifest] [--state <state.json>]
-       [--max-cost-eth 0.1] [--stream-duration-ms 3600000]
+       [--max-cost-eth 0.1] [--stream-duration-ms 3600000] [--skip-wallet-balance-check]
 
 Environment:
   ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=${chainNames}

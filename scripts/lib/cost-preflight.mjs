@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import { bytesToHex, createPublicClient, formatEther, http, parseGwei, toBlobs } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 import { mainnet, sepolia } from 'viem/chains'
 
 export const chains = { mainnet, sepolia }
@@ -31,6 +32,7 @@ export function readCostOptions(argv = process.argv) {
     ),
     streamDurationMs: argvValue('stream-duration-ms', undefined, argv),
     expectedSegments: argvValue('expected-segments', undefined, argv),
+    skipWalletBalanceCheck: argv.includes('--skip-wallet-balance-check'),
   }
 }
 
@@ -131,6 +133,17 @@ async function readFeeWei({ chainName, rpcUrl, options }) {
   }
 }
 
+async function readWalletBalance({ chainName, rpcUrl, options }) {
+  if (options.skipWalletBalanceCheck || !process.env.PRIVATE_KEY || !rpcUrl || !chains[chainName]) return null
+  const account = privateKeyToAccount(process.env.PRIVATE_KEY)
+  const publicClient = createPublicClient({ chain: chains[chainName], transport: http(rpcUrl, { timeout: 20_000 }) })
+  const balanceWei = await publicClient.getBalance({ address: account.address })
+  return {
+    address: account.address,
+    balanceWei,
+  }
+}
+
 export async function estimateStreamCost({ segments, segmentMs, chainName, rpcUrl, options }) {
   if (!segments.length && !options.expectedSegments && !options.streamDurationMs) {
     throw new Error('Cost preflight needs existing segments, --expected-segments, or --stream-duration-ms')
@@ -152,6 +165,9 @@ export async function estimateStreamCost({ segments, segmentMs, chainName, rpcUr
   const safetyWei = multiplyWei(totalWei, options.safetyMultiplier)
   const budgetWei = parseEthToWei(options.maxCostEth)
   const bufferWei = budgetWei - safetyWei
+  const walletBalance = await readWalletBalance({ chainName, rpcUrl, options })
+  const walletBufferWei = walletBalance ? walletBalance.balanceWei - safetyWei : null
+  const walletOk = walletBufferWei == null || walletBufferWei >= 0n
 
   return {
     source,
@@ -174,7 +190,19 @@ export async function estimateStreamCost({ segments, segmentMs, chainName, rpcUr
     safetyWei,
     budgetWei,
     bufferWei,
-    ok: bufferWei >= 0n,
+    wallet: walletBalance
+      ? {
+          address: walletBalance.address,
+          balanceWei: walletBalance.balanceWei,
+          bufferWei: walletBufferWei,
+          ok: walletOk,
+          formatted: {
+            balanceEth: formatEth(walletBalance.balanceWei),
+            bufferEth: `${walletBufferWei < 0n ? '-' : ''}${formatEth(walletBufferWei < 0n ? -walletBufferWei : walletBufferWei)}`,
+          },
+        }
+      : null,
+    ok: bufferWei >= 0n && walletOk,
     formatted: {
       executionEth: formatEth(executionWei),
       blobEth: formatEth(blobWei),
@@ -204,7 +232,14 @@ export function printCostPreflight(report) {
   console.log(`total estimate:     ${report.formatted.totalEth} ETH`)
   console.log(`safety budget:      ${report.formatted.safetyEth} ETH`)
   console.log(`user budget:        ${report.formatted.budgetEth} ETH`)
-  console.log(`${report.ok ? 'remaining buffer' : 'shortfall'}: ${report.formatted.bufferEth} ETH`)
+  console.log(`${report.bufferWei >= 0n ? 'remaining buffer' : 'shortfall'}: ${report.formatted.bufferEth} ETH`)
+  if (report.wallet) {
+    console.log(`wallet:             ${report.wallet.address}`)
+    console.log(`wallet balance:     ${report.wallet.formatted.balanceEth} ETH`)
+    console.log(
+      `${report.wallet.ok ? 'wallet buffer' : 'wallet shortfall'}: ${report.wallet.formatted.bufferEth} ETH`,
+    )
+  }
 }
 
 export function serializableCostReport(report) {
@@ -223,6 +258,11 @@ export async function runCostPreflightOrExit({ segments, segmentMs, argv = proce
   })
   printCostPreflight(report)
   if (!report.ok && options.mode !== 'warn') {
+    if (report.wallet && !report.wallet.ok) {
+      throw new Error(
+        `Cost preflight failed: wallet ${report.wallet.address} has ${report.wallet.formatted.balanceEth} ETH, but ${report.formatted.safetyEth} ETH is required with safety buffer. Use --cost-mode warn to override or --skip-wallet-balance-check to skip only the balance lookup.`,
+      )
+    }
     throw new Error(
       `Cost preflight failed: ${report.formatted.safetyEth} ETH required with safety buffer, budget is ${report.formatted.budgetEth} ETH. Use --cost-mode warn to override.`,
     )

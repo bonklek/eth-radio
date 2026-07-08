@@ -75,6 +75,14 @@ fs.mkdirSync(outDir, { recursive: true })
 
 for (const [name, width, height] of profiles) {
   const output = path.join(outDir, `rfe-terminal-${name}.png`)
+  const sx = width / 1920
+  const sy = height / 1080
+  const box = ({ x, y, w, h }) =>
+    `drawbox=x=${Math.round(x * sx)}:y=${Math.round(y * sy)}:w=${Math.round(w * sx)}:h=${Math.round(h * sy)}`
+  const clearDynamicText = [
+    `${box({ x: 112, y: 18, w: 1720, h: 82 })}:color=0x181a24@1:t=fill`,
+    `${box({ x: 36, y: 916, w: 1848, h: 144 })}:color=0x11131a@1:t=fill`,
+  ].join(',')
   const result = spawnSync(ffmpegPath, [
     '-hide_banner',
     '-loglevel',
@@ -83,7 +91,7 @@ for (const [name, width, height] of profiles) {
     '-i',
     source,
     '-vf',
-    `scale=${width}:${height}:flags=lanczos,format=rgba`,
+    `scale=${width}:${height}:flags=lanczos,format=rgba,${clearDynamicText}`,
     '-frames:v',
     '1',
     '-update',

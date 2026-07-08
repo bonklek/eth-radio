@@ -14,7 +14,7 @@ function usage(exitCode = 1) {
                        [--once] [--exit-when-caught-up] [--poll-ms 1000] [--pace]
                        [--publish-retries 5] [--retry-ms 12000] [--require-manifest]
                        [--state <state.json>]
-                       [--max-cost-eth 0.1] [--stream-duration-ms 3600000]
+                       [--max-cost-eth 0.1] [--stream-duration-ms 3600000] [--skip-wallet-balance-check]
 
 Environment:
   ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=sepolia
