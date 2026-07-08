@@ -8,24 +8,72 @@
 </head>
 <body>
   <main class="shell">
-    <section class="tuner">
-      <div class="screen">
-        <video id="player" controls playsinline></video>
-        <div id="empty-state" class="empty-state">
-          <strong>Radio Free Ethereum</strong>
-          <span>Waiting for a verified blob segment.</span>
+    <section class="main-column">
+      <header class="topbar">
+        <button class="icon-button" type="button" aria-label="Theme settings">☼</button>
+        <div class="chain-toggle" aria-label="Chain selector">
+          <button class="active" type="button">ETH</button>
+          <button type="button">SEP</button>
         </div>
+        <div class="brand">
+          <h1>Radio Free Ethereum</h1>
+          <p>Milady stream tuned through live Ethereum blobspace</p>
+        </div>
+        <div class="header-badges">
+          <span class="status-badge"><i></i><span id="station-state">OFFLINE</span></span>
+          <span id="utc-clock" class="clock-badge">--:--:-- UTC</span>
+        </div>
+      </header>
+
+      <section class="viewer-frame">
+        <div class="screen">
+          <div class="video-column">
+            <video id="player" controls playsinline></video>
+          </div>
+          <div id="empty-state" class="empty-state">
+            <strong>No recent station signal</strong>
+            <span>No recent segment announcements are available. The viewer stays idle until Ethereum carries new blobs for this stream.</span>
+          </div>
+        </div>
+        <div class="nowbar">
+          <div>
+            <strong id="now-title">Waiting for stream segments</strong>
+            <span id="now-detail">Execution RPC announces segments; beacon sidecars carry the bytes.</span>
+          </div>
+          <div class="now-controls">
+            <button id="stream-toggle" class="live-button" type="button">LIVE</button>
+            <button id="loop-toggle" type="button">LOOP</button>
+            <button id="refresh" class="icon-button" type="button" aria-label="Refresh">↻</button>
+            <button id="mute-toggle" class="icon-button" type="button" aria-label="Mute">◖</button>
+            <input id="volume" class="volume" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="Volume" />
+          </div>
+        </div>
+      </section>
+
+      <div class="metrics">
+        <div><span>SEGMENT</span><strong id="metric-segment">-</strong></div>
+        <div><span>PAYLOAD</span><strong id="metric-payload">-</strong></div>
+        <div><span>BLOBS</span><strong id="metric-blobs">-</strong></div>
+        <div><span>LATENCY</span><strong id="metric-latency">-</strong></div>
+        <div><span>FETCH / DECODE</span><strong id="metric-fetch">- / -</strong></div>
       </div>
-      <div class="transport">
-        <button id="refresh" type="button">Refresh</button>
-        <button id="stream-toggle" type="button">Start stream</button>
-        <button id="play-latest" type="button">Play latest</button>
-        <span id="status" role="status">Idle</span>
-      </div>
+      <span id="status" role="status">Idle</span>
     </section>
 
     <aside class="panel">
-      <h1>Radio Free Ethereum</h1>
+      <div class="sidebar-heading">
+        <div>
+          <h2>Blobspace Feed</h2>
+          <p id="rail-mode">Watching recent slots for blob sidecars.</p>
+        </div>
+        <span id="network-label">Sepolia</span>
+      </div>
+
+      <div class="legend">
+        <span><i class="swatch stream"></i>Milady</span>
+        <span><i class="swatch other"></i>other blob</span>
+        <span><i class="swatch unused"></i>unused</span>
+      </div>
 
       <div class="stats">
         <div><span>Known</span><strong id="known-count">0</strong></div>
@@ -38,18 +86,33 @@
         <div><span>Metadata</span><strong id="metadata-age">-</strong></div>
       </div>
 
+      <section class="blobspace-panel">
+        <div id="slots" class="slots"></div>
+      </section>
+
+      <section class="segments-panel">
+        <div class="segments-heading">
+          <strong>Stream Segments</strong>
+          <input id="segment-lookup" type="search" placeholder="Paste tx URL, hash, or blob..." autocomplete="off" />
+          <button id="watch-segment" type="button">WATCH</button>
+        </div>
+        <div class="segments-table">
+          <div class="segment-head">
+            <span>SEQ</span>
+            <span>ARRIVED</span>
+            <span>TX</span>
+            <span>BLOBS</span>
+            <span>PLAY</span>
+          </div>
+          <div id="segments" class="segments"></div>
+        </div>
+      </section>
+
       <div class="cache-actions">
+        <button id="play-latest" type="button">Play latest</button>
         <button id="export-index" type="button">Export index</button>
         <button id="clear-cache" type="button">Clear cache</button>
       </div>
-
-      <section class="blobspace-panel">
-        <div class="section-heading">
-          <strong>Blobspace</strong>
-          <span id="rail-mode">warming</span>
-        </div>
-        <div id="slots" class="slots"></div>
-      </section>
 
       <details class="settings-panel">
         <summary>Connection settings</summary>
@@ -89,8 +152,6 @@
           <button type="submit">Save and reload</button>
         </form>
       </details>
-
-      <div id="segments" class="segments"></div>
     </aside>
   </main>
 

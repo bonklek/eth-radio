@@ -46,7 +46,22 @@ const els = {
   cacheLimit: document.querySelector('#cache-limit'),
   refresh: document.querySelector('#refresh'),
   streamToggle: document.querySelector('#stream-toggle'),
+  loopToggle: document.querySelector('#loop-toggle'),
+  muteToggle: document.querySelector('#mute-toggle'),
+  volume: document.querySelector('#volume'),
   playLatest: document.querySelector('#play-latest'),
+  stationState: document.querySelector('#station-state'),
+  utcClock: document.querySelector('#utc-clock'),
+  networkLabel: document.querySelector('#network-label'),
+  nowTitle: document.querySelector('#now-title'),
+  nowDetail: document.querySelector('#now-detail'),
+  segmentLookup: document.querySelector('#segment-lookup'),
+  watchSegment: document.querySelector('#watch-segment'),
+  metricSegment: document.querySelector('#metric-segment'),
+  metricPayload: document.querySelector('#metric-payload'),
+  metricBlobs: document.querySelector('#metric-blobs'),
+  metricLatency: document.querySelector('#metric-latency'),
+  metricFetch: document.querySelector('#metric-fetch'),
   exportIndex: document.querySelector('#export-index'),
   clearCache: document.querySelector('#clear-cache'),
   status: document.querySelector('#status'),
@@ -76,6 +91,7 @@ let state = {
   metadataUpdatedAt: '',
   currentRecordKey: '',
   streaming: false,
+  loopReplay: false,
   busy: false,
   refreshTimer: null,
   prefetching: new Set(),
@@ -112,6 +128,10 @@ function saveConfig(config) {
 
 function setStatus(value) {
   els.status.textContent = value
+}
+
+function on(element, eventName, handler) {
+  if (element) element.addEventListener(eventName, handler)
 }
 
 function normalizeHex(value) {
@@ -181,6 +201,31 @@ function fmtAge(iso) {
 function fmtTime(timestampMs) {
   if (!timestampMs) return '-'
   return new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestampMs))
+}
+
+function fmtLocalTime(timestampMs) {
+  if (!timestampMs) return '-'
+  return new Intl.DateTimeFormat([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(new Date(timestampMs))
+}
+
+function fmtUtcClock(date = new Date()) {
+  return `${date.toISOString().slice(11, 19)} UTC`
+}
+
+function fmtLatency(segment) {
+  if (!segment?.createdAt) return '-'
+  return fmtAge(segment.createdAt)
+}
+
+function segmentArrived(segment) {
+  if (!segment?.createdAt) return `block ${segment.blockNumber}`
+  return fmtLocalTime(Date.parse(segment.createdAt))
 }
 
 function escapeHtml(value) {
@@ -625,6 +670,7 @@ function playRecord(record) {
   state.currentRecordKey = record.cacheKey
   els.player.src = objectUrl(record)
   els.empty.classList.add('hidden')
+  els.stationState.textContent = 'LIVE'
   void els.player.play().catch(() => {})
 }
 
@@ -761,7 +807,7 @@ function cachedBlobspaceRows(known) {
 function renderBlobspace() {
   const blobspace = state.blobspace || { rows: [], mode: 'warming' }
   els.railMode.textContent = blobspace.mode === 'live'
-    ? 'live beacon sidecars'
+    ? 'Live beacon sidecars from /eth/v1/beacon/blob_sidecars/{slot}.'
     : blobspace.warning || blobspace.mode || 'warming'
   const rows = [...(blobspace.rows || [])].sort((a, b) => Number(b.slot) - Number(a.slot))
   els.slots.innerHTML = rows.map((row) => {
@@ -783,7 +829,7 @@ function renderBlobspace() {
           <strong>Slot ${escapeHtml(row.slot)}</strong>
           <span>${Number(row.blobCount || blobs.length)} / ${max} blobs${streamCount ? ` - ${streamCount} stream` : ''}</span>
         </div>
-        <div class="slot-meta"><span>${fmtTime(row.timestampMs)}</span><span>${row.error ? 'endpoint miss' : ''}</span></div>
+        <div class="slot-meta"><span><strong>Local</strong> ${escapeHtml(fmtLocalTime(row.timestampMs))}</span><span>${row.error ? 'endpoint miss' : ''}</span></div>
         <div class="blob-grid">${cells}</div>
         ${row.error ? `<div class="slot-error">${escapeHtml(row.error)}</div>` : ''}
       </section>
@@ -799,26 +845,43 @@ function renderHealth() {
 }
 
 function render() {
+  const activeRecord = currentRecord()
+  const latestSegment = [...state.segments].sort((a, b) => a.sequence - b.sequence).at(-1) || null
   els.knownCount.textContent = String(state.segments.length)
   els.verifiedCount.textContent = String(state.verified.size)
   els.metadataAge.textContent = fmtAge(state.metadataUpdatedAt)
-  els.streamToggle.textContent = state.streaming ? 'Stop stream' : 'Start stream'
+  els.streamToggle.textContent = state.streaming ? 'LIVE' : 'LIVE'
+  els.streamToggle.classList.toggle('active', state.streaming)
+  els.loopToggle?.classList.toggle('active', state.loopReplay)
+  els.stationState.textContent = state.streaming || state.verified.size ? 'LIVE' : 'OFFLINE'
+  document.querySelector('.status-badge')?.classList.toggle('online', state.streaming || state.verified.size > 0)
+  for (const button of document.querySelectorAll('.chain-toggle button')) {
+    const isEth = button.textContent.trim() === 'ETH'
+    button.classList.toggle('active', isEth ? state.config.chainPreset === 'mainnet' : state.config.chainPreset === 'sepolia')
+  }
+  els.networkLabel.textContent = CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset
+  els.nowTitle.textContent = activeRecord ? `Playing segment #${activeRecord.sequence}` : state.segments.length ? 'Waiting for verified playback' : 'Waiting for stream segments'
+  els.nowDetail.textContent = 'Execution RPC announces segments; beacon sidecars carry the bytes.'
+  els.metricSegment.textContent = activeRecord ? `#${activeRecord.sequence}` : latestSegment ? `#${latestSegment.sequence}` : '-'
+  els.metricPayload.textContent = activeRecord ? fmtBytes(activeRecord.bytes) : latestSegment ? fmtBytes(latestSegment.payloadBytes) : '-'
+  els.metricBlobs.textContent = latestSegment ? String(latestSegment.blobCount || '-') : '-'
+  els.metricLatency.textContent = latestSegment ? fmtLatency(latestSegment) : '-'
+  els.metricFetch.textContent = state.activeBeaconApi ? 'ok / ok' : '- / -'
   renderHealth()
   renderBlobspace()
   els.segments.innerHTML = state.segments.map((segment) => {
     const record = state.verified.get(segment.cacheKey)
     const queued = state.prefetching.has(segment.cacheKey)
     return `
-      <section class="segment ${record ? 'verified' : ''}">
-        <div>
-          <strong>#${escapeHtml(segment.sequence)} ${escapeHtml(shortHash(segment.txHash))}</strong>
-          <span>${escapeHtml(segment.blobCount)} blobs - block ${escapeHtml(segment.blockNumber)} - ${escapeHtml(fmtBytes(segment.payloadBytes))}</span>
-        </div>
-        <button type="button" data-key="${escapeHtml(segment.cacheKey)}">${record ? 'Play' : queued ? 'Queued' : 'Verify'}</button>
-        ${record ? `<span class="badge">${escapeHtml(record.source)}</span>` : queued ? '<span class="badge warn">queued</span>' : ''}
+      <section class="segment-row ${record ? 'verified' : ''}">
+        <strong>#${escapeHtml(segment.sequence)}</strong>
+        <span>${escapeHtml(segmentArrived(segment))}</span>
+        <span title="${escapeHtml(segment.txHash)}">${escapeHtml(shortHash(segment.txHash))}</span>
+        <span>${escapeHtml(segment.blobCount)}</span>
+        <button type="button" data-key="${escapeHtml(segment.cacheKey)}">${record ? 'PLAY' : queued ? '...' : 'GET'}</button>
       </section>
     `
-  }).join('') || '<p class="muted">No Station events found in the current window.</p>'
+  }).join('') || '<div class="empty-row">No stream segments yet</div>'
 }
 
 async function refresh() {
@@ -898,7 +961,7 @@ function exportIndex() {
   })
 }
 
-els.form.addEventListener('submit', (event) => {
+on(els.form, 'submit', (event) => {
   event.preventDefault()
   state.config = {
     ...state.config,
@@ -924,7 +987,7 @@ els.form.addEventListener('submit', (event) => {
   void refresh()
 })
 
-els.chainPreset.addEventListener('change', () => {
+on(els.chainPreset, 'change', () => {
   const preset = CHAIN_PRESETS[els.chainPreset.value] || CHAIN_PRESETS[DEFAULTS.chainPreset]
   els.streamId.value = preset.streamId
   els.stationAddress.value = preset.stationAddress
@@ -933,18 +996,46 @@ els.chainPreset.addEventListener('change', () => {
   els.beaconApis.value = preset.beaconApis.join('\n')
 })
 
-els.refresh.addEventListener('click', () => void refresh())
-els.streamToggle.addEventListener('click', () => {
+on(els.refresh, 'click', () => void refresh())
+on(els.streamToggle, 'click', () => {
   if (state.streaming) stopStreaming()
   else startStreaming()
 })
-els.playLatest.addEventListener('click', () => {
+on(els.loopToggle, 'click', () => {
+  state.loopReplay = !state.loopReplay
+  els.player.loop = state.loopReplay
+  render()
+})
+on(els.muteToggle, 'click', () => {
+  els.player.muted = !els.player.muted
+  els.muteToggle.textContent = els.player.muted ? 'M' : 'V'
+})
+on(els.volume, 'input', () => {
+  els.player.volume = Number(els.volume.value)
+})
+on(els.playLatest, 'click', () => {
   const record = latestVerifiedRecord()
   if (record) playRecord(record)
 })
-els.exportIndex.addEventListener('click', exportIndex)
-els.clearCache.addEventListener('click', () => void clearCache().then(() => setStatus('Browser cache cleared.')))
-els.player.addEventListener('ended', () => {
+on(els.watchSegment, 'click', () => {
+  const query = normalizeHex(els.segmentLookup.value.trim())
+  if (!query) return
+  const segment = state.segments.find((candidate) => {
+    return normalizeHex(candidate.txHash).includes(query.replace(/^0x/, ''))
+      || String(candidate.sequence) === query
+      || candidate.blobVersionedHashes.some((hash) => normalizeHex(hash).includes(query.replace(/^0x/, '')))
+  })
+  if (!segment) {
+    setStatus('No matching stream segment found in the current window.')
+    return
+  }
+  const record = state.verified.get(segment.cacheKey)
+  if (record) playRecord(record)
+  else void verifySegment(segment).then(playRecord).catch((error) => setStatus(error.message)).finally(render)
+})
+on(els.exportIndex, 'click', exportIndex)
+on(els.clearCache, 'click', () => void clearCache().then(() => setStatus('Browser cache cleared.')))
+on(els.player, 'ended', () => {
   if (!state.streaming) return
   const current = currentRecord()
   const next = current ? nextVerifiedRecord(current) : null
@@ -958,7 +1049,7 @@ els.player.addEventListener('ended', () => {
     if (refreshedNext) playRecord(refreshedNext)
   })
 })
-els.segments.addEventListener('click', async (event) => {
+on(els.segments, 'click', async (event) => {
   const button = event.target.closest('button[data-key]')
   if (!button) return
   const segment = state.segments.find((candidate) => candidate.cacheKey === button.dataset.key)
@@ -977,7 +1068,12 @@ els.segments.addEventListener('click', async (event) => {
   }
 })
 
+setInterval(() => {
+  els.utcClock.textContent = fmtUtcClock()
+}, 1000)
+els.utcClock.textContent = fmtUtcClock()
 fillForm()
 render()
 void refreshCacheStats()
 void restoreSegmentMetadata().finally(() => void refresh())
+if (els.player && els.volume) els.player.volume = Number(els.volume.value)
