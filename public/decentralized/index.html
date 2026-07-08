@@ -26,41 +26,6 @@
 
     <aside class="panel">
       <h1>Radio Free Ethereum</h1>
-      <form id="settings" class="settings">
-        <label>
-          Chain preset
-          <select id="chain-preset" name="chainPreset"></select>
-        </label>
-        <label>
-          Stream
-          <input id="stream-id" name="streamId" autocomplete="off" />
-        </label>
-        <label>
-          Station
-          <input id="station-address" name="stationAddress" autocomplete="off" />
-        </label>
-        <label>
-          From block
-          <input id="from-block" name="fromBlock" inputmode="numeric" />
-        </label>
-        <label>
-          Execution RPCs
-          <textarea id="execution-rpcs" name="executionRpcs" rows="3" spellcheck="false"></textarea>
-        </label>
-        <label>
-          Beacon APIs
-          <textarea id="beacon-apis" name="beaconApis" rows="3" spellcheck="false"></textarea>
-        </label>
-        <label>
-          Archive payload URLs
-          <textarea id="archive-templates" name="archiveTemplates" rows="3" spellcheck="false"></textarea>
-        </label>
-        <label>
-          Cache limit MB
-          <input id="cache-limit" name="cacheLimitMb" inputmode="numeric" />
-        </label>
-        <button type="submit">Save and reload</button>
-      </form>
 
       <div class="stats">
         <div><span>Known</span><strong id="known-count">0</strong></div>
@@ -85,6 +50,45 @@
         </div>
         <div id="slots" class="slots"></div>
       </section>
+
+      <details class="settings-panel">
+        <summary>Connection settings</summary>
+        <form id="settings" class="settings">
+          <label>
+            Chain preset
+            <select id="chain-preset" name="chainPreset"></select>
+          </label>
+          <label>
+            Stream
+            <input id="stream-id" name="streamId" autocomplete="off" />
+          </label>
+          <label>
+            Station
+            <input id="station-address" name="stationAddress" autocomplete="off" />
+          </label>
+          <label>
+            From block
+            <input id="from-block" name="fromBlock" inputmode="numeric" />
+          </label>
+          <label>
+            Execution RPCs
+            <textarea id="execution-rpcs" name="executionRpcs" rows="3" spellcheck="false"></textarea>
+          </label>
+          <label>
+            Beacon APIs
+            <textarea id="beacon-apis" name="beaconApis" rows="3" spellcheck="false"></textarea>
+          </label>
+          <label>
+            Archive payload URLs
+            <textarea id="archive-templates" name="archiveTemplates" rows="3" spellcheck="false"></textarea>
+          </label>
+          <label>
+            Cache limit MB
+            <input id="cache-limit" name="cacheLimitMb" inputmode="numeric" />
+          </label>
+          <button type="submit">Save and reload</button>
+        </form>
+      </details>
 
       <div id="segments" class="segments"></div>
     </aside>

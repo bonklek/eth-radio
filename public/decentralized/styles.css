@@ -114,7 +114,7 @@ video {
 
 .panel {
   display: grid;
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(170px, 0.85fr) auto minmax(120px, 1fr);
   gap: 14px;
   min-width: 0;
   max-height: 100vh;
@@ -130,9 +130,28 @@ h1 {
   font-weight: 700;
 }
 
+.settings-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1118;
+}
+
+.settings-panel summary {
+  min-height: 38px;
+  padding: 9px 10px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.settings-panel summary:hover {
+  color: var(--accent);
+}
+
 .settings {
   display: grid;
   gap: 10px;
+  padding: 0 10px 10px;
 }
 
 label {
@@ -220,12 +239,13 @@ textarea {
 
 .blobspace-panel {
   min-height: 0;
+  overflow: hidden;
 }
 
 .slots {
   display: grid;
   gap: 7px;
-  max-height: 245px;
+  max-height: 100%;
   overflow: auto;
 }
 
