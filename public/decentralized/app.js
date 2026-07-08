@@ -806,9 +806,7 @@ function cachedBlobspaceRows(known) {
 
 function renderBlobspace() {
   const blobspace = state.blobspace || { rows: [], mode: 'warming' }
-  els.railMode.textContent = blobspace.mode === 'live'
-    ? 'Live beacon sidecars from /eth/v1/beacon/blob_sidecars/{slot}.'
-    : blobspace.warning || blobspace.mode || 'warming'
+  els.railMode.textContent = 'Live beacon sidecars from /eth/v1/beacon/blob_sidecars/{slot}.'
   const rows = [...(blobspace.rows || [])].sort((a, b) => Number(b.slot) - Number(a.slot))
   els.slots.innerHTML = rows.map((row) => {
     const blobs = row.blobs || []
