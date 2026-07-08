@@ -2839,6 +2839,7 @@ function indexHtml() {
     let loopReplay = false
     let refreshSpinTimer = null
     const segmentsPaneHeightKey = 'rfe-segments-pane-height'
+    let lastBlobspaceUpdateAt = 0
 
     const fmtBytes = (bytes) => bytes ? (bytes / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' KB' : '-'
     const fmtMs = (ms) => Number.isFinite(ms) ? Math.round(ms) + ' ms' : '-'
@@ -3378,13 +3379,23 @@ function indexHtml() {
         segments = data.segments || []
         if (segments.length) lastEventAt = Date.parse(segments.at(-1).createdAt || Date.now())
         renderRail(data.blobspace || { rows: [], maxBlobsPerBlock: 21 })
+        lastBlobspaceUpdateAt = Date.now()
         renderSegments()
-        await fillBuffer()
+        await fillBuffer().catch((error) => {
+          nowDetail.textContent = 'Blobspace feed is live; media prefetch is retrying: ' + error.message
+        })
         renderSegments()
         chooseState()
       } catch (error) {
-        blackoutVideo()
-        setState('interrupted', 'Tuner interrupted', error.message)
+        if (lastBlobspaceUpdateAt && Date.now() - lastBlobspaceUpdateAt < 15_000) {
+          statusEl.textContent = 'retrying'
+          nowDetail.textContent = 'Blobspace feed is still visible; retrying API fetch: ' + error.message
+          overlayTitle.textContent = 'Retrying tuner fetch'
+          overlayCopy.textContent = error.message
+        } else {
+          blackoutVideo()
+          setState('interrupted', 'Tuner interrupted', error.message)
+        }
       } finally {
         polling = false
         refreshSpinTimer = setTimeout(() => refresh.classList.remove('is-spinning'), 650)
