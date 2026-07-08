@@ -291,6 +291,12 @@ video {
   font-weight: 800;
 }
 
+.now-controls .icon-button {
+  border-color: #66708e;
+  background: #d9d8ef;
+  color: #111522;
+}
+
 .now-controls button.active {
   border-color: var(--mint);
   box-shadow: 0 0 0 1px rgba(156, 247, 206, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.18);
