@@ -36,6 +36,25 @@ function arg(name, fallback) {
   return process.argv[idx + 1]
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function getTransactionWithRetry(hash, attempts = 8, retryMs = 3000) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await publicClient.getTransaction({ hash })
+    } catch (error) {
+      lastError = error
+      if (attempt === attempts) break
+      console.warn(`getTransaction retry ${attempt}/${attempts} for ${hash}: ${error.shortMessage || error.message}`)
+      await sleep(retryMs)
+    }
+  }
+  throw lastError
+}
+
 const input = arg('input')
 if (!input) usage()
 
@@ -178,7 +197,7 @@ const receipt = await publicClient.waitForTransactionReceipt({ hash })
 if (receipt.status !== 'success') {
   throw new Error(`Transaction ${hash} was included but failed with status ${receipt.status}`)
 }
-const transaction = await publicClient.getTransaction({ hash })
+const transaction = await getTransactionWithRetry(hash)
 const streamIdHash = keccak256(stringToBytes(streamId))
 if (stationAddress) {
   const stationEvent = receipt.logs

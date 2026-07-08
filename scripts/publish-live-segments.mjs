@@ -6,18 +6,20 @@ import { spawn } from 'node:child_process'
 import { bytesToHex, toBlobs, zeroHash } from 'viem'
 import { hasCostBudget, readSegmentFilesAsCostSegments, runCostPreflightOrExit } from './lib/cost-preflight.mjs'
 
-function usage() {
-  console.error(`Usage:
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm live:publish -- --dir <segment-dir> --stream-id <id> [--segment-ms 12000] [--codec av1/webm]
                        [--start-seq 0] [--max-blobs 6] [--max-bytes 761856]
                        [--once] [--exit-when-caught-up] [--poll-ms 1000] [--pace]
                        [--publish-retries 5] [--retry-ms 12000] [--require-manifest]
+                       [--state <state.json>]
                        [--max-cost-eth 0.1] [--stream-duration-ms 3600000]
 
 Environment:
   ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=sepolia
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
 function arg(name, fallback) {
@@ -29,6 +31,8 @@ function arg(name, fallback) {
 function hasFlag(name) {
   return process.argv.includes(`--${name}`)
 }
+
+if (hasFlag('help')) usage(0)
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -129,7 +133,7 @@ if (!dirArg || !streamId) usage()
 
 const dir = path.resolve(dirArg)
 const segmentMs = Number(arg('segment-ms', '12000'))
-const codec = arg('codec', 'av1/webm')
+const codec = arg('codec', 'av1-opus/webm')
 const startSeq = Number(arg('start-seq', '0'))
 const maxBlobs = Number(arg('max-blobs', '6'))
 const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
