@@ -430,6 +430,19 @@ video {
   scrollbar-color: #c5d8ff #0b1018;
 }
 
+.slots::-webkit-scrollbar {
+  width: 8px;
+}
+
+.slots::-webkit-scrollbar-track {
+  background: #0b1018;
+}
+
+.slots::-webkit-scrollbar-thumb {
+  border: 1px solid #0b1018;
+  background: #c5d8ff;
+}
+
 .slot {
   display: grid;
   gap: 7px;
