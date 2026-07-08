@@ -10,10 +10,10 @@
   <main class="shell">
     <section class="main-column">
       <header class="topbar">
-        <button class="icon-button" type="button" aria-label="Theme settings">☼</button>
+        <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
         <div class="chain-toggle" aria-label="Chain selector">
-          <button class="active" type="button">ETH</button>
-          <button type="button">SEP</button>
+          <button id="chain-mainnet" type="button" data-chain-preset="mainnet" aria-pressed="false">ETH</button>
+          <button id="chain-sepolia" type="button" data-chain-preset="sepolia" aria-pressed="true">SEP</button>
         </div>
         <div class="brand">
           <h1>Radio Free Ethereum</h1>
@@ -99,7 +99,7 @@
         <div class="segments-table">
           <div class="segment-head">
             <span>SEQ</span>
-            <span>ARRIVED</span>
+            <span>UTC / BLOCK</span>
             <span>TX</span>
             <span>BLOBS</span>
             <span>PLAY</span>

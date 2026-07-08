@@ -18,9 +18,7 @@ import {
   zeroHash,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { sepolia } from 'viem/chains'
-
-const chains = { sepolia }
+import { assertRpcChain, chainFromEnv, chainNames, requireMainnetConfirmation, requireSupportedChain } from './chains.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -31,7 +29,7 @@ function usage() {
        [--require-manifest] [--state <state.json>]
 
 Environment:
-  ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=sepolia
+  ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=${chainNames}
   optional ETH_SEND_RPC_URLS comma-separated fallback list
 `)
   process.exit(1)
@@ -190,9 +188,9 @@ async function main() {
   if (!dirArg || !streamId) usage()
   if (!process.env.ETH_RPC_URL || !process.env.PRIVATE_KEY || !process.env.STATION_ADDRESS) usage()
 
-  const chainName = process.env.CHAIN || 'sepolia'
-  const chain = chains[chainName]
-  if (!chain) usage()
+  const { chainName, chain } = chainFromEnv()
+  requireSupportedChain(chain)
+  requireMainnetConfirmation(chainName, 'publish live blob transactions')
 
   const dir = path.resolve(dirArg)
   const segmentMs = Number(arg('segment-ms', '24000'))
@@ -229,6 +227,7 @@ async function main() {
   const account = privateKeyToAccount(process.env.PRIVATE_KEY)
   const clients = makeClients({ urls: rpcUrls(), account, chain })
   const publicClient = clients[0].publicClient
+  await assertRpcChain(publicClient, chain)
   const wasmKzg = await loadKZG()
   const kzg = {
     blobToKzgCommitment(blob) {

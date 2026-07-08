@@ -17,6 +17,20 @@
   font-family: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
+body.light {
+  color-scheme: light;
+  --bg: #f3f0f6;
+  --panel: #f8f6fb;
+  --panel-2: #eeeaf5;
+  --panel-3: #e5dfed;
+  --stage: #f7f4fa;
+  --line: #9a94bc;
+  --line-hot: #7b78c7;
+  --text: #1b1924;
+  --muted: rgba(31, 29, 42, 0.68);
+  --unused: #e4dfec;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -26,6 +40,13 @@ body {
   min-height: 100vh;
   background: radial-gradient(circle at top left, #151a25 0, var(--bg) 42%);
   color: var(--text);
+}
+
+body.light {
+  background:
+    repeating-linear-gradient(0deg, rgba(85, 95, 193, 0.06), rgba(85, 95, 193, 0.06) 1px, transparent 1px, transparent 8px),
+    repeating-linear-gradient(90deg, rgba(199, 102, 147, 0.045), rgba(199, 102, 147, 0.045) 1px, transparent 1px, transparent 8px),
+    var(--bg);
 }
 
 button,
@@ -49,9 +70,21 @@ button:hover {
   border-color: var(--pink);
 }
 
+button:active:not(:disabled),
+button.pressed {
+  box-shadow: inset 2px 2px 0 rgba(0, 0, 0, 0.38);
+  transform: translate(1px, 1px);
+}
+
 button:disabled {
   cursor: wait;
   opacity: 0.55;
+}
+
+@keyframes spin-refresh {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .shell {
@@ -94,6 +127,52 @@ button:disabled {
   min-width: 38px;
   padding: 0;
   text-align: center;
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.25;
+}
+
+.icon-button.is-spinning svg {
+  animation: spin-refresh 650ms linear infinite;
+}
+
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  border-color: #b8bddf;
+  border-right-color: #07080d;
+  border-bottom-color: #07080d;
+  background: #d8d2d9;
+  color: #171521;
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.7);
+}
+
+.theme-toggle:hover {
+  background: #fff;
+  color: #202a76;
+}
+
+.theme-toggle:active {
+  border-color: #07080d #b8bddf #b8bddf #07080d;
+  box-shadow: inset 2px 2px 0 rgba(0, 0, 0, 0.34);
+  transform: translate(1px, 1px);
+}
+
+.theme-toggle svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
 }
 
 .chain-toggle {
@@ -203,18 +282,19 @@ button:disabled {
 .video-column {
   display: grid;
   place-items: center;
-  aspect-ratio: 9 / 16;
-  width: min(34vw, 330px);
-  min-width: 210px;
-  max-height: min(72vh, 680px);
-  min-height: 360px;
+  aspect-ratio: 16 / 9;
+  width: min(100%, 1100px);
+  min-width: 360px;
+  max-height: min(68vh, 620px);
+  min-height: 220px;
   background: linear-gradient(180deg, #17191d, #06070a 86%);
 }
 
 video {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  background: #020306;
 }
 
 .empty-state {
@@ -297,14 +377,29 @@ video {
   color: #111522;
 }
 
+.now-controls .icon-button:hover,
+.now-controls .icon-button:focus-visible {
+  color: #8a2452;
+}
+
+#mute-toggle {
+  color: #8a2452;
+}
+
+#mute-toggle[aria-pressed="false"] {
+  color: #244d87;
+}
+
 .now-controls button.active {
   border-color: var(--mint);
   box-shadow: 0 0 0 1px rgba(156, 247, 206, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .volume {
+  --volume-fill: 85%;
+  --volume-track: #2a2f38;
   width: 118px;
-  accent-color: var(--mint);
+  accent-color: var(--pink);
   appearance: none;
   height: 14px;
   background: transparent;
@@ -314,7 +409,7 @@ video {
   height: 4px;
   border: 1px solid #303744;
   border-radius: 999px;
-  background: #2a2f38;
+  background: linear-gradient(90deg, var(--pink) 0 var(--volume-fill), var(--volume-track) var(--volume-fill) 100%);
 }
 
 .volume::-webkit-slider-thumb {
@@ -331,7 +426,7 @@ video {
   height: 4px;
   border: 1px solid #303744;
   border-radius: 999px;
-  background: #2a2f38;
+  background: linear-gradient(90deg, var(--pink) 0 var(--volume-fill), var(--volume-track) var(--volume-fill) 100%);
 }
 
 .volume::-moz-range-thumb {
@@ -453,16 +548,23 @@ video {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 4px;
 }
 
 .stats span {
   color: var(--muted);
+  font-size: 8px;
 }
 
 .stats strong {
-  font-size: 16px;
+  font-size: 11px;
+}
+
+.stats div {
+  gap: 2px;
+  min-height: 32px;
+  padding: 5px 6px;
 }
 
 .blobspace-panel,
@@ -619,7 +721,7 @@ textarea {
 .segment-head,
 .segment-row {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) 66px 54px 48px;
+  grid-template-columns: 34px 76px minmax(62px, 1fr) 34px 48px;
   gap: 6px;
   align-items: center;
 }
@@ -646,11 +748,41 @@ textarea {
 }
 
 .segment-row strong,
-.segment-row span {
+.segment-row span,
+.segment-row a {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.segment-time {
+  display: grid;
+  gap: 1px;
+}
+
+.segment-time time,
+.segment-time small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segment-time small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.tx-link {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.tx-link:hover,
+.tx-link:focus-visible {
+  color: var(--pink);
+  text-decoration: underline;
 }
 
 .segment-row.verified {
@@ -670,9 +802,15 @@ textarea {
 }
 
 .cache-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 8px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.cache-actions button {
+  min-height: 26px;
+  padding: 4px 8px;
+  font-size: 10px;
 }
 
 .settings-panel {
@@ -714,6 +852,132 @@ textarea {
   resize: vertical;
 }
 
+body.light .topbar,
+body.light .viewer-frame,
+body.light .metrics,
+body.light .panel {
+  background: var(--panel);
+  box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.75), 4px 4px 0 rgba(68, 60, 92, 0.12);
+}
+
+body.light .topbar {
+  background: linear-gradient(90deg, #d9d3f1, #f2c7dc);
+}
+
+body.light .brand h1,
+body.light .sidebar-heading h2,
+body.light .metrics strong,
+body.light .stats strong,
+body.light .nowbar strong,
+body.light #status {
+  color: #201b33;
+  text-shadow: none;
+}
+
+body.light .brand p,
+body.light .sidebar-heading p,
+body.light .legend,
+body.light .slot-top span,
+body.light .slot-meta,
+body.light .segment-time small,
+body.light .nowbar span,
+body.light #status {
+  color: rgba(31, 29, 42, 0.72);
+}
+
+body.light .screen,
+body.light .nowbar,
+body.light .slot,
+body.light .segment-row,
+body.light .settings-panel,
+body.light input,
+body.light select,
+body.light textarea {
+  background: #ffffff;
+  color: #201b33;
+}
+
+body.light .slot,
+body.light .segment-row,
+body.light input,
+body.light select,
+body.light textarea {
+  border-color: #b9b3d2 #6f688c #6f688c #ffffff;
+}
+
+body.light .blob-cell {
+  background: #e4dfec;
+  border-color: #b9b3d2 #6f688c #6f688c #ffffff;
+}
+
+body.light .blob-cell.other {
+  background: #8d94ae;
+}
+
+body.light .blob-cell.stream {
+  background: var(--pink);
+}
+
+body.light button {
+  border-color: #b9b3d2 #6f688c #6f688c #ffffff;
+  background: #d8d2e2;
+  color: #201b33;
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.75), 1px 1px 0 rgba(68, 60, 92, 0.18);
+}
+
+body.light button:hover {
+  border-color: var(--pink-2);
+}
+
+body.light .chain-toggle {
+  background: #f7f4fa;
+}
+
+body.light .chain-toggle button {
+  background: transparent;
+  color: #35305b;
+  box-shadow: none;
+}
+
+body.light .chain-toggle button.active {
+  background: var(--pink);
+  color: #1a0d16;
+}
+
+body.light .live-button {
+  background: var(--mint);
+  color: #082018;
+}
+
+body.light #loop-toggle,
+body.light .now-controls .icon-button,
+body.light .status-badge,
+body.light .clock-badge,
+body.light #network-label {
+  background: #d9d8ef;
+  color: #111522;
+}
+
+body.light .metrics div,
+body.light .stats div,
+body.light .legend {
+  border-color: rgba(85, 95, 193, 0.28);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+body.light .empty-state {
+  background: rgba(8, 12, 21, 0.84);
+}
+
+body.light .empty-state strong {
+  color: var(--pink);
+  text-shadow: 1px 0 rgba(96, 201, 255, 0.55);
+}
+
+body.light .empty-state span {
+  color: #d9e2ff;
+}
+
 @media (max-width: 980px) {
   .shell {
     grid-template-columns: 1fr;
@@ -726,7 +990,8 @@ textarea {
   }
 
   .video-column {
-    width: min(72vw, 330px);
-    max-height: min(54vh, 620px);
+    width: min(94vw, 820px);
+    min-width: 0;
+    max-height: min(46vh, 460px);
   }
 }

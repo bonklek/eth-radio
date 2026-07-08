@@ -36,6 +36,15 @@ Use this checklist when publishing Radio Free Ethereum without a public backend.
 - The browser must verify SHA-256 against Station metadata before playback.
 - Cached media is trusted only because it was already verified locally.
 
+## Mainnet Spend Guardrails
+
+- Fund only a fresh low-balance hot wallet, never the real funding wallet key.
+- Set `CHAIN=mainnet` and verify `pnpm wallet:balance` reports chain ID `1`.
+- Spending scripts refuse mainnet unless
+  `MAINNET_CONFIRM="I understand this spends real ETH"` is set.
+- Start with `--once`, `--max-pending 1`, and a tiny segment before increasing
+  duration or balance.
+
 ## Publish Flow
 
 ```powershell

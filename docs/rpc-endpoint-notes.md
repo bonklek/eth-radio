@@ -5,9 +5,9 @@ The static client is a browser app, so endpoint reliability has two layers:
 1. The provider must support the execution or beacon methods the app needs.
 2. The provider must allow browser CORS requests from the deployed page.
 
-Sepolia remains the active target until the static IPFS page can watch live
-segments end to end. Mainnet presets exist for readiness only; use them after a
-mainnet Station contract is deployed and tested.
+Sepolia remains the default target. Mainnet presets and scripts are available,
+but spending scripts require `MAINNET_CONFIRM="I understand this spends real ETH"`
+when `CHAIN=mainnet`.
 
 ## Current Presets
 

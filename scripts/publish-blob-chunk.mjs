@@ -17,17 +17,15 @@ import {
   zeroHash,
   toBlobs,
 } from 'viem'
-import { sepolia } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
-
-const chains = { sepolia }
+import { assertRpcChain, chainFromEnv, chainNames, requireMainnetConfirmation, requireSupportedChain } from './chains.mjs'
 
 function usage() {
   console.error(`Usage:
   pnpm blob:publish -- --input <file> [--stream-id demo] [--seq 0] [--duration-ms 6000] [--codec av1/webm]
 
 Environment:
-  ETH_RPC_URL, PRIVATE_KEY, CHAIN=sepolia, optional TO_ADDRESS, STATION_ADDRESS, GAS_LIMIT
+  ETH_RPC_URL, PRIVATE_KEY, CHAIN=${chainNames}, optional TO_ADDRESS, STATION_ADDRESS, GAS_LIMIT
 `)
   process.exit(1)
 }
@@ -43,10 +41,11 @@ if (!input) usage()
 
 const rpcUrl = process.env.ETH_RPC_URL
 const privateKey = process.env.PRIVATE_KEY
-const chainName = process.env.CHAIN || 'sepolia'
-const chain = chains[chainName]
+const { chainName, chain } = chainFromEnv()
 
-if (!rpcUrl || !privateKey || !chain) usage()
+if (!rpcUrl || !privateKey) usage()
+requireSupportedChain(chain)
+requireMainnetConfirmation(chainName, 'publish blob transaction')
 
 const inputPath = path.resolve(input)
 const payload = fs.readFileSync(inputPath)
@@ -75,6 +74,7 @@ const walletClient = createWalletClient({
   chain,
   transport,
 })
+await assertRpcChain(publicClient, chain)
 
 const blobs = toBlobs({ data: bytesToHex(payload) })
 if (blobs.length > 6) {
