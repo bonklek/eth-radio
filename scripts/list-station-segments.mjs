@@ -58,6 +58,7 @@ const parsed = parseEventLogs({
 const segments = parsed.map((log) => ({
   blockNumber: log.blockNumber.toString(),
   transactionHash: log.transactionHash,
+  transactionIndex: log.transactionIndex,
   logIndex: log.logIndex,
   publisher: log.args.publisher,
   streamIdHash: log.args.streamIdHash,
@@ -69,7 +70,14 @@ const segments = parsed.map((log) => ({
   codec: log.args.codec,
   previousSegmentHash: log.args.previousSegmentHash,
   blobVersionedHashes: log.args.blobVersionedHashes,
-}))
+})).sort(
+  (a, b) =>
+    a.streamId.localeCompare(b.streamId) ||
+    Number(a.sequence) - Number(b.sequence) ||
+    Number(a.blockNumber) - Number(b.blockNumber) ||
+    Number(a.transactionIndex || 0) - Number(b.transactionIndex || 0) ||
+    Number(a.logIndex || 0) - Number(b.logIndex || 0),
+)
 
 console.log(JSON.stringify({
   chain: chainName,

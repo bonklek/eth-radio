@@ -19,14 +19,24 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { assertRpcChain, chainFromEnv, chainNames, requireMainnetConfirmation, requireSupportedChain } from './chains.mjs'
+import {
+  formatEth,
+  hasCostBudget,
+  parseEthToWei,
+  readCostOptions,
+  readSegmentFilesAsCostSegments,
+  runCostPreflightOrExit,
+} from './lib/cost-preflight.mjs'
 
 function usage() {
   console.error(`Usage:
   pnpm live:publish:pipelined -- --dir <segment-dir> --stream-id <id>
        [--segment-ms 24000] [--codec av1-opus/webm] [--start-seq 0]
        [--max-blobs 6] [--max-bytes 761856] [--poll-ms 1000]
-       [--max-pending 2] [--send-retries 8] [--retry-ms 5000]
+       [--max-pending 2] [--max-pending-min 1] [--max-pending-max 4] [--adaptive-pending]
+       [--send-retries 8] [--retry-ms 5000]
        [--require-manifest] [--state <state.json>]
+       [--max-cost-eth 0.1] [--stream-duration-ms 3600000]
 
 Environment:
   ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=${chainNames}
@@ -119,6 +129,31 @@ function shortError(error) {
   return `${details}${status}`.split('\n')[0]
 }
 
+function timingMs(start, end) {
+  if (!start || !end) return null
+  return Date.parse(end) - Date.parse(start)
+}
+
+function pendingAgeMs(item, now = Date.now()) {
+  const submittedAt = Date.parse(item.submittedAt || item.startedAt || '')
+  return Number.isFinite(submittedAt) ? now - submittedAt : 0
+}
+
+function adaptivePendingLimit({ state, baseMaxPending, minPending, maxPending, segmentMs }) {
+  const pending = state.submitted || []
+  if (!pending.length) return baseMaxPending
+  const oldestMs = Math.max(...pending.map((item) => pendingAgeMs(item)))
+  if (oldestMs > segmentMs * 4) return minPending
+  if (pending.length >= baseMaxPending && oldestMs < segmentMs * 1.5) return Math.min(maxPending, baseMaxPending + 1)
+  return baseMaxPending
+}
+
+function receiptCostWei(receipt) {
+  const executionWei = receipt.gasUsed * receipt.effectiveGasPrice
+  const blobWei = receipt.blobGasUsed && receipt.blobGasPrice ? receipt.blobGasUsed * receipt.blobGasPrice : 0n
+  return { executionWei, blobWei, totalWei: executionWei + blobWei }
+}
+
 function makeClients({ urls, account, chain }) {
   return urls.map((url) => {
     const transport = http(url, { timeout: 60_000 })
@@ -198,7 +233,9 @@ async function main() {
   const startSeq = Number(arg('start-seq', '0'))
   const maxBlobs = Number(arg('max-blobs', '6'))
   const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
-  const maxPending = Number(arg('max-pending', '2'))
+  const baseMaxPending = Number(arg('max-pending', '2'))
+  const minPending = Number(arg('max-pending-min', '1'))
+  const hardMaxPending = Number(arg('max-pending-max', String(Math.max(baseMaxPending, 4))))
   const pollMs = Number(arg('poll-ms', '1000'))
   const sendRetries = Number(arg('send-retries', '8'))
   const retryMs = Number(arg('retry-ms', '5000'))
@@ -206,9 +243,16 @@ async function main() {
   const statePath = path.resolve(arg('state', `work/blob-radio-testnet/live-state/${sanitize(streamId)}.pipelined.json`))
   const once = hasFlag('once')
   const exitWhenCaughtUp = hasFlag('exit-when-caught-up')
+  const adaptivePending = hasFlag('adaptive-pending')
+  const costOptions = readCostOptions(process.argv)
+  const runtimeBudgetWei = costOptions.maxCostEth ? parseEthToWei(costOptions.maxCostEth) : null
 
   if (!fs.existsSync(dir)) throw new Error(`Segment directory not found: ${dir}`)
-  if (!Number.isInteger(maxPending) || maxPending < 1) throw new Error(`Invalid --max-pending ${maxPending}`)
+  if (!Number.isInteger(baseMaxPending) || baseMaxPending < 1) throw new Error(`Invalid --max-pending ${baseMaxPending}`)
+  if (!Number.isInteger(minPending) || minPending < 1) throw new Error(`Invalid --max-pending-min ${minPending}`)
+  if (!Number.isInteger(hardMaxPending) || hardMaxPending < baseMaxPending) {
+    throw new Error(`Invalid --max-pending-max ${hardMaxPending}; must be >= --max-pending`)
+  }
   fs.mkdirSync(path.dirname(statePath), { recursive: true })
 
   let state = {
@@ -217,12 +261,28 @@ async function main() {
     previousSegmentHash: zeroHash,
     submitted: [],
     published: [],
+    metrics: {
+      submittedCount: 0,
+      confirmedCount: 0,
+      latestPendingLimit: baseMaxPending,
+      latestTimings: null,
+      actualSpendWei: '0',
+      actualExecutionSpendWei: '0',
+      actualBlobSpendWei: '0',
+      runtimeBudgetWei: runtimeBudgetWei?.toString() || null,
+      runtimeBudgetExhausted: false,
+    },
   }
   if (fs.existsSync(statePath) && !hasFlag('reset')) {
     state = readJson(statePath)
     state.submitted ||= []
     state.published ||= []
+    state.metrics ||= {}
+    state.metrics.actualSpendWei ||= '0'
+    state.metrics.actualExecutionSpendWei ||= '0'
+    state.metrics.actualBlobSpendWei ||= '0'
   }
+  if (runtimeBudgetWei) state.metrics.runtimeBudgetWei = runtimeBudgetWei.toString()
 
   const account = privateKeyToAccount(process.env.PRIVATE_KEY)
   const clients = makeClients({ urls: rpcUrls(), account, chain })
@@ -245,11 +305,18 @@ async function main() {
   console.log(`pipelined publisher watching ${dir}`)
   console.log(`stream: ${streamId}`)
   console.log(`next sequence: ${state.nextSequence}`)
-  console.log(`max pending: ${maxPending}`)
+  console.log(`max pending: ${baseMaxPending}${adaptivePending ? ` adaptive ${minPending}-${hardMaxPending}` : ''}`)
   console.log(`send retries: ${sendRetries}, retry ms: ${retryMs}`)
   console.log(`next nonce: ${nextNonce}`)
   console.log(`rpc read: ${clients[0].url}`)
-  console.log(`rpc send fallback count: ${clients.length}`)
+  console.log(`rpc send order: ${clients.map((client) => client.url).join(', ')}`)
+
+  if (hasCostBudget()) {
+    await runCostPreflightOrExit({
+      segments: readSegmentFilesAsCostSegments(segmentFiles(dir, streamId).slice(state.nextSequence)),
+      segmentMs,
+    })
+  }
 
   async function sendTransactionWithFallback(tx) {
     let lastError = null
@@ -339,6 +406,7 @@ async function main() {
         txHash: item.txHash,
         blockHash: receipt.blockHash,
         blockNumber: receipt.blockNumber.toString(),
+        transactionIndex: receipt.transactionIndex,
         blobVersionedHashes: transaction?.blobVersionedHashes || stationEvent.args.blobVersionedHashes || [],
         createdAt: new Date().toISOString(),
       }
@@ -347,6 +415,14 @@ async function main() {
       fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
       if (!state.published.some((published) => Number(published.sequence) === Number(item.sequence))) {
+        const costs = receiptCostWei(receipt)
+        const includedAt = manifest.createdAt
+        const timings = {
+          generatedToSubmitMs: timingMs(item.generatedAt, item.submittedAt),
+          submitToIncludedMs: timingMs(item.submittedAt, includedAt),
+          generatedToIncludedMs: timingMs(item.generatedAt, includedAt),
+          firstSeenToIncludedMs: timingMs(item.firstSeenAt, includedAt),
+        }
         state.published.push({
           sequence: item.sequence,
           file: item.file,
@@ -356,10 +432,39 @@ async function main() {
           previousSegmentHash: item.previousSegmentHash,
           txHash: item.txHash,
           blockNumber: receipt.blockNumber.toString(),
-          startedAt: item.startedAt,
-          includedAt: manifest.createdAt,
+          transactionIndex: receipt.transactionIndex,
+          firstSeenAt: item.firstSeenAt,
+          generatedAt: item.generatedAt,
+          submittedAt: item.submittedAt,
+          includedAt,
+          timings,
+          costWei: costs.totalWei.toString(),
+          executionCostWei: costs.executionWei.toString(),
+          blobCostWei: costs.blobWei.toString(),
+          costEth: formatEth(costs.totalWei),
         })
         state.published.sort((a, b) => Number(a.sequence) - Number(b.sequence))
+        state.metrics.confirmedCount = Number(state.metrics.confirmedCount || 0) + 1
+        state.metrics.latestTimings = timings
+        state.metrics.actualSpendWei = (BigInt(state.metrics.actualSpendWei || '0') + costs.totalWei).toString()
+        state.metrics.actualExecutionSpendWei = (
+          BigInt(state.metrics.actualExecutionSpendWei || '0') + costs.executionWei
+        ).toString()
+        state.metrics.actualBlobSpendWei = (BigInt(state.metrics.actualBlobSpendWei || '0') + costs.blobWei).toString()
+        state.metrics.actualSpendEth = formatEth(BigInt(state.metrics.actualSpendWei))
+        state.metrics.actualExecutionSpendEth = formatEth(BigInt(state.metrics.actualExecutionSpendWei))
+        state.metrics.actualBlobSpendEth = formatEth(BigInt(state.metrics.actualBlobSpendWei))
+        if (runtimeBudgetWei && BigInt(state.metrics.actualSpendWei) >= runtimeBudgetWei) {
+          state.metrics.runtimeBudgetExhausted = true
+          state.metrics.runtimeBudgetExhaustedAt = new Date().toISOString()
+        }
+        const recent = state.published.slice(-20)
+        state.metrics.recentAverageSubmitToIncludedMs = Math.round(
+          recent.reduce((sum, segment) => sum + Number(segment.timings?.submitToIncludedMs || 0), 0) / recent.length,
+        )
+        state.metrics.recentAverageGeneratedToIncludedMs = Math.round(
+          recent.reduce((sum, segment) => sum + Number(segment.timings?.generatedToIncludedMs || 0), 0) / recent.length,
+        )
       }
       console.log(`confirmed seq ${item.sequence}: ${item.txHash} block ${receipt.blockNumber}`)
     }
@@ -372,8 +477,10 @@ async function main() {
     const file = files[state.nextSequence]
     if (!file) return false
 
+    const firstSeenAt = new Date().toISOString()
     const manifestSegment = await waitForManifestSegment(dir, streamId, state.nextSequence, pollMs, requireManifest)
-    if (!manifestSegment) await waitForStableFile(file, pollMs)
+    const stat = manifestSegment ? fs.statSync(manifestSegment.file) : await waitForStableFile(file, pollMs)
+    const generatedAt = new Date(stat.mtimeMs).toISOString()
     const payload = fs.readFileSync(file)
     const blobs = toBlobs({ data: bytesToHex(payload) })
     const payloadSha256 = crypto.createHash('sha256').update(payload).digest('hex')
@@ -411,6 +518,7 @@ async function main() {
     if (process.env.GAS_LIMIT) tx.gas = BigInt(process.env.GAS_LIMIT)
     else tx.gas = 180000n
 
+    const submittedAt = new Date().toISOString()
     console.log(`submitting seq ${sequence}: ${payload.length} bytes, ${blobs.length} blob(s), nonce ${nextNonce}`)
     const txHash = await sendTransactionWithFallback(tx)
     console.log(`submitted seq ${sequence}: ${txHash}`)
@@ -423,8 +531,11 @@ async function main() {
       previousSegmentHash,
       txHash,
       nonce: nextNonce,
-      startedAt: new Date().toISOString(),
+      firstSeenAt,
+      generatedAt,
+      submittedAt,
     })
+    state.metrics.submittedCount = Number(state.metrics.submittedCount || 0) + 1
     state.nextSequence += 1
     state.previousSegmentHash = `0x${payloadSha256}`
     nextNonce += 1
@@ -434,9 +545,25 @@ async function main() {
 
   while (true) {
     await confirmSubmitted()
+    if (runtimeBudgetWei && BigInt(state.metrics.actualSpendWei || '0') >= runtimeBudgetWei) {
+      state.metrics.runtimeBudgetExhausted = true
+      state.metrics.runtimeBudgetExhaustedAt ||= new Date().toISOString()
+      saveState(statePath, state)
+      console.log(
+        `runtime budget exhausted: spent ${formatEth(BigInt(state.metrics.actualSpendWei || '0'))} ETH / ${formatEth(runtimeBudgetWei)} ETH`,
+      )
+      break
+    }
 
     let submittedAny = false
-    while (state.submitted.length < maxPending) {
+    const pendingLimit = adaptivePending
+      ? adaptivePendingLimit({ state, baseMaxPending, minPending, maxPending: hardMaxPending, segmentMs })
+      : baseMaxPending
+    state.metrics.latestPendingLimit = pendingLimit
+    state.metrics.pendingCount = state.submitted.length
+    saveState(statePath, state)
+
+    while (state.submitted.length < pendingLimit) {
       const didSubmit = await submitNext()
       if (!didSubmit) break
       submittedAny = true

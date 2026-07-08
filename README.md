@@ -52,6 +52,41 @@ Do not commit `.env`, generated `work/` contents, virtual environments, local
 media PDFs, or dependency folders. The tracked files are the source and small
 runtime assets needed to clone, install, compile, and run the demo.
 
+### Cost Preflight
+
+Publishing scripts can refuse to start if the projected stream cost exceeds an
+operator budget:
+
+```powershell
+pnpm live:run -- --input .\video\test.mp4 --stream-id demo --publish --max-cost-eth 0.1
+pnpm live:publish:pipelined -- --dir .\work\blob-radio-testnet\live-runs\demo\segments --stream-id demo --max-cost-eth 0.1
+```
+
+The estimate uses actual segment byte/blob counts when files already exist. For
+a directory that is still being generated, pass either `--stream-duration-ms` or
+`--expected-segments` so the preflight can project the full run. By default it
+uses a `1.25x` safety multiplier and blocks on insufficient budget; use
+`--cost-mode warn` only for an intentional override.
+
+If `MAX_FEE_PER_GAS_GWEI` and `MAX_FEE_PER_BLOB_GAS_GWEI` are set, the preflight
+estimates against those caps. Otherwise it queries `ETH_RPC_URL` for current
+execution gas and blob base fee.
+
+### Speed Tuning
+
+Use the pipelined publisher for low-latency live tests:
+
+```powershell
+pnpm live:publish:pipelined -- --dir .\work\blob-radio-testnet\live-runs\demo\segments --stream-id demo --segment-ms 12000 --max-pending 2 --adaptive-pending --max-pending-max 4 --max-cost-eth 0.1
+```
+
+The pipelined state file records per-segment timing fields:
+`firstSeenAt`, `generatedAt`, `submittedAt`, `includedAt`, plus
+`timings.generatedToSubmitMs`, `timings.submitToIncludedMs`, and
+`timings.generatedToIncludedMs`. Playback APIs sort stream segments by
+`streamId`, then `sequence`, with block/transaction/log indexes only as
+tie-breakers.
+
 ## License
 
 Licensed under the Viral Public License. See `LICENSE`.

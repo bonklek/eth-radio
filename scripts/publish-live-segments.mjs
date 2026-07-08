@@ -4,6 +4,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { bytesToHex, toBlobs, zeroHash } from 'viem'
+import { hasCostBudget, readSegmentFilesAsCostSegments, runCostPreflightOrExit } from './lib/cost-preflight.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -11,6 +12,7 @@ function usage() {
                        [--start-seq 0] [--max-blobs 6] [--max-bytes 761856]
                        [--once] [--exit-when-caught-up] [--poll-ms 1000] [--pace]
                        [--publish-retries 5] [--retry-ms 12000] [--require-manifest]
+                       [--max-cost-eth 0.1] [--stream-duration-ms 3600000]
 
 Environment:
   ETH_RPC_URL, PRIVATE_KEY, STATION_ADDRESS, CHAIN=sepolia
@@ -165,6 +167,13 @@ console.log(`next sequence: ${state.nextSequence}`)
 console.log(`max blobs: ${maxBlobs}, max bytes: ${maxBytes}`)
 console.log(`publish retries: ${publishRetries}, retry ms: ${retryMs}`)
 console.log(`require manifest: ${requireManifest}`)
+
+if (hasCostBudget()) {
+  await runCostPreflightOrExit({
+    segments: readSegmentFilesAsCostSegments(segmentFiles(dir, streamId).slice(startSeq)),
+    segmentMs,
+  })
+}
 
 while (true) {
   const files = segmentFiles(dir, streamId)
