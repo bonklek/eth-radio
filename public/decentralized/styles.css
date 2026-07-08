@@ -202,9 +202,10 @@ button:disabled {
 .video-column {
   display: grid;
   place-items: center;
+  aspect-ratio: 9 / 16;
   width: min(34vw, 330px);
   min-width: 210px;
-  height: min(72vh, 680px);
+  max-height: min(72vh, 680px);
   min-height: 360px;
   background: linear-gradient(180deg, #17191d, #06070a 86%);
 }
@@ -642,6 +643,6 @@ textarea {
 
   .video-column {
     width: min(72vw, 330px);
-    height: min(54vh, 620px);
+    max-height: min(54vh, 620px);
   }
 }
