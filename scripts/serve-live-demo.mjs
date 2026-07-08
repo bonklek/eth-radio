@@ -917,17 +917,33 @@ function overlayHtml() {
       width: 1848px;
       height: 144px;
       pointer-events: none;
+      z-index: 3;
+    }
+
+    .lower-panel-mask {
+      position: absolute;
+      inset: 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background:
+        linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
+        var(--surface);
+      background-size: 8px 8px, 8px 8px, auto;
+      box-shadow: inset -3px -3px 0 rgba(0, 0, 0, .42), inset 2px 2px 0 rgba(255, 255, 255, .04);
+      z-index: 0;
     }
 
     .status-label {
       position: absolute;
       left: 28px;
       top: 19px;
-      display: none;
+      display: block;
       color: var(--accent);
       font: 900 24px/1 var(--ui);
       text-transform: uppercase;
       letter-spacing: 0;
+      z-index: 1;
     }
 
     .reading-title {
@@ -935,55 +951,56 @@ function overlayHtml() {
       left: 28px;
       top: 91px;
       width: 740px;
-      display: none;
+      display: block;
       color: var(--text);
       font: 900 42px/1 var(--ui);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       text-shadow: 2px 2px 0 #000;
+      z-index: 1;
     }
 
     .telemetry {
       position: absolute;
       inset: 0;
+      z-index: 3;
     }
 
     .telemetry-mask {
       position: absolute;
-      left: 746px;
-      top: 78px;
-      width: 992px;
-      height: 66px;
-      background:
-        linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
-        #11131a;
-      background-size: 8px 8px, 8px 8px, auto;
-      z-index: 1;
+      left: 720px;
+      top: 74px;
+      width: 1068px;
+      height: 98px;
+      background: transparent;
+      z-index: 0;
     }
 
     .telemetry-card {
       position: absolute;
-      top: 83px;
-      height: 58px;
-      padding: 10px 13px 8px;
-      background-color: var(--surface-2);
+      top: 93px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
       font-family: var(--mono);
       overflow: hidden;
-      z-index: 2;
+      z-index: 1;
     }
 
-    .telemetry-card.tx { left: 746px; width: 238px; }
-    .telemetry-card.payload { left: 1000px; width: 202px; }
-    .telemetry-card.hash { left: 1218px; width: 250px; }
-    .telemetry-card.prev { left: 1484px; width: 250px; }
+    .telemetry-card.tx { left: 748px; width: 252px; }
+    .telemetry-card.payload { left: 1024px; width: 196px; }
+    .telemetry-card.hash { left: 1244px; width: 244px; }
+    .telemetry-card.prev { left: 1512px; width: 244px; }
 
     .telemetry-card dt {
-      margin: 0 0 4px;
+      margin: 0 0 5px;
       color: var(--muted);
       text-transform: uppercase;
-      font: 700 15px/1 var(--mono);
+      font: 700 13px/1 var(--mono);
     }
 
     .telemetry-card dd {
@@ -993,7 +1010,7 @@ function overlayHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 700 19px/1 var(--mono);
+      font: 700 17px/1 var(--mono);
     }
 
     .ticker-viewport {
@@ -1360,40 +1377,53 @@ function overlayPreviewHtml() {
       text-shadow: 2px 2px 0 #000;
     }
 
+    .telemetry {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+    }
+
     .telemetry-mask {
       position: absolute;
-      left: 782px;
-      top: 994px;
-      width: 992px;
-      height: 66px;
+      left: 756px;
+      top: 990px;
+      width: 1068px;
+      height: 90px;
+      border: 1px solid #252838;
+      border-radius: 6px;
       background:
         linear-gradient(rgba(143, 151, 232, .035) 1px, transparent 1px),
         linear-gradient(90deg, rgba(143, 151, 232, .028) 1px, transparent 1px),
         #11131a;
       background-size: 8px 8px, 8px 8px, auto;
-      z-index: 1;
+      box-shadow: inset -3px -3px 0 rgba(0, 0, 0, .42), inset 2px 2px 0 rgba(255, 255, 255, .04);
+      z-index: 0;
     }
 
     .telemetry-card {
       position: absolute;
-      top: 999px;
-      height: 58px;
-      padding: 10px 13px 8px;
+      top: 1009px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
       overflow: hidden;
       font-family: Consolas, ui-monospace, monospace;
-      z-index: 2;
+      z-index: 1;
     }
 
-    .telemetry-card.tx { left: 782px; width: 238px; }
-    .telemetry-card.payload { left: 1036px; width: 202px; }
-    .telemetry-card.hash { left: 1254px; width: 250px; }
-    .telemetry-card.prev { left: 1520px; width: 250px; }
+    .telemetry-card.tx { left: 784px; width: 252px; }
+    .telemetry-card.payload { left: 1060px; width: 196px; }
+    .telemetry-card.hash { left: 1280px; width: 244px; }
+    .telemetry-card.prev { left: 1548px; width: 244px; }
 
     .telemetry-card dt {
-      margin: 0 0 4px;
+      margin: 0 0 5px;
       color: rgba(186, 190, 214, .82);
       text-transform: uppercase;
-      font: 700 15px/1 Consolas, ui-monospace, monospace;
+      font: 700 13px/1 Consolas, ui-monospace, monospace;
     }
 
     .telemetry-card dd {
@@ -1402,7 +1432,7 @@ function overlayPreviewHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 700 19px/1 Consolas, ui-monospace, monospace;
+      font: 700 17px/1 Consolas, ui-monospace, monospace;
     }
 
     .controls {
@@ -1509,7 +1539,7 @@ function overlayPreviewHtml() {
           <div id="blockHash" class="chip">BLOCK --</div>
           <div class="status-label">Now Reading</div>
           <div class="reading-title">The Ethereum Foundation Mandate</div>
-          <dl>
+          <dl class="telemetry">
             <div class="telemetry-mask" aria-hidden="true"></div>
             <div class="telemetry-card tx"><dt>TX</dt><dd id="txHash">--</dd></div>
             <div class="telemetry-card payload"><dt>Payload</dt><dd id="payloadSize">--</dd></div>
