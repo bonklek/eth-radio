@@ -504,11 +504,24 @@ video {
 }
 
 .segments-panel {
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
-  padding-top: 10px;
+  padding-top: 14px;
   border-top: 1px solid var(--line);
+}
+
+.segments-panel::before {
+  position: absolute;
+  top: -1px;
+  left: 50%;
+  width: 42px;
+  height: 1px;
+  background: var(--pink);
+  box-shadow: 0 0 8px rgba(255, 111, 185, 0.45);
+  content: "";
+  transform: translateX(-50%);
 }
 
 .segments-heading {
