@@ -855,10 +855,6 @@ function render() {
   els.loopToggle?.classList.toggle('active', state.loopReplay)
   els.stationState.textContent = state.streaming || state.verified.size ? 'LIVE' : 'OFFLINE'
   document.querySelector('.status-badge')?.classList.toggle('online', state.streaming || state.verified.size > 0)
-  for (const button of document.querySelectorAll('.chain-toggle button')) {
-    const isEth = button.textContent.trim() === 'ETH'
-    button.classList.toggle('active', isEth ? state.config.chainPreset === 'mainnet' : state.config.chainPreset === 'sepolia')
-  }
   els.networkLabel.textContent = CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset
   els.nowTitle.textContent = activeRecord ? `Playing segment #${activeRecord.sequence}` : state.segments.length ? 'Waiting for verified playback' : 'Waiting for stream segments'
   els.nowDetail.textContent = 'Execution RPC announces segments; beacon sidecars carry the bytes.'
