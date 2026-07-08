@@ -66,15 +66,25 @@
         <div><span>Known</span><strong id="known-count">0</strong></div>
         <div><span>Verified</span><strong id="verified-count">0</strong></div>
         <div><span>Head</span><strong id="head-block">-</strong></div>
+        <div><span>Slot</span><strong id="head-slot">-</strong></div>
         <div><span>Cache</span><strong id="cache-size">0 MB</strong></div>
         <div><span>Execution</span><strong id="execution-health">-</strong></div>
         <div><span>Beacon</span><strong id="beacon-health">-</strong></div>
+        <div><span>Metadata</span><strong id="metadata-age">-</strong></div>
       </div>
 
       <div class="cache-actions">
         <button id="export-index" type="button">Export index</button>
         <button id="clear-cache" type="button">Clear cache</button>
       </div>
+
+      <section class="blobspace-panel">
+        <div class="section-heading">
+          <strong>Blobspace</strong>
+          <span id="rail-mode">warming</span>
+        </div>
+        <div id="slots" class="slots"></div>
+      </section>
 
       <div id="segments" class="segments"></div>
     </aside>

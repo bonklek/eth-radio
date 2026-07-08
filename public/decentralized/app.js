@@ -31,7 +31,9 @@ const DEFAULTS = {
 
 const EVENT_TOPIC = '0xfd61253da387da4d87d036a0276340bc4f04ff7c1173999c8392b158030f04c3'
 const DB_NAME = 'radio-free-ethereum'
-const DB_VERSION = 2
+const DB_VERSION = 3
+const MAX_BLOBS_PER_BLOCK = 21
+const SLOT_WINDOW = 10
 const els = {
   form: document.querySelector('#settings'),
   chainPreset: document.querySelector('#chain-preset'),
@@ -53,9 +55,13 @@ const els = {
   knownCount: document.querySelector('#known-count'),
   verifiedCount: document.querySelector('#verified-count'),
   headBlock: document.querySelector('#head-block'),
+  headSlot: document.querySelector('#head-slot'),
   cacheSize: document.querySelector('#cache-size'),
+  metadataAge: document.querySelector('#metadata-age'),
   executionHealth: document.querySelector('#execution-health'),
   beaconHealth: document.querySelector('#beacon-health'),
+  railMode: document.querySelector('#rail-mode'),
+  slots: document.querySelector('#slots'),
   segments: document.querySelector('#segments'),
 }
 
@@ -66,6 +72,8 @@ let state = {
   objectUrls: new Map(),
   activeExecutionRpc: '',
   activeBeaconApi: '',
+  blobspace: { mode: 'warming', rows: [], warning: '' },
+  metadataUpdatedAt: '',
   currentRecordKey: '',
   streaming: false,
   busy: false,
@@ -159,6 +167,30 @@ function fmtBytes(bytes) {
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${value} B`
+}
+
+function fmtAge(iso) {
+  if (!iso) return '-'
+  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.round(minutes / 60)}h`
+}
+
+function fmtTime(timestampMs) {
+  if (!timestampMs) return '-'
+  return new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestampMs))
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char])
 }
 
 function readWord(data, wordIndex) {
@@ -256,6 +288,21 @@ async function beacon(pathname) {
   })
 }
 
+async function beaconGenesisTime() {
+  const genesis = await beacon('/eth/v1/beacon/genesis')
+  return BigInt(genesis.genesis_time)
+}
+
+function slotTimestampMs(slot, genesisTime) {
+  if (genesisTime == null) return null
+  return Number((genesisTime + BigInt(slot) * 12n) * 1000n)
+}
+
+async function latestBeaconSlot() {
+  const head = await beacon('/eth/v1/beacon/headers/head')
+  return Number(head.header.message.slot)
+}
+
 function toBlockHex(block) {
   return `0x${BigInt(block).toString(16)}`
 }
@@ -284,18 +331,47 @@ async function segmentSlot(segment) {
   if (segment.slot) return segment.slot
   const tx = await rpc('eth_getTransactionByHash', [segment.txHash])
   const block = await rpc('eth_getBlockByHash', [tx.blockHash, false])
-  const genesis = await beacon('/eth/v1/beacon/genesis')
-  return Number((BigInt(block.timestamp) - BigInt(genesis.genesis_time)) / 12n)
+  const genesis = await beaconGenesisTime()
+  return Number((BigInt(block.timestamp) - genesis) / 12n)
+}
+
+async function sidecarsForSlot(slot) {
+  const cacheKey = slotSidecarsKey(slot)
+  const cached = await getRecord('sidecars', cacheKey)
+  const cacheAgeMs = cached?.fetchedAt ? Date.now() - Date.parse(cached.fetchedAt) : Number.POSITIVE_INFINITY
+  if (cached?.sidecars?.length || cacheAgeMs < 30_000) return cached
+
+  const started = performance.now()
+  const rows = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`)
+  const sidecars = await Promise.all((rows || []).map(async (sidecar) => {
+    const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
+    const versionedHash = commitment ? normalizeHex(await versionedHashFromCommitment(commitment)) : null
+    return {
+      index: Number(sidecar.index),
+      versionedHash,
+      commitment,
+      blob: sidecar.blob || null,
+    }
+  }))
+  const record = {
+    cacheKey,
+    chainPreset: state.config.chainPreset,
+    slot: Number(slot),
+    sidecars,
+    fetchMs: Math.round(performance.now() - started),
+    fetchedAt: new Date().toISOString(),
+  }
+  await putRecord('sidecars', record)
+  return record
 }
 
 async function sidecarsForSegment(segment) {
   const slot = await segmentSlot(segment)
-  const sidecars = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`)
   const wanted = new Set(segment.blobVersionedHashes.map(normalizeHex))
   const matches = []
-  for (const sidecar of sidecars) {
-    const versionedHash = normalizeHex(await versionedHashFromCommitment(sidecar.kzg_commitment))
-    if (wanted.has(versionedHash)) matches.push({ ...sidecar, versionedHash })
+  const record = await sidecarsForSlot(slot)
+  for (const sidecar of record.sidecars) {
+    if (wanted.has(normalizeHex(sidecar.versionedHash))) matches.push(sidecar)
   }
   return { slot, matches }
 }
@@ -364,19 +440,77 @@ function openDb() {
     request.onupgradeneeded = () => {
       const db = request.result
       if (!db.objectStoreNames.contains('segments')) db.createObjectStore('segments', { keyPath: 'cacheKey' })
+      if (!db.objectStoreNames.contains('metadata')) db.createObjectStore('metadata', { keyPath: 'cacheKey' })
+      if (!db.objectStoreNames.contains('sidecars')) db.createObjectStore('sidecars', { keyPath: 'cacheKey' })
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
 }
 
-async function cachedSegment(cacheKey) {
+async function getRecord(storeName, cacheKey) {
   const db = await openDb()
   return new Promise((resolve, reject) => {
-    const request = db.transaction('segments').objectStore('segments').get(cacheKey)
+    const request = db.transaction(storeName).objectStore(storeName).get(cacheKey)
     request.onsuccess = () => resolve(request.result || null)
     request.onerror = () => reject(request.error)
   })
+}
+
+async function putRecord(storeName, record) {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(storeName, 'readwrite').objectStore(storeName).put(record)
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function clearStore(storeName) {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(storeName, 'readwrite').objectStore(storeName).clear()
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+  })
+}
+
+function metadataKey() {
+  return `segments:${state.config.chainPreset}:${normalizeHex(state.config.stationAddress)}:${state.config.streamId}`
+}
+
+function slotSidecarsKey(slot) {
+  return `slot:${state.config.chainPreset}:${slot}`
+}
+
+async function cacheSegmentMetadata(segments) {
+  const record = {
+    cacheKey: metadataKey(),
+    chainPreset: state.config.chainPreset,
+    stationAddress: state.config.stationAddress,
+    streamId: state.config.streamId,
+    segments,
+    updatedAt: new Date().toISOString(),
+  }
+  await putRecord('metadata', record)
+  state.metadataUpdatedAt = record.updatedAt
+}
+
+async function restoreSegmentMetadata() {
+  const cached = await getRecord('metadata', metadataKey())
+  if (!cached?.segments?.length) return false
+  state.segments = cached.segments
+  state.metadataUpdatedAt = cached.updatedAt || ''
+  for (const segment of state.segments) {
+    const record = await cachedSegment(segment.cacheKey)
+    if (record) state.verified.set(segment.cacheKey, record)
+  }
+  render()
+  return true
+}
+
+async function cachedSegment(cacheKey) {
+  return getRecord('segments', cacheKey)
 }
 
 async function allCachedSegments() {
@@ -389,12 +523,7 @@ async function allCachedSegments() {
 }
 
 async function putCachedSegment(record) {
-  const db = await openDb()
-  await new Promise((resolve, reject) => {
-    const request = db.transaction('segments', 'readwrite').objectStore('segments').put(record)
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
-  })
+  await putRecord('segments', record)
   await enforceCacheLimit()
 }
 
@@ -408,13 +537,13 @@ async function deleteCachedSegment(cacheKey) {
 }
 
 async function clearCache() {
-  const db = await openDb()
-  await new Promise((resolve, reject) => {
-    const request = db.transaction('segments', 'readwrite').objectStore('segments').clear()
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
-  })
+  await clearStore('segments')
+  await clearStore('metadata')
+  await clearStore('sidecars')
   state.verified.clear()
+  state.segments = []
+  state.metadataUpdatedAt = ''
+  state.blobspace = { mode: 'warming', rows: [], warning: '' }
   for (const url of state.objectUrls.values()) URL.revokeObjectURL(url)
   state.objectUrls.clear()
   await refreshCacheStats()
@@ -531,6 +660,137 @@ function prefetchWindow() {
   for (const segment of recent) void prefetchSegment(segment)
 }
 
+function streamBlobMap() {
+  const byHash = new Map()
+  for (const segment of state.segments) {
+    for (const hash of segment.blobVersionedHashes || []) {
+      byHash.set(normalizeHex(hash), {
+        streamId: segment.streamId,
+        sequence: segment.sequence,
+        txHash: segment.txHash,
+      })
+    }
+  }
+  return byHash
+}
+
+async function refreshBlobspace() {
+  const known = streamBlobMap()
+  if (!known.size) {
+    state.blobspace = { mode: 'warming', rows: [], warning: 'Waiting for Station metadata.' }
+    return
+  }
+
+  try {
+    const [headSlot, genesisTime] = await Promise.all([latestBeaconSlot(), beaconGenesisTime()])
+    els.headSlot.textContent = String(headSlot)
+    const slots = Array.from({ length: SLOT_WINDOW }, (_, index) => headSlot - index).filter((slot) => slot >= 0)
+    const rows = await Promise.all(slots.map(async (slot) => {
+      try {
+        const record = await sidecarsForSlot(slot)
+        const blobs = (record.sidecars || []).map((sidecar) => {
+          const stream = known.get(normalizeHex(sidecar.versionedHash)) || null
+          return {
+            index: Number(sidecar.index),
+            versionedHash: sidecar.versionedHash,
+            isStreamBlob: Boolean(stream),
+            stream,
+          }
+        })
+        return {
+          slot,
+          timestampMs: slotTimestampMs(slot, genesisTime),
+          blobCount: blobs.length,
+          maxBlobs: MAX_BLOBS_PER_BLOCK,
+          streamBlobCount: blobs.filter((blob) => blob.isStreamBlob).length,
+          blobs,
+          error: '',
+        }
+      } catch (error) {
+        return {
+          slot,
+          timestampMs: slotTimestampMs(slot, genesisTime),
+          blobCount: 0,
+          maxBlobs: MAX_BLOBS_PER_BLOCK,
+          streamBlobCount: 0,
+          blobs: [],
+          error: error.message,
+        }
+      }
+    }))
+    state.blobspace = { mode: 'live', rows, warning: '' }
+  } catch (error) {
+    state.blobspace = {
+      mode: 'cached',
+      rows: cachedBlobspaceRows(known),
+      warning: error.message,
+    }
+  }
+}
+
+function cachedBlobspaceRows(known) {
+  const rows = new Map()
+  for (const record of state.verified.values()) {
+    if (record.slot == null) continue
+    const row = rows.get(record.slot) || {
+      slot: Number(record.slot),
+      timestampMs: null,
+      blobCount: 0,
+      maxBlobs: MAX_BLOBS_PER_BLOCK,
+      streamBlobCount: 0,
+      blobs: [],
+      error: '',
+    }
+    const segment = state.segments.find((candidate) => candidate.cacheKey === record.cacheKey)
+    for (const hash of segment?.blobVersionedHashes || []) {
+      const stream = known.get(normalizeHex(hash)) || null
+      row.blobs.push({
+        index: row.blobs.length,
+        versionedHash: normalizeHex(hash),
+        isStreamBlob: Boolean(stream),
+        stream,
+      })
+    }
+    row.blobCount = row.blobs.length
+    row.streamBlobCount = row.blobs.filter((blob) => blob.isStreamBlob).length
+    rows.set(record.slot, row)
+  }
+  return [...rows.values()].sort((a, b) => b.slot - a.slot)
+}
+
+function renderBlobspace() {
+  const blobspace = state.blobspace || { rows: [], mode: 'warming' }
+  els.railMode.textContent = blobspace.mode === 'live'
+    ? 'live beacon sidecars'
+    : blobspace.warning || blobspace.mode || 'warming'
+  const rows = [...(blobspace.rows || [])].sort((a, b) => Number(b.slot) - Number(a.slot))
+  els.slots.innerHTML = rows.map((row) => {
+    const blobs = row.blobs || []
+    const byIndex = new Map(blobs.map((blob) => [Number(blob.index), blob]))
+    const max = row.maxBlobs || MAX_BLOBS_PER_BLOCK
+    const cells = Array.from({ length: max }, (_, index) => {
+      const blob = byIndex.get(index)
+      const kind = blob?.isStreamBlob ? 'stream' : blob ? 'other' : ''
+      const label = blob?.isStreamBlob
+        ? `segment #${blob.stream.sequence} ${shortHash(blob.stream.txHash)}`
+        : blob?.versionedHash || 'empty'
+      return `<span class="blob-cell ${kind}" title="${escapeHtml(label)}"></span>`
+    }).join('')
+    const streamCount = Number(row.streamBlobCount || 0)
+    return `
+      <section class="slot">
+        <div class="slot-top">
+          <strong>Slot ${escapeHtml(row.slot)}</strong>
+          <span>${Number(row.blobCount || blobs.length)} / ${max} blobs${streamCount ? ` - ${streamCount} stream` : ''}</span>
+        </div>
+        <div class="slot-meta"><span>${fmtTime(row.timestampMs)}</span><span>${row.error ? 'endpoint miss' : ''}</span></div>
+        <div class="blob-grid">${cells}</div>
+        ${row.error ? `<div class="slot-error">${escapeHtml(row.error)}</div>` : ''}
+      </section>
+    `
+  }).join('') || '<p class="muted">No blob sidecar rows available yet.</p>'
+}
+
 function renderHealth() {
   els.executionHealth.textContent = state.activeExecutionRpc ? 'ok' : '-'
   els.beaconHealth.textContent = state.activeBeaconApi ? 'ok' : '-'
@@ -541,19 +801,21 @@ function renderHealth() {
 function render() {
   els.knownCount.textContent = String(state.segments.length)
   els.verifiedCount.textContent = String(state.verified.size)
+  els.metadataAge.textContent = fmtAge(state.metadataUpdatedAt)
   els.streamToggle.textContent = state.streaming ? 'Stop stream' : 'Start stream'
   renderHealth()
+  renderBlobspace()
   els.segments.innerHTML = state.segments.map((segment) => {
     const record = state.verified.get(segment.cacheKey)
     const queued = state.prefetching.has(segment.cacheKey)
     return `
       <section class="segment ${record ? 'verified' : ''}">
         <div>
-          <strong>#${segment.sequence} ${shortHash(segment.txHash)}</strong>
-          <span>${segment.blobCount} blobs - block ${segment.blockNumber} - ${fmtBytes(segment.payloadBytes)}</span>
+          <strong>#${escapeHtml(segment.sequence)} ${escapeHtml(shortHash(segment.txHash))}</strong>
+          <span>${escapeHtml(segment.blobCount)} blobs - block ${escapeHtml(segment.blockNumber)} - ${escapeHtml(fmtBytes(segment.payloadBytes))}</span>
         </div>
-        <button type="button" data-key="${segment.cacheKey}">${record ? 'Play' : queued ? 'Queued' : 'Verify'}</button>
-        ${record ? `<span class="badge">${record.source}</span>` : queued ? '<span class="badge warn">queued</span>' : ''}
+        <button type="button" data-key="${escapeHtml(segment.cacheKey)}">${record ? 'Play' : queued ? 'Queued' : 'Verify'}</button>
+        ${record ? `<span class="badge">${escapeHtml(record.source)}</span>` : queued ? '<span class="badge warn">queued</span>' : ''}
       </section>
     `
   }).join('') || '<p class="muted">No Station events found in the current window.</p>'
@@ -566,6 +828,7 @@ async function refresh() {
   setStatus('Reading Station events from execution RPC...')
   try {
     state.segments = await fetchLogs()
+    await cacheSegmentMetadata(state.segments)
     if (!state.activeBeaconApi) {
       await beacon('/eth/v1/beacon/genesis').catch(() => null)
     }
@@ -574,6 +837,7 @@ async function refresh() {
       if (cached) state.verified.set(segment.cacheKey, cached)
     }
     await refreshCacheStats()
+    await refreshBlobspace()
     render()
     prefetchWindow()
     setStatus(`Loaded ${state.segments.length} Station events, ${state.verified.size} verified locally.`)
@@ -652,6 +916,10 @@ els.form.addEventListener('submit', (event) => {
   state.verified.clear()
   state.activeExecutionRpc = ''
   state.activeBeaconApi = ''
+  state.metadataUpdatedAt = ''
+  state.blobspace = { mode: 'warming', rows: [], warning: '' }
+  els.headBlock.textContent = '-'
+  els.headSlot.textContent = '-'
   render()
   void refresh()
 })
@@ -675,7 +943,7 @@ els.playLatest.addEventListener('click', () => {
   if (record) playRecord(record)
 })
 els.exportIndex.addEventListener('click', exportIndex)
-els.clearCache.addEventListener('click', () => void clearCache().then(() => setStatus('Verified payload cache cleared.')))
+els.clearCache.addEventListener('click', () => void clearCache().then(() => setStatus('Browser cache cleared.')))
 els.player.addEventListener('ended', () => {
   if (!state.streaming) return
   const current = currentRecord()
@@ -712,4 +980,4 @@ els.segments.addEventListener('click', async (event) => {
 fillForm()
 render()
 void refreshCacheStats()
-void refresh()
+void restoreSegmentMetadata().finally(() => void refresh())

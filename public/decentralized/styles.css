@@ -114,7 +114,7 @@ video {
 
 .panel {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   gap: 14px;
   min-width: 0;
   max-height: 100vh;
@@ -194,6 +194,104 @@ textarea {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.section-heading strong {
+  font-size: 14px;
+}
+
+.section-heading span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blobspace-panel {
+  min-height: 0;
+}
+
+.slots {
+  display: grid;
+  gap: 7px;
+  max-height: 245px;
+  overflow: auto;
+}
+
+.slot {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1118;
+}
+
+.slot-top,
+.slot-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.slot-top strong,
+.slot-top span,
+.slot-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slot-top strong {
+  font-size: 12px;
+}
+
+.slot-top span,
+.slot-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.blob-grid {
+  display: grid;
+  grid-template-columns: repeat(21, minmax(5px, 1fr));
+  gap: 3px;
+}
+
+.blob-cell {
+  display: block;
+  aspect-ratio: 1;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 25%);
+  border-radius: 2px;
+  background: #151b24;
+}
+
+.blob-cell.other {
+  background: #46515f;
+}
+
+.blob-cell.stream {
+  border-color: color-mix(in srgb, var(--accent), white 12%);
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent), transparent 45%);
+}
+
+.slot-error {
+  color: var(--warn);
+  font-size: 11px;
 }
 
 .segments {
