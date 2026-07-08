@@ -856,7 +856,7 @@ function render() {
   const stationOnline = Boolean(activeRecord)
   els.stationState.textContent = stationOnline ? 'LIVE' : 'OFFLINE'
   document.querySelector('.status-badge')?.classList.toggle('online', stationOnline)
-  els.networkLabel.textContent = CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset
+  els.networkLabel.textContent = 'Mainnet'
   els.nowTitle.textContent = activeRecord ? `Playing segment #${activeRecord.sequence}` : 'Waiting for stream segments'
   els.nowDetail.textContent = 'Execution RPC announces segments; beacon sidecars carry the bytes.'
   els.metricSegment.textContent = activeRecord ? `#${activeRecord.sequence}` : latestSegment ? `#${latestSegment.sequence}` : '-'
