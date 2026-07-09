@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import ffmpegPath from 'ffmpeg-static'
+import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -12,14 +13,8 @@ function usage() {
   process.exit(1)
 }
 
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
-}
-
-function hasFlag(name) {
-  return process.argv.includes(`--${name}`)
+function sanitize(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9_.-]/g, '_')
 }
 
 function run(command, args) {
@@ -33,20 +28,21 @@ function run(command, args) {
   })
 }
 
-const input = arg('input')
+const input = readArg('input')
 if (!input) usage()
 if (!ffmpegPath) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
 
 const inputPath = path.resolve(input)
-const streamId = arg('stream-id', 'milady-mandate')
-const outDir = path.resolve(arg('out-dir', 'work/blob-radio-testnet/live-segments'))
-const segmentMs = Number(arg('segment-ms', '12000'))
+const streamId = readArg('stream-id', 'milady-mandate')
+const safeStreamId = sanitize(streamId)
+const outDir = path.resolve(readArg('out-dir', 'work/blob-radio-testnet/live-segments'))
+const segmentMs = numberArg('segment-ms', '12000', { integer: true, min: 1 })
 const segmentSeconds = segmentMs / 1000
-const width = Number(arg('width', '640'))
-const height = Number(arg('height', '360'))
-const fps = Number(arg('fps', '24'))
-const videoBitrate = arg('video-bitrate', '420k')
-const audioBitrate = arg('audio-bitrate', '32k')
+const width = numberArg('width', '640', { integer: true, min: 1 })
+const height = numberArg('height', '360', { integer: true, min: 1 })
+const fps = numberArg('fps', '24', { min: 1 })
+const videoBitrate = readArg('video-bitrate', '420k')
+const audioBitrate = readArg('audio-bitrate', '32k')
 const noAudio = hasFlag('no-audio')
 
 if (!fs.existsSync(inputPath)) throw new Error(`Input not found: ${inputPath}`)
@@ -55,7 +51,7 @@ if (!Number.isFinite(segmentSeconds) || segmentSeconds <= 0) {
 }
 
 fs.mkdirSync(outDir, { recursive: true })
-const outputPattern = path.join(outDir, `${streamId}-%06d.webm`)
+const outputPattern = path.join(outDir, `${safeStreamId}-%06d.webm`)
 
 const args = [
   '-hide_banner',
@@ -115,7 +111,7 @@ await run(ffmpegPath, args)
 
 const files = fs
   .readdirSync(outDir)
-  .filter((name) => name.startsWith(`${streamId}-`) && name.endsWith('.webm'))
+  .filter((name) => name.startsWith(`${safeStreamId}-`) && name.endsWith('.webm'))
   .sort()
   .map((name, index) => {
     const filePath = path.join(outDir, name)
@@ -130,6 +126,7 @@ const manifest = {
   app: 'eth-radio',
   kind: 'segment-set',
   streamId,
+  filePrefix: safeStreamId,
   input: inputPath,
   outDir,
   segmentMs,
@@ -143,7 +140,7 @@ const manifest = {
   segments: files,
 }
 
-const out = path.join(outDir, `${streamId}.segments.json`)
+const out = path.join(outDir, `${safeStreamId}.segments.json`)
 fs.writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`)
 
 console.log(`segments: ${files.length}`)

@@ -23,6 +23,12 @@ function commandExists(command) {
   return result.status === 0
 }
 
+function ipfsAddRootCid(output) {
+  const cids = String(output || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (!cids.length) throw new Error('ipfs add did not print a CID')
+  return cids.at(-1)
+}
+
 run(process.execPath, ['scripts/build-static-client.mjs'])
 run(process.execPath, ['scripts/verify-static-client.mjs'])
 
@@ -47,7 +53,7 @@ When you are ready to publish/pin for real:
   process.exit(0)
 }
 
-const cid = run('ipfs', ['add', '--recursive', '--cid-version=1', '--only-hash', '--quiet', outDir], { capture: true })
+const cid = ipfsAddRootCid(run('ipfs', ['add', '--recursive', '--cid-version=1', '--only-hash', '--quiet', outDir], { capture: true }))
 console.log(`
 Dry-run IPFS CID:
 

@@ -8,6 +8,8 @@ import { bytesToHex, createPublicClient, http, toBlobs, zeroHash } from 'viem'
 import { mainnet, sepolia } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import ffmpegPath from 'ffmpeg-static'
+import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
+import { readExistingSegmentManifest, segmentSequence, upsertSegment } from './lib/live-segment-manifest.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(scriptDir, '..')
@@ -33,16 +35,6 @@ dynamic regions from a fixed layout contract, then writes one composited WebM
 and manifest entry at a time.
 `)
   process.exit(1)
-}
-
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
-}
-
-function hasFlag(name) {
-  return process.argv.includes(`--${name}`)
 }
 
 function fromRoot(value) {
@@ -132,9 +124,33 @@ function escapeFilterText(value) {
     .replace(/,/g, '\\,')
 }
 
-function readJsonIfExists(filePath) {
+function readOptionalPublisherState(filePath) {
   if (!fs.existsSync(filePath)) return null
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  try {
+    const state = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    if (!state || typeof state !== 'object' || Array.isArray(state)) {
+      console.warn(`Ignoring invalid optional publisher state ${filePath}: expected an object`)
+      return null
+    }
+    if (state.published !== undefined && !Array.isArray(state.published)) {
+      console.warn(`Ignoring invalid optional publisher state ${filePath}: published must be an array`)
+      return null
+    }
+    const published = state.published === undefined ? [] : state.published
+    return { ...state, published }
+  } catch (error) {
+    console.warn(`Ignoring unreadable optional publisher state ${filePath}: ${error.message}`)
+    return null
+  }
+}
+
+function optionalPublishedSegmentSequence(segment, index, filePath) {
+  try {
+    return segmentSequence(segment.sequence, 'published segment')
+  } catch (error) {
+    console.warn(`Ignoring invalid optional publisher state ${filePath}: published[${index}].sequence ${error.message}`)
+    return null
+  }
 }
 
 function scaleBox(box, width, height) {
@@ -358,12 +374,12 @@ async function sampleProofContext({ publicClient, chainName, beaconUrl, account 
 }
 
 function readPreviousFacts({ sequence, manifest, statePath }) {
-  const previousSegment = [...(manifest.segments || [])]
-    .filter((segment) => Number(segment.sequence) === sequence - 1)
+  const previousSegment = [...manifest.segments]
+    .filter((segment) => segmentSequence(segment.sequence, 'manifest segment') === sequence - 1)
     .at(-1)
-  const state = readJsonIfExists(statePath)
-  const previousPublished = [...(state?.published || [])]
-    .filter((segment) => Number(segment.sequence) === sequence - 1)
+  const state = readOptionalPublisherState(statePath)
+  const previousPublished = [...(state ? state.published : [])]
+    .filter((segment, index) => optionalPublishedSegmentSequence(segment, index, statePath) === sequence - 1)
     .at(-1)
   return {
     previousSegmentHash: previousSegment?.payloadSha256 ? `0x${previousSegment.payloadSha256}` : zeroHash,
@@ -371,33 +387,35 @@ function readPreviousFacts({ sequence, manifest, statePath }) {
   }
 }
 
-const input = arg('input')
-const streamId = arg('stream-id')
+const input = readArg('input')
+const streamId = readArg('stream-id')
 if (!input || !streamId) usage()
 if (!ffmpegPath) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
 
 const safeStreamId = sanitize(streamId)
-const profileName = arg('profile', '360p').toLowerCase()
+const profileName = readArg('profile', '360p').toLowerCase()
 const profile = profiles[profileName]
 if (!profile) throw new Error(`Unsupported --profile ${profileName}; use ${Object.keys(profiles).join(', ')}`)
 
 const inputPath = fromRoot(input)
-const outDir = fromRoot(arg('out-dir', 'work/blob-radio-testnet/live-segments'))
-const statePath = fromRoot(arg('publisher-state', `work/blob-radio-testnet/live-state/${safeStreamId}.pipelined.json`))
+const outDir = fromRoot(readArg('out-dir', 'work/blob-radio-testnet/live-segments'))
+const statePath = fromRoot(readArg('publisher-state', `work/blob-radio-testnet/live-state/${safeStreamId}.pipelined.json`))
 const manifestPath = path.join(outDir, `${safeStreamId}.segments.json`)
-const overlayPath = fromRoot(arg('overlay', profile.overlay))
-const segmentMs = Number(arg('segment-ms', '24000'))
-const startSeq = Number(arg('start-seq', '0'))
-const fps = Number(arg('fps', '24'))
-const videoBitrate = arg('video-bitrate', '96k')
-const audioBitrate = arg('audio-bitrate', '16k')
-const maxBlobs = Number(arg('max-blobs', '6'))
-const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
+const overlayPath = fromRoot(readArg('overlay', profile.overlay))
+const segmentMs = numberArg('segment-ms', '24000', { integer: true, min: 1 })
+const startSeq = numberArg('start-seq', '0', { integer: true, min: 0 })
+const fps = numberArg('fps', '24', { min: 1 })
+const videoBitrate = readArg('video-bitrate', '96k')
+const audioBitrate = readArg('audio-bitrate', '16k')
+const maxBlobs = numberArg('max-blobs', '6', { integer: true, min: 1 })
+const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
 const noAudio = hasFlag('no-audio')
 const pace = hasFlag('pace')
 const reset = hasFlag('reset')
-const maxSegmentsArg = arg('max-segments')
-const maxSegments = maxSegmentsArg == null ? null : Number(maxSegmentsArg)
+const maxSegmentsArg = readArg('max-segments')
+const maxSegments = maxSegmentsArg !== undefined
+  ? numberArg('max-segments', undefined, { integer: true, min: 1 })
+  : null
 const segmentSeconds = segmentMs / 1000
 const chainName = process.env.CHAIN || 'sepolia'
 const chain = chains[chainName]
@@ -410,19 +428,16 @@ if (!fs.existsSync(inputPath)) throw new Error(`Input not found: ${inputPath}`)
 if (!fs.existsSync(overlayPath)) throw new Error(`Overlay PNG not found: ${overlayPath}`)
 if (!Number.isFinite(segmentMs) || segmentMs <= 0) throw new Error(`Invalid --segment-ms ${segmentMs}`)
 if (!Number.isInteger(startSeq) || startSeq < 0) throw new Error(`Invalid --start-seq ${startSeq}`)
-if (maxSegments != null && (!Number.isInteger(maxSegments) || maxSegments < 1)) {
-  throw new Error(`Invalid --max-segments ${maxSegmentsArg}`)
-}
-
 const publicClient = createPublicClient({ chain, transport: http(rpcUrl, { timeout: 30_000 }) })
 const durationMs = probeDurationMs(inputPath)
 fs.mkdirSync(outDir, { recursive: true })
 if (reset && fs.existsSync(manifestPath)) fs.rmSync(manifestPath, { force: true })
 
-let manifest = readJsonIfExists(manifestPath) || {
+let manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix: safeStreamId }) || {
   app: 'eth-radio',
   kind: 'live-segment-set',
-  streamId: safeStreamId,
+  streamId,
+  filePrefix: safeStreamId,
   input: inputPath,
   outDir,
   segmentMs,
@@ -445,6 +460,8 @@ let manifest = readJsonIfExists(manifestPath) || {
 }
 manifest = {
   ...manifest,
+  streamId,
+  filePrefix: safeStreamId,
   outDir,
   overlay: 'rfe-proof-burned-in',
   overlayProfile: profileName,
@@ -475,7 +492,7 @@ for (let sequence = startSeq; ; sequence += 1) {
   if (fs.existsSync(finalPath) && !reset) throw new Error(`Refusing to overwrite existing segment without --reset: ${finalPath}`)
   if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true })
 
-  manifest = readJsonIfExists(manifestPath) || manifest
+  manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix: safeStreamId }) || manifest
   const proof = await sampleProofContext({ publicClient, chainName, beaconUrl, account })
   const previous = readPreviousFacts({ sequence, manifest, statePath })
   function ffmpegArgs({ payloadLabel, outputPath }) {
@@ -569,9 +586,7 @@ for (let sequence = startSeq; ; sequence += 1) {
     throw new Error(`Segment ${sequence} exceeds cap: ${bytes} bytes / ${estimatedBlobs} blob(s), cap ${maxBytes} bytes / ${maxBlobs} blob(s)`)
   }
 
-  manifest.segments = [
-    ...(manifest.segments || []).filter((segment) => Number(segment.sequence) !== sequence),
-    {
+  manifest.segments = upsertSegment(manifest.segments, {
       sequence,
       file: finalPath,
       bytes,
@@ -592,8 +607,7 @@ for (let sequence = startSeq; ; sequence += 1) {
         finalPayloadKilobytes: formatKilobytes(bytes),
         finalPayloadSha256: payloadSha256,
       },
-    },
-  ].sort((a, b) => Number(a.sequence) - Number(b.sequence))
+    })
   manifest.updatedAt = new Date().toISOString()
   atomicWriteJson(manifestPath, manifest)
   console.log(`seq ${sequence}: ${bytes} bytes / ${estimatedBlobs} blob(s), proof overlay burned in`)

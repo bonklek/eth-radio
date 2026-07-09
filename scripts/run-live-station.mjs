@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { bytesToHex, toBlobs } from 'viem'
+import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
 import { runCostPreflightOrExit, serializableCostReport } from './lib/cost-preflight.mjs'
 
 const profiles = {
@@ -40,16 +41,6 @@ With --publish, it submits produced segments through Station.
   process.exit(1)
 }
 
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
-}
-
-function hasFlag(name) {
-  return process.argv.includes(`--${name}`)
-}
-
 function sanitize(value) {
   return value.replace(/[^a-zA-Z0-9_.-]/g, '_')
 }
@@ -82,8 +73,28 @@ function writeStatus(statusPath, status) {
 
 function readSegments(segmentManifestPath) {
   if (!fs.existsSync(segmentManifestPath)) return []
-  const manifest = JSON.parse(fs.readFileSync(segmentManifestPath, 'utf8'))
-  return manifest.segments || []
+  return readSegmentManifest(segmentManifestPath).segments
+}
+
+function readSegmentManifest(manifestPath) {
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error(`Invalid segment manifest ${manifestPath}: expected a JSON object`)
+  }
+  if (!Array.isArray(manifest.segments)) {
+    throw new Error(`Invalid segment manifest ${manifestPath}: segments must be an array`)
+  }
+  return manifest
+}
+
+function readPublishStateSnapshot(statePath, status) {
+  if (!fs.existsSync(statePath)) return null
+  try {
+    return JSON.parse(fs.readFileSync(statePath, 'utf8'))
+  } catch (error) {
+    status.warnings.push(`Could not read publisher state snapshot for status output: ${error.message}`)
+    return null
+  }
 }
 
 function estimateBlobs(file) {
@@ -162,7 +173,7 @@ function copyChosenAttempt({ attemptDir, outDir, streamId }) {
   }
 
   const manifestPath = path.join(outDir, `${streamId}.segments.json`)
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  const manifest = readSegmentManifest(manifestPath)
   manifest.outDir = outDir
   manifest.segments = manifest.segments.map((segment) => ({
     ...segment,
@@ -182,29 +193,29 @@ function summarizeSegments({ segments, maxBytes, maxBlobs }) {
   })
 }
 
-const input = arg('input')
-const streamId = arg('stream-id')
+const input = readArg('input')
+const streamId = readArg('stream-id')
 if (!input || !streamId) usage()
 
-const profileName = arg('profile', '360p24')
+const profileName = readArg('profile', '360p24')
 const profile = profiles[profileName]
 if (!profile) throw new Error(`Unknown profile "${profileName}". Choose one of: ${Object.keys(profiles).join(', ')}`)
 
-const segmentMs = Number(arg('segment-ms', '12000'))
+const segmentMs = numberArg('segment-ms', '12000', { integer: true, min: 1 })
 const publish = hasFlag('publish')
 const reset = hasFlag('reset')
 const noAudio = hasFlag('no-audio')
 const adaptive = !hasFlag('no-adaptive')
 const codec = noAudio ? 'av1/webm' : 'av1-opus/webm'
 const safeStreamId = sanitize(streamId)
-const outDir = path.resolve(arg('out-dir', `work/blob-radio-testnet/live-runs/${safeStreamId}/segments`))
-const statusPath = path.resolve(arg('status', `work/blob-radio-testnet/live-runs/${safeStreamId}/status.json`))
-const statePath = path.resolve(arg('state', `work/blob-radio-testnet/live-runs/${safeStreamId}/publish-state.json`))
+const outDir = path.resolve(readArg('out-dir', `work/blob-radio-testnet/live-runs/${safeStreamId}/segments`))
+const statusPath = path.resolve(readArg('status', `work/blob-radio-testnet/live-runs/${safeStreamId}/status.json`))
+const statePath = path.resolve(readArg('state', `work/blob-radio-testnet/live-runs/${safeStreamId}/publish-state.json`))
 const segmentManifestPath = path.join(outDir, `${safeStreamId}.segments.json`)
-const maxBlobs = Number(arg('max-blobs', String(profile.maxBlobs)))
-const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
-const requestedVideoBitrate = arg('video-bitrate', profile.videoBitrate)
-const audioBitrate = arg('audio-bitrate', '32k')
+const maxBlobs = numberArg('max-blobs', String(profile.maxBlobs), { integer: true, min: 1 })
+const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
+const requestedVideoBitrate = readArg('video-bitrate', profile.videoBitrate)
+const audioBitrate = readArg('audio-bitrate', '32k')
 
 if (!fs.existsSync(path.resolve(input))) throw new Error(`Input not found: ${path.resolve(input)}`)
 if (publish && !process.env.STATION_ADDRESS) throw new Error('STATION_ADDRESS is required when using --publish')
@@ -262,7 +273,7 @@ try {
       '--out-dir',
       attemptDir,
       '--stream-id',
-      safeStreamId,
+      streamId,
       '--segment-ms',
       String(candidate.segmentMs),
       '--width',
@@ -367,7 +378,7 @@ try {
         '--dir',
         outDir,
         '--stream-id',
-        safeStreamId,
+        streamId,
         '--segment-ms',
         String(chosen.candidate.segmentMs),
         '--codec',
@@ -384,7 +395,7 @@ try {
       status,
       statusPath,
     )
-    status.publishState = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : null
+    status.publishState = readPublishStateSnapshot(statePath, status)
   }
 
   status.phase = 'complete'

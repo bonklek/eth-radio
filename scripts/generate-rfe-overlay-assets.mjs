@@ -4,25 +4,19 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ffmpegPath from 'ffmpeg-static'
+import { readArg } from './lib/cli-args.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(scriptDir, '..')
-
-function arg(name, fallback) {
-  const flag = `--${name}`
-  const index = process.argv.indexOf(flag)
-  if (index === -1) return fallback
-  return process.argv[index + 1]
-}
 
 function fromRoot(value) {
   return path.isAbsolute(value) ? value : path.resolve(root, value)
 }
 
-const source = fromRoot(arg('input', 'public/rfe-assets/rfe-terminal-final.png'))
-const outDir = fromRoot(arg('out-dir', 'public/rfe-assets/overlays'))
+const source = fromRoot(readArg('input', 'public/rfe-assets/rfe-terminal-final.png'))
+const outDir = fromRoot(readArg('out-dir', 'public/rfe-assets/overlays'))
 
-// Keep this list in sync with the profile table in docs/agent-publishing-guide.md.
+// Keep this list in sync with the tracked overlay assets.
 const profiles = [
   ['360p', 640, 360],
   ['420p', 746, 420],
@@ -41,6 +35,9 @@ if (!fs.existsSync(source)) {
 
 function readPngInfo(filePath) {
   const buffer = fs.readFileSync(filePath)
+  if (buffer.length < 26) {
+    throw new Error(`Overlay source PNG is truncated: ${path.relative(root, filePath)}`)
+  }
   const signature = buffer.subarray(0, 8).toString('hex')
   if (signature !== '89504e470d0a1a0a') {
     throw new Error(`Overlay source is not a PNG: ${path.relative(root, filePath)}`)

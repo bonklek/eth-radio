@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { hexToBytes } from 'viem'
+import { readArg } from './lib/cli-args.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -10,33 +11,80 @@ function usage() {
   process.exit(1)
 }
 
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
-}
-
-const manifestPath = arg('manifest')
-const sidecarsPath = arg('sidecars')
+const manifestPath = readArg('manifest')
+const sidecarsPath = readArg('sidecars')
 if (!manifestPath || !sidecarsPath) usage()
 
 const manifest = JSON.parse(fs.readFileSync(path.resolve(manifestPath), 'utf8'))
 const sidecars = JSON.parse(fs.readFileSync(path.resolve(sidecarsPath), 'utf8'))
 
+function assertBytes32Hex(value, label) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(value || ''))) throw new Error(`Invalid ${label}: ${value}`)
+}
+
+function assertBlobHex(value, label) {
+  if (!/^0x(?:[0-9a-fA-F]{2})*$/.test(String(value || ''))) throw new Error(`Invalid ${label}: expected 0x-prefixed byte hex`)
+}
+
+function isNonNegativeInteger(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number.isSafeInteger(Number(value))
+  return false
+}
+
+function assertManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('Manifest must be a JSON object')
+  if (typeof manifest.streamId !== 'string' || !manifest.streamId.trim()) throw new Error('Manifest streamId is required')
+  if (!isNonNegativeInteger(manifest.sequence)) {
+    throw new Error(`Invalid manifest sequence: ${manifest.sequence}`)
+  }
+  if (!isNonNegativeInteger(manifest.payloadBytes)) {
+    throw new Error(`Invalid manifest payloadBytes: ${manifest.payloadBytes}`)
+  }
+  if (!isNonNegativeInteger(manifest.blobCount)) {
+    throw new Error(`Invalid manifest blobCount: ${manifest.blobCount}`)
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(String(manifest.payloadSha256 || ''))) {
+    throw new Error(`Invalid manifest payloadSha256: ${manifest.payloadSha256}`)
+  }
+  if (!Array.isArray(manifest.blobVersionedHashes)) throw new Error('Manifest blobVersionedHashes must be an array')
+  for (const hash of manifest.blobVersionedHashes) assertBytes32Hex(hash, 'manifest blob versioned hash')
+}
+
+function assertSidecars(sidecars) {
+  if (!sidecars || typeof sidecars !== 'object' || Array.isArray(sidecars)) {
+    throw new Error('Sidecars must be a JSON object')
+  }
+  if (!Array.isArray(sidecars.matches)) throw new Error('Sidecars matches must be an array')
+  for (const [index, match] of sidecars.matches.entries()) {
+    if (!match || typeof match !== 'object' || Array.isArray(match)) {
+      throw new Error(`Invalid sidecar match at index ${index}: expected an object`)
+    }
+    assertBytes32Hex(match.versionedHash, `sidecar match ${index} versionedHash`)
+    assertBlobHex(match.blob, `sidecar match ${index} blob`)
+  }
+}
+
+assertManifest(manifest)
+assertSidecars(sidecars)
+const sequence = Number(manifest.sequence)
+const payloadBytes = Number(manifest.payloadBytes)
+const blobCount = Number(manifest.blobCount)
+
 const byHash = new Map()
-for (const match of sidecars.matches || []) {
-  if (match.versionedHash && match.blob) byHash.set(match.versionedHash, match.blob)
+for (const match of sidecars.matches) {
+  byHash.set(match.versionedHash.toLowerCase(), match.blob)
 }
 
 const blobs = []
-for (const hash of manifest.blobVersionedHashes || []) {
-  const blob = byHash.get(hash)
+for (const hash of manifest.blobVersionedHashes) {
+  const blob = byHash.get(hash.toLowerCase())
   if (!blob) throw new Error(`Missing sidecar for blob versioned hash ${hash}`)
   blobs.push(blob)
 }
 
-if (blobs.length !== manifest.blobCount) {
-  throw new Error(`Expected ${manifest.blobCount} blob(s), found ${blobs.length}`)
+if (blobs.length !== blobCount) {
+  throw new Error(`Expected ${blobCount} blob(s), found ${blobs.length}`)
 }
 
 const chunks = []
@@ -55,7 +103,7 @@ for (const blob of blobs) {
   }
 }
 
-const payload = Buffer.concat(chunks, decodedLength).subarray(0, manifest.payloadBytes)
+const payload = Buffer.concat(chunks, decodedLength).subarray(0, payloadBytes)
 const sha256 = crypto.createHash('sha256').update(payload).digest('hex')
 
 if (sha256 !== manifest.payloadSha256) {
@@ -63,9 +111,9 @@ if (sha256 !== manifest.payloadSha256) {
 }
 
 const out = path.resolve(
-  arg(
+  readArg(
     'out',
-    `work/blob-radio-testnet/reconstructed/${manifest.streamId.replace(/[^a-zA-Z0-9_.-]/g, '_')}-${manifest.sequence}.webm`,
+    `work/blob-radio-testnet/reconstructed/${manifest.streamId.replace(/[^a-zA-Z0-9_.-]/g, '_')}-${sequence}.webm`,
   ),
 )
 fs.mkdirSync(path.dirname(out), { recursive: true })

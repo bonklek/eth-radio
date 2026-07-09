@@ -26,7 +26,11 @@
     "web:build": "node scripts/build-static-client.mjs",
     "web:ipfs:prepare": "node scripts/prepare-ipfs-publish.mjs",
     "web:serve": "node scripts/serve-static-client.mjs --build --dist",
-    "web:static": "node scripts/verify-static-client.mjs"
+    "web:static": "node scripts/verify-static-client.mjs",
+    "test:publishers": "node scripts/test-publisher-dry-run.mjs",
+    "test:live-run": "node scripts/test-run-live-station-stream-id.mjs",
+    "test:live-segment": "node scripts/test-live-segment-cli.mjs",
+    "test:utility-cli": "node scripts/test-utility-cli-guards.mjs"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

@@ -3,6 +3,35 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import solc from 'solc'
 
+function assertSolcObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid solc output: ${label} must be an object`)
+  }
+  return value
+}
+
+function solcDiagnostics(output) {
+  if (output.errors === undefined) return []
+  if (!Array.isArray(output.errors)) {
+    throw new Error('Invalid solc output: errors must be an array')
+  }
+  return output.errors
+}
+
+function stationContract(output) {
+  const contracts = assertSolcObject(output.contracts, 'contracts')
+  const stationSource = assertSolcObject(contracts['Station.sol'], 'contracts["Station.sol"]')
+  const contract = assertSolcObject(stationSource.Station, 'contracts["Station.sol"].Station')
+  if (!Array.isArray(contract.abi)) {
+    throw new Error('Invalid solc output: Station ABI must be an array')
+  }
+  const bytecode = contract.evm?.bytecode?.object
+  if (typeof bytecode !== 'string' || !/^[0-9a-fA-F]+$/.test(bytecode)) {
+    throw new Error('Invalid solc output: Station bytecode must be hex')
+  }
+  return contract
+}
+
 export function compileStation() {
   const contractPath = path.resolve('contracts/Station.sol')
   const source = fs.readFileSync(contractPath, 'utf8')
@@ -21,8 +50,8 @@ export function compileStation() {
     },
   }
 
-  const output = JSON.parse(solc.compile(JSON.stringify(input)))
-  const errors = output.errors || []
+  const output = assertSolcObject(JSON.parse(solc.compile(JSON.stringify(input))), 'root')
+  const errors = solcDiagnostics(output)
   const fatal = errors.filter((error) => error.severity === 'error')
   for (const error of errors) {
     const writer = error.severity === 'error' ? console.error : console.warn
@@ -30,7 +59,7 @@ export function compileStation() {
   }
   if (fatal.length) throw new Error('Station.sol compilation failed')
 
-  const contract = output.contracts['Station.sol'].Station
+  const contract = stationContract(output)
   return {
     abi: contract.abi,
     bytecode: `0x${contract.evm.bytecode.object}`,
