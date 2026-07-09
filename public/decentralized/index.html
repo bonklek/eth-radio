@@ -66,7 +66,10 @@
           <h2>Blobspace Feed</h2>
           <p id="rail-mode">Live beacon sidecars from /eth/v1/beacon/blob_sidecars/{slot}.</p>
         </div>
-        <span id="network-label">Mainnet</span>
+        <div class="network-actions">
+          <span id="network-label">Mainnet</span>
+          <a id="station-explorer" class="station-explorer" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true">Station</a>
+        </div>
       </div>
 
       <div class="legend">
@@ -84,16 +87,22 @@
         <div><span>Execution</span><strong id="execution-health">-</strong></div>
         <div><span>Beacon</span><strong id="beacon-health">-</strong></div>
         <div><span>Metadata</span><strong id="metadata-age">-</strong></div>
+        <div><span>Health</span><strong id="stream-health">-</strong></div>
       </div>
+      <div id="blobspace-status" class="blobspace-status"></div>
 
       <section class="blobspace-panel">
         <div id="slots" class="slots"></div>
       </section>
 
       <section class="segments-panel">
+        <div id="segment-rail-resizer" class="segment-rail-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize segment rail" tabindex="0"></div>
         <div class="segments-heading">
           <strong>Stream Segments</strong>
-          <input id="segment-lookup" type="search" placeholder="Paste tx URL, hash, or blob..." autocomplete="off" />
+          <div class="lookup-box">
+            <input id="segment-lookup" type="search" placeholder="Paste explorer URL, tx, block, or blob..." autocomplete="off" />
+            <span id="lookup-message" class="lookup-message">Paste a transaction URL, transaction hash, blob hash, block number, or sequence.</span>
+          </div>
           <button id="watch-segment" type="button">WATCH</button>
         </div>
         <div class="segments-table">
@@ -116,6 +125,14 @@
 
       <details class="settings-panel">
         <summary>Connection settings</summary>
+        <div class="endpoint-setup" aria-label="Endpoint setup">
+          <div class="endpoint-summary">
+            <span>Active endpoints</span>
+            <strong id="endpoint-summary">Using preset endpoints</strong>
+          </div>
+          <div id="endpoint-presets" class="endpoint-presets"></div>
+          <p id="endpoint-apply-status" class="endpoint-apply-status" role="status">Choose a preset or apply custom browser-accessible endpoints.</p>
+        </div>
         <form id="settings" class="settings">
           <label>
             Chain preset
@@ -127,7 +144,10 @@
           </label>
           <label>
             Station
-            <input id="station-address" name="stationAddress" autocomplete="off" />
+            <span class="station-lookup-row">
+              <input id="station-address" name="stationAddress" autocomplete="off" placeholder="0x... or explorer address URL" />
+              <button id="station-lookup" type="button">Lookup</button>
+            </span>
           </label>
           <label>
             From block
@@ -149,7 +169,10 @@
             Cache limit MB
             <input id="cache-limit" name="cacheLimitMb" inputmode="numeric" />
           </label>
-          <button type="submit">Save and reload</button>
+          <div class="settings-actions">
+            <button id="apply-custom-endpoints" type="submit">Apply custom endpoints</button>
+            <button id="reset-preset-endpoints" type="button">Reset to preset</button>
+          </div>
         </form>
       </details>
     </aside>

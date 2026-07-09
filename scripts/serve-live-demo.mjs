@@ -14,7 +14,7 @@ import {
 import { mainnet, sepolia } from 'viem/chains'
 
 const root = process.cwd()
-const port = Number(process.env.PORT || 5173)
+const port = envNumber('PORT', 5173, { integer: true, min: 1, max: 65535 })
 const canonicalStationAddress = '0x060c51d481808b506dfae72f054f39e11e4f4017'
 const canonicalStationFromBlock = '11226386'
 const manifestDir = path.join(root, 'work', 'blob-radio-testnet', 'manifests')
@@ -26,10 +26,10 @@ const overlayAssetDir = fs.existsSync(path.join(root, 'public', 'rfe-assets'))
   ? path.join(root, 'public', 'rfe-assets')
   : path.join(root, 'work', 'radio-free-ethereum', 'final')
 const previewVideoFile = process.env.PREVIEW_VIDEO_FILE || ''
-const maxBlobsPerBlock = Number(process.env.MAX_BLOBS_PER_BLOCK || 21)
-const slotWindow = Number(process.env.SLOT_WINDOW || 8)
-const slotMetricsCacheMs = Number(process.env.SLOT_METRICS_CACHE_MS || 2000)
-const viewerPollMs = Number(process.env.VIEWER_POLL_MS || 2000)
+const maxBlobsPerBlock = envNumber('MAX_BLOBS_PER_BLOCK', 21, { integer: true, min: 1 })
+const slotWindow = envNumber('SLOT_WINDOW', 8, { integer: true, min: 1 })
+const slotMetricsCacheMs = envNumber('SLOT_METRICS_CACHE_MS', 2000, { integer: true, min: 1 })
+const viewerPollMs = envNumber('VIEWER_POLL_MS', 2000, { integer: true, min: 1 })
 const streamId = process.env.STREAM_ID || 'rfe-baked-clock-pipe-v6'
 const defaultNetwork = normalizeNetwork(process.env.CHAIN || 'sepolia')
 const chains = { mainnet, sepolia }
@@ -66,7 +66,7 @@ const endpointPresets = {
     },
   },
 }
-const beaconTimeoutMs = Number(process.env.BEACON_TIMEOUT_MS || 3500)
+const beaconTimeoutMs = envNumber('BEACON_TIMEOUT_MS', 3500, { integer: true, min: 1 })
 const secondsPerSlot = 12n
 const stationSegmentsCache = new Map()
 const stationSegmentsPromise = new Map()
@@ -79,6 +79,24 @@ function normalizeNetwork(value) {
   const text = String(value || '').toLowerCase()
   if (text === 'mainnet' || text === 'ethereum' || text === 'eth') return 'mainnet'
   return 'sepolia'
+}
+
+function envNumber(name, fallback, { integer = false, min = undefined, max = undefined } = {}) {
+  const raw = process.env[name]
+  if (raw == null || raw === '') return fallback
+  const value = Number(raw)
+  const invalid = !Number.isFinite(value)
+    || (integer && !Number.isInteger(value))
+    || (min !== undefined && value < min)
+    || (max !== undefined && value > max)
+  if (!invalid) return value
+  const constraints = [
+    integer ? 'integer' : 'number',
+    min !== undefined ? `>= ${min}` : '',
+    max !== undefined ? `<= ${max}` : '',
+  ].filter(Boolean).join(' ')
+  console.warn(`Ignoring invalid ${name}: expected ${constraints}, got ${raw}`)
+  return fallback
 }
 
 function networkLabel(network) {
@@ -94,6 +112,30 @@ function endpointPresetFor(network, presetKey) {
   const key = endpointPresets[presetKey] ? presetKey : ''
   const endpoints = key ? endpointPresets[key].networks[network] : null
   return endpoints ? { key, ...endpoints } : { key: '', executionRpc: '', beaconApi: '' }
+}
+
+function readStationDeployment(name) {
+  const deploymentPath = path.join(root, 'work', 'blob-radio-testnet', 'contracts', `Station.${name}.json`)
+  if (!fs.existsSync(deploymentPath)) return null
+  try {
+    const deployment = readJson(deploymentPath)
+    if (Array.isArray(deployment?.abi)) return deployment
+    console.warn(`Ignoring invalid Station deployment metadata for ${name}: missing abi array`)
+  } catch (error) {
+    console.warn(`Ignoring unreadable Station deployment metadata for ${name}: ${error.message}`)
+  }
+  return null
+}
+
+function envBlockNumber(network, name, fallback = '0') {
+  const value = envForNetwork(network, name, fallback)
+  try {
+    const block = BigInt(value)
+    return block >= 0n ? block : BigInt(fallback)
+  } catch {
+    console.warn(`Ignoring invalid ${network.toUpperCase()}_${name}: expected a non-negative integer`)
+    return BigInt(fallback)
+  }
 }
 
 function cleanHttpUrl(value) {
@@ -112,6 +154,17 @@ function contextCacheKey(ctx) {
   return `${ctx.name}:${ctx.endpointPreset || 'env'}:${ctx.executionUrl || ''}:${ctx.beaconUrl || ''}`
 }
 
+function publicErrorMessage(error, ctx = null) {
+  let text = String(error?.message || error || 'Request failed')
+  const endpoints = [ctx?.executionUrl, ctx?.beaconUrl]
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+  for (const endpoint of endpoints) {
+    text = text.split(endpoint).join('[redacted endpoint]')
+  }
+  return text.replace(/https?:\/\/[^\s"'<>)}\]]+/g, '[redacted endpoint]')
+}
+
 function blobspaceConfig(ctx) {
   return {
     endpointPreset: ctx.endpointPreset || '',
@@ -119,8 +172,7 @@ function blobspaceConfig(ctx) {
     presetAvailable: Boolean(endpointPresets.public?.networks?.[ctx.name]),
     executionRpcConfigured: Boolean(ctx.publicClient),
     beaconApiConfigured: Boolean(ctx.beaconUrl),
-    executionRpcUrl: ctx.executionUrl || '',
-    beaconRpcUrl: ctx.beaconUrl || '',
+    beaconSlotBase: ctx.beaconSlotBase,
   }
 }
 
@@ -132,10 +184,9 @@ function networkContext(networkInput, options = {}) {
   const beaconFallback = preset.beaconApi || (name === 'mainnet' ? 'https://ethereum-beacon-api.publicnode.com' : '')
   const executionUrl = cleanHttpUrl(options.executionRpcUrl) || envForNetwork(name, 'ETH_RPC_URL', executionFallback)
   const beaconUrl = (cleanHttpUrl(options.beaconRpcUrl) || envForNetwork(name, 'BEACON_RPC_URL', beaconFallback))?.replace(/\/$/, '')
-  const deploymentPath = path.join(root, 'work', 'blob-radio-testnet', 'contracts', `Station.${name}.json`)
-  const stationDeployment = fs.existsSync(deploymentPath) ? JSON.parse(fs.readFileSync(deploymentPath, 'utf8')) : null
+  const stationDeployment = readStationDeployment(name)
   const stationAddress = envForNetwork(name, 'STATION_ADDRESS', name === 'sepolia' ? canonicalStationAddress : '')
-  const stationFromBlock = BigInt(envForNetwork(name, 'STATION_FROM_BLOCK', name === 'sepolia' ? canonicalStationFromBlock : '0'))
+  const stationFromBlock = envBlockNumber(name, 'STATION_FROM_BLOCK', name === 'sepolia' ? canonicalStationFromBlock : '0')
   return {
     name,
     label: networkLabel(name),
@@ -148,29 +199,64 @@ function networkContext(networkInput, options = {}) {
     stationAbi: stationDeployment?.abi || stationEventAbi,
     stationFromBlock,
     explorerBase: name === 'mainnet' ? 'https://etherscan.io' : 'https://sepolia.etherscan.io',
+    beaconSlotBase: name === 'mainnet' ? 'https://beaconscan.com/slot/' : 'https://sepolia.beaconcha.in/slot/',
   }
+}
+
+function segmentOrderPart(value, label) {
+  if (value == null || value === '') return 0n
+  try {
+    const order = BigInt(value)
+    if (order >= 0n) return order
+  } catch {
+  }
+  throw new Error(`${label} must be a non-negative integer`)
+}
+
+function compareSegmentOrderPart(left, right, label) {
+  const a = segmentOrderPart(left, label)
+  const b = segmentOrderPart(right, label)
+  return a < b ? -1 : a > b ? 1 : 0
 }
 
 function canonicalSegmentSort(a, b) {
   return (
     String(a.streamId || '').localeCompare(String(b.streamId || '')) ||
-    Number(a.sequence) - Number(b.sequence) ||
-    Number(a.blockNumber || 0) - Number(b.blockNumber || 0) ||
-    Number(a.transactionIndex || 0) - Number(b.transactionIndex || 0) ||
-    Number(a.logIndex || 0) - Number(b.logIndex || 0)
+    compareSegmentOrderPart(a.sequence, b.sequence, 'segment sequence') ||
+    compareSegmentOrderPart(a.blockNumber, b.blockNumber, 'segment blockNumber') ||
+    compareSegmentOrderPart(a.transactionIndex, b.transactionIndex, 'segment transactionIndex') ||
+    compareSegmentOrderPart(a.logIndex, b.logIndex, 'segment logIndex')
   )
 }
 
+const defaultHeaders = {
+  'cache-control': 'no-store',
+  'cross-origin-opener-policy': 'same-origin',
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+}
+
 function send(response, status, body, headers = {}) {
-  response.writeHead(status, headers)
+  response.writeHead(status, {
+    ...defaultHeaders,
+    ...headers,
+  })
   response.end(body)
 }
 
 function sendJson(response, value, status = 200) {
   send(response, status, JSON.stringify(value, null, 2), {
     'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
   })
+}
+
+function decodePathParam(response, value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    send(response, 400, 'bad request')
+    return null
+  }
 }
 
 function readJson(filePath) {
@@ -178,29 +264,260 @@ function readJson(filePath) {
 }
 
 function safeStreamId(value) {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_')
+  return String(value || '').replace(/[^a-zA-Z0-9_.-]/g, '_')
+}
+
+function isTxHash(value) {
+  return /^0x[0-9a-fA-F]{64}$/.test(String(value || ''))
+}
+
+function isBytes32Hex(value) {
+  return /^[0-9a-fA-F]{64}$/.test(String(value || '').replace(/^0x/, ''))
+}
+
+function isBytes48Hex(value) {
+  return /^0x[0-9a-fA-F]{96}$/.test(String(value || ''))
+}
+
+function isBlobHex(value) {
+  return /^0x(?:[0-9a-fA-F]{2})*$/.test(String(value || ''))
+}
+
+function safeSegmentSequence(value) {
+  const sequence = Number(value)
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return null
+  return sequence
+}
+
+function nonNegativeSafeInteger(value, label) {
+  if (typeof value === 'bigint') {
+    if (value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(value)
+  } else if (typeof value === 'number') {
+    if (Number.isSafeInteger(value) && value >= 0) return value
+  } else if (/^\d+$/.test(String(value || ''))) {
+    const number = Number(value)
+    if (Number.isSafeInteger(number)) return number
+  }
+  throw new Error(`${label} must be a non-negative safe integer`)
+}
+
+function optionalNonNegativeSafeInteger(value, label) {
+  if (value == null) return null
+  return nonNegativeSafeInteger(value, label)
+}
+
+function blockTimestampMs(value, label) {
+  let milliseconds
+  if (typeof value === 'bigint') {
+    if (value < 0n) throw new Error(`${label} must be a non-negative safe integer`)
+    milliseconds = value * 1000n
+  } else {
+    const seconds = nonNegativeSafeInteger(value, label)
+    milliseconds = BigInt(seconds) * 1000n
+  }
+  if (milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${label} milliseconds must be a safe integer`)
+  return Number(milliseconds)
+}
+
+function safeSlot(value) {
+  const slot = Number(value)
+  if (!Number.isSafeInteger(slot) || slot < 0) return null
+  return slot
+}
+
+function sidecarIndex(value, label = 'sidecar index') {
+  const index = Number(value)
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error(`${label} must be a non-negative safe integer`)
+  return index
+}
+
+function safeSidecarPath(txHash) {
+  if (!isTxHash(txHash)) return null
+  return path.join(sidecarDir, `${String(txHash).toLowerCase()}.json`)
+}
+
+function normalizeCachedSidecars(sidecars, txHash) {
+  if (!sidecars || typeof sidecars !== 'object') return null
+  const slot = safeSlot(sidecars.slot)
+  if (!Array.isArray(sidecars.matches) || sidecars.matches.some((match) => !validSidecarMatch(match))) return null
+  return {
+    ...sidecars,
+    txHash: isTxHash(sidecars.txHash) ? String(sidecars.txHash).toLowerCase() : String(txHash).toLowerCase(),
+    slot,
+    matches: sidecars.matches,
+  }
+}
+
+function validSidecarMatch(match) {
+  return match
+    && typeof match === 'object'
+    && !Array.isArray(match)
+    && safeSlot(match.index) !== null
+    && isBytes32Hex(match.versionedHash)
+    && isBlobHex(match.blob)
+}
+
+function beaconData(response, label) {
+  if (!response || typeof response !== 'object' || Array.isArray(response) || !('data' in response)) {
+    throw new Error(`Invalid beacon ${label} response: missing data`)
+  }
+  return response.data
+}
+
+function beaconDataArray(response, label) {
+  const data = beaconData(response, label)
+  if (!Array.isArray(data)) throw new Error(`Invalid beacon ${label} response: data must be an array`)
+  return data
+}
+
+function decimalSafeInteger(value, label) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new Error(`${label} must be a decimal string`)
+  const number = Number(value)
+  if (!Number.isSafeInteger(number)) throw new Error(`${label} exceeds safe integer range`)
+  return number
+}
+
+function beaconGenesisTime(response) {
+  const data = beaconData(response, 'genesis')
+  const genesisTime = data?.genesis_time
+  if (!/^\d+$/.test(String(genesisTime || ''))) {
+    throw new Error('Invalid beacon genesis response: genesis_time must be a decimal string')
+  }
+  return BigInt(genesisTime)
+}
+
+function beaconHeadSlot(response) {
+  const slot = beaconData(response, 'head')?.header?.message?.slot
+  return decimalSafeInteger(slot, 'Invalid beacon head response: slot')
+}
+
+function sidecarVersionedHash(sidecar) {
+  const commitment = sidecar?.kzg_commitment || sidecar?.kzgCommitment
+  if (!commitment) return null
+  if (!isBytes48Hex(commitment)) throw new Error(`Invalid sidecar KZG commitment: ${commitment}`)
+  return commitmentToVersionedHash({ commitment })
+}
+
+function safeMediaPath(streamId, sequence) {
+  const safeId = safeStreamId(streamId)
+  const safeSequence = safeSegmentSequence(sequence)
+  if (!safeId || safeSequence == null) return null
+  return path.join(reconstructedDir, `${safeId}-${safeSequence}.webm`)
+}
+
+function normalizeBlobVersionedHashes(value) {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return null
+  const hashes = []
+  for (const hash of value) {
+    if (!isBytes32Hex(hash)) return null
+    hashes.push(String(hash).toLowerCase())
+  }
+  return hashes
+}
+
+function preferredBlobVersionedHashes(tx, segment) {
+  const transactionHashes = normalizeBlobVersionedHashes(tx?.blobVersionedHashes)
+  if (transactionHashes == null) throw new Error('Invalid transaction blobVersionedHashes')
+  return transactionHashes.length ? transactionHashes : segment.blobVersionedHashes
+}
+
+function normalizeLocalManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object') return null
+  const streamId = typeof manifest.streamId === 'string' ? manifest.streamId : ''
+  const sequence = safeSegmentSequence(manifest.sequence)
+  const txHash = String(manifest.txHash || manifest.transactionHash || '')
+  const payloadSha256 = String(manifest.payloadSha256 || '').replace(/^0x/, '')
+  const blobVersionedHashes = normalizeBlobVersionedHashes(manifest.blobVersionedHashes)
+  if (!streamId || sequence == null || !isTxHash(txHash) || !isBytes32Hex(payloadSha256) || blobVersionedHashes == null) return null
+  return {
+    ...manifest,
+    streamId,
+    sequence,
+    txHash: txHash.toLowerCase(),
+    transactionHash: txHash.toLowerCase(),
+    payloadSha256: payloadSha256.toLowerCase(),
+    payloadSha256Hex: `0x${payloadSha256.toLowerCase()}`,
+    blobVersionedHashes,
+  }
+}
+
+function stationSegmentFromLog(log, ctx, createdAtMs = null) {
+  const sequence = nonNegativeSafeInteger(log.args.sequence, 'Station segment sequence')
+  const durationMs = nonNegativeSafeInteger(log.args.durationMs, 'Station segment durationMs')
+  const payloadBytes = nonNegativeSafeInteger(log.args.payloadBytes, 'Station segment payloadBytes')
+  const blobVersionedHashes = normalizeBlobVersionedHashes(log.args.blobVersionedHashes)
+  if (blobVersionedHashes == null) throw new Error('Invalid Station segment blobVersionedHashes')
+  const payloadSha256 = String(log.args.payloadSha256 || '').replace(/^0x/, '')
+  if (!isBytes32Hex(payloadSha256)) throw new Error('Invalid Station segment payloadSha256')
+  const mediaPath = safeMediaPath(log.args.streamId, sequence)
+  return {
+    app: 'eth-radio',
+    version: 1,
+    chain: ctx.name,
+    source: 'station',
+    station: getAddress(ctx.stationAddress),
+    streamId: log.args.streamId,
+    sequence,
+    durationMs,
+    payloadBytes,
+    payloadSha256: payloadSha256.toLowerCase(),
+    payloadSha256Hex: `0x${payloadSha256.toLowerCase()}`,
+    codec: log.args.codec,
+    previousSegmentHash: log.args.previousSegmentHash,
+    blobCount: blobVersionedHashes.length,
+    txHash: log.transactionHash,
+    transactionHash: log.transactionHash,
+    blockNumber: log.blockNumber.toString(),
+    blockHash: log.blockHash,
+    transactionIndex: log.transactionIndex,
+    logIndex: log.logIndex,
+    createdAt: createdAtMs ? new Date(createdAtMs).toISOString() : null,
+    publisher: log.args.publisher,
+    streamIdHash: log.args.streamIdHash,
+    blobVersionedHashes,
+    hasMedia: mediaPath ? fs.existsSync(mediaPath) : false,
+    mediaUrl: `/media/${encodeURIComponent(log.args.streamId)}/${sequence}.webm`,
+    gatewayUrl: `/api/segments/${encodeURIComponent(log.args.streamId)}/${sequence}/payload`,
+  }
 }
 
 function readProofSegments(id) {
   const safeId = safeStreamId(id)
   const proofPath = path.join(liveRunDir, safeId, 'segments', `${safeId}.segments.json`)
   if (!fs.existsSync(proofPath)) return []
-  const manifest = readJson(proofPath)
-  return Array.isArray(manifest.segments) ? manifest.segments : []
+  try {
+    const manifest = readJson(proofPath)
+    return Array.isArray(manifest.segments)
+      ? manifest.segments.filter((segment) => safeSegmentSequence(segment?.sequence) != null)
+      : []
+  } catch (error) {
+    console.warn(`Skipping unreadable proof manifest for ${safeId}: ${error.message}`)
+    return []
+  }
 }
 
 function proofSegmentBySequence(id) {
   const proof = new Map()
   for (const segment of readProofSegments(id)) {
-    proof.set(Number(segment.sequence), segment)
+    const sequence = safeSegmentSequence(segment.sequence)
+    if (sequence != null) proof.set(sequence, segment)
   }
   return proof
 }
 
 function getCachedSidecars(txHash) {
-  const sidecarPath = path.join(sidecarDir, `${txHash}.json`)
+  const sidecarPath = safeSidecarPath(txHash)
+  if (!sidecarPath) return null
   if (!fs.existsSync(sidecarPath)) return null
-  return readJson(sidecarPath)
+  try {
+    const sidecars = normalizeCachedSidecars(readJson(sidecarPath), txHash)
+    if (sidecars) return sidecars
+    console.warn(`Skipping invalid sidecar cache ${path.basename(sidecarPath)}`)
+  } catch (error) {
+    console.warn(`Skipping unreadable sidecar cache ${path.basename(sidecarPath)}: ${error.message}`)
+  }
+  return null
 }
 
 function readManifests() {
@@ -208,13 +525,24 @@ function readManifests() {
   return fs
     .readdirSync(manifestDir)
     .filter((name) => name.endsWith('.json'))
-    .map((name) => {
+    .flatMap((name) => {
       const manifestPath = path.join(manifestDir, name)
-      const manifest = readJson(manifestPath)
-      const mediaPath = path.join(reconstructedDir, `${safeStreamId(manifest.streamId)}-${manifest.sequence}.webm`)
+      let manifest
+      try {
+        manifest = normalizeLocalManifest(readJson(manifestPath))
+      } catch (error) {
+        console.warn(`Skipping unreadable local segment manifest ${name}: ${error.message}`)
+        return []
+      }
+      if (!manifest) {
+        console.warn(`Skipping invalid local segment manifest ${name}`)
+        return []
+      }
+      const mediaPath = safeMediaPath(manifest.streamId, manifest.sequence)
+      if (!mediaPath) return []
       const cachedSidecars = getCachedSidecars(manifest.txHash)
       const slot = cachedSidecars?.slot || manifest.slot || null
-      return {
+      return [{
         ...manifest,
         source: manifest.stationAddress ? 'station-manifest' : 'manifest',
         station: manifest.stationAddress,
@@ -224,7 +552,7 @@ function readManifests() {
         mediaUrl: `/media/${encodeURIComponent(manifest.streamId)}/${manifest.sequence}.webm`,
         gatewayUrl: `/api/segments/${encodeURIComponent(manifest.streamId)}/${manifest.sequence}/payload`,
         ready: fs.existsSync(mediaPath),
-      }
+      }]
     })
     .sort(canonicalSegmentSort)
 }
@@ -247,43 +575,13 @@ async function readStationSegments(ctx = networkContext(defaultNetwork)) {
     const key = log.blockNumber.toString()
     if (blockTimestamps.has(key)) continue
     const block = await ctx.publicClient.getBlock({ blockNumber: log.blockNumber })
-    blockTimestamps.set(key, Number(block.timestamp) * 1000)
+    blockTimestamps.set(key, blockTimestampMs(block.timestamp, 'Station segment block timestamp'))
   }
 
   const segments = parsed
     .map((log) => {
-      const payloadSha256 = log.args.payloadSha256?.replace(/^0x/, '') || ''
-      const mediaPath = path.join(reconstructedDir, `${safeStreamId(log.args.streamId)}-${log.args.sequence}.webm`)
       const createdAtMs = blockTimestamps.get(log.blockNumber.toString()) || null
-      return {
-        app: 'eth-radio',
-        version: 1,
-        chain: ctx.name,
-        source: 'station',
-        station: getAddress(ctx.stationAddress),
-        streamId: log.args.streamId,
-        sequence: Number(log.args.sequence),
-        durationMs: Number(log.args.durationMs),
-        payloadBytes: Number(log.args.payloadBytes),
-        payloadSha256,
-        payloadSha256Hex: log.args.payloadSha256,
-        codec: log.args.codec,
-        previousSegmentHash: log.args.previousSegmentHash,
-        blobCount: log.args.blobVersionedHashes.length,
-        txHash: log.transactionHash,
-        transactionHash: log.transactionHash,
-        blockNumber: log.blockNumber.toString(),
-        blockHash: log.blockHash,
-        transactionIndex: log.transactionIndex,
-        logIndex: log.logIndex,
-        createdAt: createdAtMs ? new Date(createdAtMs).toISOString() : null,
-        publisher: log.args.publisher,
-        streamIdHash: log.args.streamIdHash,
-        blobVersionedHashes: log.args.blobVersionedHashes,
-        hasMedia: fs.existsSync(mediaPath),
-        mediaUrl: `/media/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}.webm`,
-        gatewayUrl: `/api/segments/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}/payload`,
-      }
+      return stationSegmentFromLog(log, ctx, createdAtMs)
     })
     .sort(canonicalSegmentSort)
 
@@ -291,8 +589,12 @@ async function readStationSegments(ctx = networkContext(defaultNetwork)) {
   for (const segment of segments) {
     const key = `${segment.streamId}:${segment.sequence}`
     const previous = latestByKey.get(key)
-    const previousOrder = previous ? BigInt(previous.blockNumber) * 1_000_000n + BigInt(previous.logIndex) : -1n
-    const nextOrder = BigInt(segment.blockNumber) * 1_000_000n + BigInt(segment.logIndex)
+    const previousOrder = previous
+      ? segmentOrderPart(previous.blockNumber, 'previous segment blockNumber') * 1_000_000n
+        + segmentOrderPart(previous.logIndex, 'previous segment logIndex')
+      : -1n
+    const nextOrder = segmentOrderPart(segment.blockNumber, 'segment blockNumber') * 1_000_000n
+      + segmentOrderPart(segment.logIndex, 'segment logIndex')
     if (!previous || nextOrder >= previousOrder) latestByKey.set(key, segment)
   }
 
@@ -335,19 +637,26 @@ async function segmentFeed(ctx = networkContext(defaultNetwork)) {
 function summarizeHealth(id, segments, blobspace, ctx = networkContext(defaultNetwork)) {
   const streamSegments = segments
     .filter((segment) => segment.streamId === id)
-    .sort((a, b) => Number(a.sequence) - Number(b.sequence))
+    .sort(canonicalSegmentSort)
   const latest = streamSegments.at(-1) || null
-  const proof = latest ? proofSegmentBySequence(id).get(Number(latest.sequence)) || null : null
+  const latestSequence = latest ? nonNegativeSafeInteger(latest.sequence, 'health latest sequence') : null
+  const proof = latestSequence == null ? null : proofSegmentBySequence(id).get(latestSequence) || null
   const ageMs = latest?.createdAt ? Date.now() - Date.parse(latest.createdAt) : null
-  const expectedCadenceMs = latest?.durationMs ? Math.max(Number(latest.durationMs) * 6, 180_000) : 180_000
+  const latestDurationMs = optionalNonNegativeSafeInteger(latest?.durationMs, 'health latest durationMs')
+  const latestPayloadBytes = optionalNonNegativeSafeInteger(latest?.payloadBytes ?? latest?.bytes, 'health latest payloadBytes')
+  const latestBlobCount = optionalNonNegativeSafeInteger(
+    latest?.blobCount ?? latest?.estimatedBlobs ?? latest?.blobVersionedHashes?.length,
+    'health latest blobCount',
+  )
+  const expectedCadenceMs = latestDurationMs ? Math.max(latestDurationMs * 6, 180_000) : 180_000
   return {
     streamId: id,
     ok: Boolean(latest) && (ageMs == null || ageMs <= expectedCadenceMs),
-    latestSequence: latest ? Number(latest.sequence) : null,
+    latestSequence,
     latestTxHash: latest?.txHash || null,
     latestBlockNumber: latest?.blockNumber || null,
-    latestPayloadBytes: latest?.payloadBytes || null,
-    latestBlobCount: latest?.blobCount || latest?.blobVersionedHashes?.length || null,
+    latestPayloadBytes,
+    latestBlobCount,
     latestCreatedAt: latest?.createdAt || null,
     latestAgeMs: ageMs,
     expectedCadenceMs,
@@ -381,15 +690,22 @@ function summarizeHealth(id, segments, blobspace, ctx = networkContext(defaultNe
       presetAvailable: blobspace?.presetAvailable ?? Boolean(endpointPresets.public?.networks?.[ctx.name]),
       executionRpcConfigured: blobspace?.executionRpcConfigured ?? Boolean(ctx.publicClient),
       beaconApiConfigured: blobspace?.beaconApiConfigured ?? Boolean(ctx.beaconUrl),
-      executionRpcUrl: blobspace?.executionRpcUrl || ctx.executionUrl || '',
-      beaconRpcUrl: blobspace?.beaconRpcUrl || ctx.beaconUrl || '',
       warning: blobspace?.warning || null,
     },
   }
 }
 
 function summarizeSegment(segment) {
-  const proof = proofSegmentBySequence(segment.streamId).get(Number(segment.sequence)) || null
+  const blobVersionedHashes = normalizeBlobVersionedHashes(segment.blobVersionedHashes)
+  if (blobVersionedHashes == null) throw new Error('Invalid segment blobVersionedHashes')
+  const sequence = nonNegativeSafeInteger(segment.sequence, 'segment sequence')
+  const proof = proofSegmentBySequence(segment.streamId).get(sequence) || null
+  const durationMs = optionalNonNegativeSafeInteger(segment.durationMs, 'segment durationMs') ?? 0
+  const payloadBytes = optionalNonNegativeSafeInteger(segment.payloadBytes ?? segment.bytes, 'segment payloadBytes') ?? 0
+  const blobCount = optionalNonNegativeSafeInteger(
+    segment.blobCount ?? segment.estimatedBlobs ?? blobVersionedHashes.length,
+    'segment blobCount',
+  ) ?? 0
   return {
     app: segment.app,
     version: segment.version,
@@ -397,16 +713,16 @@ function summarizeSegment(segment) {
     source: segment.source || 'manifest',
     station: segment.station,
     streamId: segment.streamId,
-    sequence: Number(segment.sequence),
-    durationMs: Number(segment.durationMs || 0),
-    payloadBytes: Number(segment.payloadBytes || 0),
+    sequence,
+    durationMs,
+    payloadBytes,
     payloadSha256: segment.payloadSha256,
     payloadSha256Hex: segment.payloadSha256Hex,
     codec: segment.codec,
     previousSegmentHash: segment.previousSegmentHash || null,
     publisher: segment.publisher,
-    blobCount: Number(segment.blobCount || segment.blobVersionedHashes?.length || 0),
-    blobVersionedHashes: segment.blobVersionedHashes || [],
+    blobCount,
+    blobVersionedHashes,
     txHash: segment.txHash,
     transactionHash: segment.transactionHash || segment.txHash,
     blockHash: segment.blockHash,
@@ -429,37 +745,7 @@ function summarizeSegment(segment) {
 
 async function summarizeStationLog(log, ctx) {
   const block = await ctx.publicClient.getBlock({ blockNumber: log.blockNumber })
-  const payloadSha256 = log.args.payloadSha256?.replace(/^0x/, '') || ''
-  const mediaPath = path.join(reconstructedDir, `${safeStreamId(log.args.streamId)}-${log.args.sequence}.webm`)
-  return summarizeSegment({
-    app: 'eth-radio',
-    version: 1,
-    chain: ctx.name,
-    source: 'station',
-    station: getAddress(ctx.stationAddress),
-    streamId: log.args.streamId,
-    sequence: Number(log.args.sequence),
-    durationMs: Number(log.args.durationMs),
-    payloadBytes: Number(log.args.payloadBytes),
-    payloadSha256,
-    payloadSha256Hex: log.args.payloadSha256,
-    codec: log.args.codec,
-    previousSegmentHash: log.args.previousSegmentHash,
-    blobCount: log.args.blobVersionedHashes.length,
-    txHash: log.transactionHash,
-    transactionHash: log.transactionHash,
-    blockNumber: log.blockNumber.toString(),
-    blockHash: log.blockHash,
-    transactionIndex: log.transactionIndex,
-    logIndex: log.logIndex,
-    createdAt: new Date(Number(block.timestamp) * 1000).toISOString(),
-    publisher: log.args.publisher,
-    streamIdHash: log.args.streamIdHash,
-    blobVersionedHashes: log.args.blobVersionedHashes,
-    hasMedia: fs.existsSync(mediaPath),
-    mediaUrl: `/media/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}.webm`,
-    gatewayUrl: `/api/segments/${encodeURIComponent(log.args.streamId)}/${log.args.sequence}/payload`,
-  })
+  return summarizeSegment(stationSegmentFromLog(log, ctx, blockTimestampMs(block.timestamp, 'Station segment block timestamp')))
 }
 
 async function lookupStationSegmentTargeted(value, ctx) {
@@ -498,7 +784,7 @@ async function lookupStationSegmentTargeted(value, ctx) {
     address: getAddress(ctx.stationAddress),
     fromBlock: blockNumber,
     toBlock: blockNumber,
-  }).catch(() => [])
+  })
   const parsed = parseEventLogs({ abi: ctx.stationAbi, eventName: 'SegmentPublished', logs })
   return parsed[0] ? summarizeStationLog(parsed[0], ctx) : null
 }
@@ -528,9 +814,9 @@ function findSegmentFromText(value, candidates) {
 
 function latestPublishedSegment(segments) {
   return [...segments].sort((a, b) => (
-    Number(a.blockNumber || 0) - Number(b.blockNumber || 0) ||
-    Number(a.transactionIndex || 0) - Number(b.transactionIndex || 0) ||
-    Number(a.logIndex || 0) - Number(b.logIndex || 0)
+    compareSegmentOrderPart(a.blockNumber, b.blockNumber, 'segment blockNumber') ||
+    compareSegmentOrderPart(a.transactionIndex, b.transactionIndex, 'segment transactionIndex') ||
+    compareSegmentOrderPart(a.logIndex, b.logIndex, 'segment logIndex')
   )).at(-1) || null
 }
 
@@ -554,52 +840,55 @@ async function getBeaconGenesisTime(ctx = networkContext(defaultNetwork)) {
   if (genesisTimeCache.has(ctx.name)) return genesisTimeCache.get(ctx.name)
   if (!ctx.beaconUrl) return null
   const genesis = await beacon('/eth/v1/beacon/genesis', ctx)
-  const value = BigInt(genesis.data.genesis_time)
+  const value = beaconGenesisTime(genesis)
   genesisTimeCache.set(ctx.name, value)
   return value
 }
 
 function slotTimestampMs(slot, genesisTime) {
   if (genesisTime == null) return null
-  return Number((genesisTime + BigInt(slot) * secondsPerSlot) * 1000n)
+  const safeSlot = nonNegativeSafeInteger(slot, 'beacon slot')
+  return blockTimestampMs(genesisTime + BigInt(safeSlot) * secondsPerSlot, 'beacon slot timestamp')
 }
 
 async function latestSlot(ctx = networkContext(defaultNetwork)) {
   if (!ctx.beaconUrl) return null
   const head = await beacon('/eth/v1/beacon/headers/head', ctx)
-  return Number(head.data.header.message.slot)
+  return beaconHeadSlot(head)
 }
 
 async function sidecarsForSlot(slot, ctx = networkContext(defaultNetwork)) {
+  const safeSlot = nonNegativeSafeInteger(slot, 'beacon sidecar slot')
   const started = performance.now()
-  const body = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, ctx)
-  const sidecars = body.data || []
+  const body = await beacon(`/eth/v1/beacon/blob_sidecars/${safeSlot}`, ctx)
+  const sidecars = beaconDataArray(body, 'blob sidecars')
   const rows = sidecars.map((sidecar) => {
     const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
-    const versionedHash = commitment ? commitmentToVersionedHash({ commitment }) : null
+    const versionedHash = sidecarVersionedHash(sidecar)
     return {
-      index: Number(sidecar.index),
+      index: sidecarIndex(sidecar.index, 'beacon sidecar index'),
       versionedHash,
       commitment,
       hasBlob: Boolean(sidecar.blob),
     }
   })
-  return { slot: Number(slot), fetchMs: Math.round(performance.now() - started), sidecars: rows }
+  return { slot: safeSlot, fetchMs: Math.round(performance.now() - started), sidecars: rows }
 }
 
 function cachedBlobspaceRows(segments) {
   const rows = new Map()
   for (const segment of segments) {
     const cached = getCachedSidecars(segment.txHash)
-    if (!cached?.slot) continue
-    const slot = Number(cached.slot)
+    if (cached?.slot == null) continue
+    const slot = cached.slot
     const row = rows.get(slot) || { slot, source: 'cached proof', fetchMs: null, sidecars: [] }
-    for (const match of cached.matches || []) {
+    for (const match of cached.matches) {
+      const sequence = nonNegativeSafeInteger(segment.sequence, 'cached blobspace segment sequence')
       row.sidecars.push({
-        index: Number(match.index),
+        index: safeSlot(match.index),
         versionedHash: match.versionedHash,
         streamId: segment.streamId,
-        sequence: Number(segment.sequence),
+        sequence,
         hasBlob: Boolean(match.blob),
       })
     }
@@ -613,7 +902,7 @@ async function stationStreamBlobHashes(ctx = networkContext(defaultNetwork)) {
   const cached = stationSegmentsCache.get(contextCacheKey(ctx))
   const segments = cached?.segments?.length ? cached.segments : await segmentFeed(ctx)
   for (const segment of segments) {
-    for (const hash of segment.blobVersionedHashes || []) {
+    for (const hash of segment.blobVersionedHashes) {
       hashes.set(hash, {
         streamId: segment.streamId,
         sequence: String(segment.sequence),
@@ -645,12 +934,15 @@ async function recentBlobTransactionsByHash(ctx, latestBlock, genesisTime, count
     if (slot < minSlot) break
     const transactions = Array.isArray(block.transactions) ? block.transactions : []
     for (const tx of transactions) {
-      const blobHashes = tx?.blobVersionedHashes || []
+      const blobHashes = normalizeBlobVersionedHashes(tx?.blobVersionedHashes)
+      if (blobHashes == null) throw new Error('Invalid recent transaction blobVersionedHashes')
       if (!blobHashes.length) continue
+      if (!isTxHash(tx.hash)) throw new Error('Invalid recent transaction hash')
+      const txHash = String(tx.hash).toLowerCase()
       const to = tx.to ? String(tx.to) : ''
       for (const versionedHash of blobHashes) {
         hashes.set(versionedHash, {
-          txHash: tx.hash,
+          txHash,
           to,
           blockNumber: block.number?.toString(),
           slot: slot.toString(),
@@ -711,29 +1003,28 @@ async function computeSlotMetrics(count = 8, ctx = networkContext(defaultNetwork
     const rows = await Promise.all(slots.map(async (slot) => {
       let sidecars = []
       let error = null
+      let blobs = []
       try {
         const result = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, ctx)
-        sidecars = result.data || []
+        sidecars = beaconDataArray(result, 'blob sidecars')
+        blobs = sidecars.map((sidecar) => {
+          const versionedHash = sidecarVersionedHash(sidecar)
+          const stream = versionedHash ? streamBlobHashes.get(versionedHash) : null
+          const tx = versionedHash ? blobTransactions.get(versionedHash) : null
+          return {
+            index: sidecarIndex(sidecar.index, 'beacon sidecar index'),
+            versionedHash,
+            txHash: tx?.txHash || stream?.txHash || null,
+            to: tx?.to || null,
+            blockNumber: tx?.blockNumber || null,
+            isStationTx: Boolean(tx?.isStationTx),
+            isStreamBlob: Boolean(stream || tx?.isStationTx),
+            stream: stream || (tx?.isStationTx ? { txHash: tx.txHash, stationOnly: true } : null),
+          }
+        })
       } catch (err) {
-        error = err.message
+        error = publicErrorMessage(err, ctx)
       }
-
-      const blobs = sidecars.map((sidecar) => {
-        const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
-        const versionedHash = commitment ? commitmentToVersionedHash({ commitment }) : null
-        const stream = versionedHash ? streamBlobHashes.get(versionedHash) : null
-        const tx = versionedHash ? blobTransactions.get(versionedHash) : null
-        return {
-          index: Number(sidecar.index),
-          versionedHash,
-          txHash: tx?.txHash || stream?.txHash || null,
-          to: tx?.to || null,
-          blockNumber: tx?.blockNumber || null,
-          isStationTx: Boolean(tx?.isStationTx),
-          isStreamBlob: Boolean(stream || tx?.isStationTx),
-          stream: stream || (tx?.isStationTx ? { txHash: tx.txHash, stationOnly: true } : null),
-        }
-      })
 
       return {
         slot: slot.toString(),
@@ -772,7 +1063,7 @@ async function computeSlotMetrics(count = 8, ctx = networkContext(defaultNetwork
       ...blobspaceConfig(ctx),
       mode: 'cached',
       rows: cachedBlobspaceRows(await segmentFeed(ctx)),
-      warning: error.message,
+      warning: publicErrorMessage(error, ctx),
     }
   }
 }
@@ -837,8 +1128,9 @@ async function slotMetrics(count = 8, ctx = networkContext(defaultNetwork)) {
 async function blobspaceRows(segments, count = 8, ctx = networkContext(defaultNetwork)) {
   const streamHashes = new Map()
   for (const segment of segments) {
-    for (const hash of segment.blobVersionedHashes || []) {
-      streamHashes.set(hash, { streamId: segment.streamId, sequence: Number(segment.sequence) })
+    const sequence = nonNegativeSafeInteger(segment.sequence, 'blobspace segment sequence')
+    for (const hash of segment.blobVersionedHashes) {
+      streamHashes.set(hash, { streamId: segment.streamId, sequence })
     }
   }
 
@@ -865,7 +1157,7 @@ async function blobspaceRows(segments, count = 8, ctx = networkContext(defaultNe
         }))
         return row
       } catch (error) {
-        return { slot, source: 'beacon', error: error.message, sidecars: [] }
+        return { slot, source: 'beacon', error: publicErrorMessage(error, ctx), sidecars: [] }
       }
     }))
     return { mode: 'live', maxBlobsPerBlock, ...blobspaceConfig(ctx), rows }
@@ -875,12 +1167,13 @@ async function blobspaceRows(segments, count = 8, ctx = networkContext(defaultNe
       maxBlobsPerBlock,
       ...blobspaceConfig(ctx),
       rows: cachedBlobspaceRows(segments),
-      warning: error.message,
+      warning: publicErrorMessage(error, ctx),
     }
   }
 }
 
 async function fetchAndCacheSidecars(segment, ctx = networkContext(segment.chain || defaultNetwork)) {
+  if (!isTxHash(segment.txHash)) throw new Error('Invalid segment transaction hash')
   const cached = getCachedSidecars(segment.txHash)
   if (cached) return cached
   if (!ctx.publicClient || !ctx.beaconUrl) throw new Error(`${ctx.name} ETH_RPC_URL and BEACON_RPC_URL are required to fetch uncached blob sidecars`)
@@ -888,32 +1181,35 @@ async function fetchAndCacheSidecars(segment, ctx = networkContext(segment.chain
   const tx = await ctx.publicClient.getTransaction({ hash: segment.txHash })
   const block = await ctx.publicClient.getBlock({ blockHash: tx.blockHash })
   const genesis = await beacon('/eth/v1/beacon/genesis', ctx)
-  const slot = (block.timestamp - BigInt(genesis.data.genesis_time)) / 12n
+  const slot = (block.timestamp - beaconGenesisTime(genesis)) / 12n
   const sidecars = await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, ctx)
-  const wanted = new Set(tx.blobVersionedHashes || segment.blobVersionedHashes || [])
+  const wanted = new Set(preferredBlobVersionedHashes(tx, segment))
   const matches = []
 
-  for (const sidecar of sidecars.data || []) {
-    const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
-    if (!commitment) continue
-    const versionedHash = commitmentToVersionedHash({ commitment })
+  for (const sidecar of beaconDataArray(sidecars, 'blob sidecars')) {
+    const versionedHash = sidecarVersionedHash(sidecar)
+    if (!versionedHash) continue
     if (wanted.has(versionedHash)) matches.push({ ...sidecar, versionedHash })
   }
 
   const payload = { txHash: segment.txHash, slot: slot.toString(), matches }
+  const sidecarPath = safeSidecarPath(segment.txHash)
+  if (!sidecarPath) throw new Error('Invalid sidecar cache path')
   fs.mkdirSync(sidecarDir, { recursive: true })
-  fs.writeFileSync(path.join(sidecarDir, `${segment.txHash}.json`), `${JSON.stringify(payload, null, 2)}\n`)
+  fs.writeFileSync(sidecarPath, `${JSON.stringify(payload, null, 2)}\n`)
   return payload
 }
 
 function reconstructPayload(segment, sidecars) {
   const byHash = new Map()
-  for (const match of sidecars.matches || []) {
-    if (match.versionedHash && match.blob) byHash.set(match.versionedHash, match.blob)
+  if (!Array.isArray(sidecars?.matches)) throw new Error('Invalid sidecar response: matches must be an array')
+  for (const [index, match] of sidecars.matches.entries()) {
+    if (!validSidecarMatch(match)) throw new Error(`Invalid sidecar match at index ${index}`)
+    byHash.set(String(match.versionedHash).toLowerCase(), match.blob)
   }
 
   const blobs = []
-  for (const hash of segment.blobVersionedHashes || []) {
+  for (const hash of segment.blobVersionedHashes) {
     const blob = byHash.get(hash)
     if (!blob) throw new Error(`Missing sidecar for blob versioned hash ${hash}`)
     blobs.push(blob)
@@ -935,7 +1231,9 @@ function reconstructPayload(segment, sidecars) {
     }
   }
 
-  const payload = Buffer.concat(chunks, decodedLength).subarray(0, Number(segment.payloadBytes))
+  const payloadBytes = optionalNonNegativeSafeInteger(segment.payloadBytes ?? segment.bytes, 'segment payloadBytes')
+  if (payloadBytes == null) throw new Error('segment payloadBytes is required for reconstruction')
+  const payload = Buffer.concat(chunks, decodedLength).subarray(0, payloadBytes)
   const sha256 = crypto.createHash('sha256').update(payload).digest('hex')
   if (sha256 !== segment.payloadSha256) {
     throw new Error(`SHA-256 mismatch: expected ${segment.payloadSha256}, got ${sha256}`)
@@ -944,7 +1242,8 @@ function reconstructPayload(segment, sidecars) {
 }
 
 async function ensureMedia(segment, ctx = networkContext(segment.chain || defaultNetwork)) {
-  const mediaPath = path.join(reconstructedDir, `${safeStreamId(segment.streamId)}-${segment.sequence}.webm`)
+  const mediaPath = safeMediaPath(segment.streamId, segment.sequence)
+  if (!mediaPath) throw new Error('Invalid segment media path')
   if (fs.existsSync(mediaPath)) return mediaPath
   if (mediaInflight.has(mediaPath)) return mediaInflight.get(mediaPath)
   const promise = (async () => {
@@ -968,10 +1267,10 @@ function sendMedia(request, response, mediaPath, contentType = 'video/webm') {
   const range = request.headers.range
   if (!range) {
     response.writeHead(200, {
+      ...defaultHeaders,
       'content-type': contentType,
       'content-length': stat.size,
       'accept-ranges': 'bytes',
-      'cache-control': 'no-store',
     })
     return fs.createReadStream(mediaPath).pipe(response)
   }
@@ -983,11 +1282,11 @@ function sendMedia(request, response, mediaPath, contentType = 'video/webm') {
   if (start >= stat.size || end >= stat.size || start > end) return send(response, 416, 'range not satisfiable')
 
   response.writeHead(206, {
+    ...defaultHeaders,
     'content-type': contentType,
     'content-length': end - start + 1,
     'content-range': `bytes ${start}-${end}/${stat.size}`,
     'accept-ranges': 'bytes',
-    'cache-control': 'no-store',
   })
   return fs.createReadStream(mediaPath, { start, end }).pipe(response)
 }
@@ -1394,6 +1693,13 @@ function overlayHtml() {
       return path + (path.includes('?') ? '&' : '?') + params.toString()
     }
 
+    function liveResponseSegments(data) {
+      if (!data || typeof data !== 'object' || !Array.isArray(data.segments)) {
+        throw new Error('Live response segments must be an array')
+      }
+      return data.segments
+    }
+
     function updateNetworkSignal(data) {
       const label = data?.networkLabel || data?.transport?.networkLabel || data?.blobspace?.networkLabel || selectedNetworkLabel
       selectedNetworkLabel = label
@@ -1406,6 +1712,10 @@ function overlayHtml() {
       const text = String(value)
       if (text.length <= head + tail + 3) return text
       return text.slice(0, head) + '...' + text.slice(-tail)
+    }
+
+    function publicErrorMessage(error) {
+      return String(error?.message || error || 'Request failed').replace(/https?:\\/\\/[^\\s"'<>)}\\]]+/g, '[redacted endpoint]')
     }
 
     function formatBytes(value) {
@@ -1490,11 +1800,12 @@ function overlayHtml() {
         if (!response.ok) throw new Error(await response.text())
         const data = await response.json()
         updateNetworkSignal(data)
-        const segment = latestSegment(data.segments)
+        const responseSegments = liveResponseSegments(data)
+        const segment = latestSegment(responseSegments)
         const proof = segment && segment.proof ? segment.proof : {}
         const blockHash = segment && segment.blockHash ? segment.blockHash : proof.block && proof.block.hash
         const latestSlot = data.blobspace && data.blobspace.latestSlot
-        const previous = previousSegment(segment, data.segments)
+        const previous = previousSegment(segment, responseSegments)
         updateStreamClock(segment)
         overlay.classList.toggle('offline', !segment)
         document.getElementById('slot').textContent = 'SLOT ' + (segment && segment.slot || latestSlot || '--')
@@ -1505,10 +1816,10 @@ function overlayHtml() {
         const content = segment && (segment.payloadSha256Hex || segment.payloadSha256)
         document.getElementById('contentHash').textContent = shorten(content, 10, 6)
         document.getElementById('previousHash').textContent = shorten(segment && segment.previousSegmentHash, 10, 6)
-        updateTicker(segment, data.blobspace, data.segments)
+        updateTicker(segment, data.blobspace, responseSegments)
       } catch (error) {
         overlay.classList.add('offline')
-        document.getElementById('contentHash').textContent = error.message
+        document.getElementById('contentHash').textContent = publicErrorMessage(error)
       }
     }
 
@@ -1997,6 +2308,10 @@ function overlayPreviewHtml() {
       return text.slice(0, head) + '...' + text.slice(-tail)
     }
 
+    function publicErrorMessage(error) {
+      return String(error?.message || error || 'Request failed').replace(/https?:\\/\\/[^\\s"'<>)}\\]]+/g, '[redacted endpoint]')
+    }
+
     function formatBytes(value) {
       const n = Number(value || 0)
       return n ? new Intl.NumberFormat('en-US').format(n) + ' B' : '--'
@@ -2061,6 +2376,13 @@ function overlayPreviewHtml() {
       return path + (path.includes('?') ? '&' : '?') + params.toString()
     }
 
+    function liveResponseSegments(data) {
+      if (!data || typeof data !== 'object' || !Array.isArray(data.segments)) {
+        throw new Error('Live response segments must be an array')
+      }
+      return data.segments
+    }
+
     function updateNetworkSignal(data) {
       const label = data?.networkLabel || data?.transport?.networkLabel || data?.blobspace?.networkLabel || selectedNetworkLabel
       selectedNetworkLabel = label
@@ -2123,7 +2445,7 @@ function overlayPreviewHtml() {
       const data = await response.json()
       updateNetworkSignal(data)
       latestBlobspace = data.blobspace || null
-      for (const segment of data.segments || []) {
+      for (const segment of liveResponseSegments(data)) {
         segments.set(Number(segment.sequence), segment)
       }
       const latest = latestSegment()
@@ -2240,7 +2562,7 @@ function overlayPreviewHtml() {
     video.addEventListener('waiting', () => {
       status.textContent = 'buffering seq ' + (currentSequence ?? '--')
     })
-    video.addEventListener('ended', () => playNext().catch((error) => { status.textContent = error.message }))
+    video.addEventListener('ended', () => playNext().catch((error) => { status.textContent = publicErrorMessage(error) }))
     window.addEventListener('resize', scalePreviewOverlay)
     scalePreviewOverlay()
     tickClock()
@@ -2249,8 +2571,8 @@ function overlayPreviewHtml() {
       const segment = activeSegment || latestSegment()
       if (segment) setStatusStrip(segment, isPlaying ? 'LIVE' : 'WAITING')
     }, 1000)
-    setInterval(() => pollLive().catch((error) => { status.textContent = error.message }), pollMs)
-    pollLive().catch((error) => { status.textContent = error.message })
+    setInterval(() => pollLive().catch((error) => { status.textContent = publicErrorMessage(error) }), pollMs)
+    pollLive().catch((error) => { status.textContent = publicErrorMessage(error) })
   </script>
 </body>
 </html>`
@@ -2896,7 +3218,8 @@ function indexHtml() {
       margin-bottom: 10px;
       font-size: 13px;
     }
-    .slot-top strong { color: #f8d5e3; font-family: var(--mono); font-size: 13px; }
+    .slot-top strong, .slot-link { color: #f8d5e3; font-family: var(--mono); font-size: 13px; font-weight: 900; text-decoration: none; }
+    .slot-link:hover, .slot-link:focus-visible { color: #9ff5d7; text-decoration: underline; outline: none; }
     .slot-top span { color: var(--muted); }
     .slot-time {
       display: flex;
@@ -3451,6 +3774,10 @@ function indexHtml() {
     const displaySeq = (sequence) => Number(sequence) + 1
     const blobLabel = (count) => count + ' ' + (Number(count) === 1 ? 'blob' : 'blobs')
     const txUrl = (hash) => hash ? explorerBase + '/tx/' + encodeURIComponent(hash) : ''
+    const slotUrl = (slot) => {
+      const base = selectedNetwork === 'mainnet' ? 'https://beaconscan.com/slot/' : 'https://sepolia.beaconcha.in/slot/'
+      return base + encodeURIComponent(slot)
+    }
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -3458,6 +3785,7 @@ function indexHtml() {
       '"': '&quot;',
       "'": '&#39;',
     }[char]))
+    const publicErrorMessage = (error) => String(error?.message || error || 'Request failed').replace(/https?:\\/\\/[^\\s"'<>)}\\]]+/g, '[redacted endpoint]')
 
     function updateUtcClock() {
       utcClockEl.textContent = new Date().toISOString().slice(11, 19) + ' UTC'
@@ -3487,8 +3815,6 @@ function indexHtml() {
       if (streamId) params.set('streamId', streamId)
       params.set('network', selectedNetwork)
       if (endpointPreset) params.set('endpointPreset', endpointPreset)
-      if (customExecutionRpc) params.set('ethRpcUrl', customExecutionRpc)
-      if (customBeaconRpc) params.set('beaconRpcUrl', customBeaconRpc)
       history.replaceState(null, '', '?' + params.toString())
     }
 
@@ -3686,6 +4012,13 @@ function indexHtml() {
       const response = await fetch(path, { cache: 'no-store' })
       if (!response.ok) throw new Error(await response.text())
       return response.json()
+    }
+
+    function liveResponseSegments(data) {
+      if (!data || typeof data !== 'object' || !Array.isArray(data.segments)) {
+        throw new Error('Live response segments must be an array')
+      }
+      return data.segments
     }
 
     async function prepareSegment(segment) {
@@ -4013,6 +4346,9 @@ function indexHtml() {
         const watchBlob = streamBlobs.find((blob) => blob?.stream?.txHash || blob?.txHash)
         const watchTx = watchBlob?.stream?.txHash || watchBlob?.txHash || ''
         const byIndex = new Map(blobs.map((blob) => [Number(blob.index), blob]))
+        const rowSlotUrl = blobspace.beaconSlotBase
+          ? blobspace.beaconSlotBase + encodeURIComponent(row.slot)
+          : slotUrl(row.slot)
         const cells = Array.from({ length: max }, (_, index) => {
           const blob = byIndex.get(index)
           const isStreamBlob = blobMatchesStream(blob)
@@ -4022,6 +4358,9 @@ function indexHtml() {
           const blobTx = blob?.stream?.txHash || blob?.txHash
           if (blobTx) {
             return '<a class="blob-cell ' + kind + '"' + title + ' href="' + escapeHtml(txUrl(blobTx)) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>'
+          }
+          if (blob) {
+            return '<a class="blob-cell ' + kind + '"' + title + ' href="' + escapeHtml(rowSlotUrl) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>'
           }
           return '<span class="blob-cell ' + kind + '"' + title + '>' + text + '</span>'
         }).join('')
@@ -4034,13 +4373,24 @@ function indexHtml() {
           : watchTx
             ? '<button class="slot-jump" type="button" data-tx-hash="' + escapeHtml(watchTx) + '" title="Find and jump to the Station segment for this blob transaction">JUMP</button>'
             : ''
-        return '<section class="slot">' +
+        return '<section class="slot" data-slot-url="' + escapeHtml(rowSlotUrl) + '">' +
           '<div class="slot-top"><strong>Slot ' + row.slot + '</strong><span>' + used + ' / ' + max + ' blobs' + (streamUsed ? ' · ' + streamUsed + ' Station/Milady' : '') + '</span></div>' +
           slotTimeMarkup(row.timestampMs, action) +
           '<div class="blob-grid">' + cells + '</div>' +
           (row.error ? '<div class="slot-error">' + escapeHtml(row.error) + '</div>' : '') +
         '</section>'
       }).join('') || '<div class="muted">' + escapeHtml(blobspace.warning || 'No blob sidecar rows available yet.') + '</div>'
+      for (const slot of slotsEl.querySelectorAll('.slot[data-slot-url]')) {
+        const label = slot.querySelector('.slot-top strong')
+        if (!label) continue
+        const link = document.createElement('a')
+        link.className = 'slot-link'
+        link.href = slot.dataset.slotUrl
+        link.target = '_blank'
+        link.rel = 'noopener noreferrer'
+        link.textContent = label.textContent
+        label.replaceWith(link)
+      }
       blobSignal = { count: streamBlobTotal, latestSlot: latestStreamSlot }
     }
 
@@ -4149,25 +4499,25 @@ function indexHtml() {
           void poll(true)
           return
         }
-        segments = data.segments || []
+        segments = liveResponseSegments(data)
         if (segments.length) lastEventAt = Date.parse(segments.at(-1).createdAt || Date.now())
         renderRail(data.blobspace || { rows: [], maxBlobsPerBlock: 21 })
         lastBlobspaceUpdateAt = Date.now()
         renderSegments()
         await fillBuffer().catch((error) => {
-          nowDetail.textContent = 'Blobspace feed is live; media prefetch is retrying: ' + error.message
+          nowDetail.textContent = 'Blobspace feed is live; media prefetch is retrying: ' + publicErrorMessage(error)
         })
         renderSegments()
         chooseState()
       } catch (error) {
         if (lastBlobspaceUpdateAt && Date.now() - lastBlobspaceUpdateAt < 15_000) {
           statusEl.textContent = 'retrying'
-          nowDetail.textContent = 'Blobspace feed is still visible; retrying API fetch: ' + error.message
+          nowDetail.textContent = 'Blobspace feed is still visible; retrying API fetch: ' + publicErrorMessage(error)
           overlayTitle.textContent = 'Retrying tuner fetch'
-          overlayCopy.textContent = error.message
+          overlayCopy.textContent = publicErrorMessage(error)
         } else {
           blackoutVideo()
-          setState('interrupted', 'Tuner interrupted', error.message)
+          setState('interrupted', 'Tuner interrupted', publicErrorMessage(error))
         }
       } finally {
         polling = false
@@ -4315,14 +4665,15 @@ function indexHtml() {
 }
 
 const server = http.createServer(async (request, response) => {
-  const parsed = new URL(request.url, 'http://127.0.0.1')
-  const ctx = networkContext(parsed.searchParams.get('network') || defaultNetwork, {
-    endpointPreset: parsed.searchParams.get('endpointPreset') || '',
-    executionRpcUrl: parsed.searchParams.get('ethRpcUrl') || '',
-    beaconRpcUrl: parsed.searchParams.get('beaconRpcUrl') || '',
-  })
-
+  let ctx = null
   try {
+    const parsed = new URL(request.url, 'http://127.0.0.1')
+    ctx = networkContext(parsed.searchParams.get('network') || defaultNetwork, {
+      endpointPreset: parsed.searchParams.get('endpointPreset') || '',
+      executionRpcUrl: parsed.searchParams.get('ethRpcUrl') || '',
+      beaconRpcUrl: parsed.searchParams.get('beaconRpcUrl') || '',
+    })
+
     if (parsed.pathname === '/') {
       return send(response, 200, indexHtml(), { 'content-type': 'text/html; charset=utf-8' })
     }
@@ -4355,12 +4706,15 @@ const server = http.createServer(async (request, response) => {
 
     const assetMatch = parsed.pathname.match(/^\/rfe-assets\/(.+)$/)
     if (assetMatch) {
-      return sendOverlayAsset(response, decodeURIComponent(assetMatch[1]))
+      const assetName = decodePathParam(response, assetMatch[1])
+      if (assetName == null) return
+      return sendOverlayAsset(response, assetName)
     }
 
     const streamMatch = parsed.pathname.match(/^\/api\/streams\/([^/]+)\/live$/)
     if (streamMatch) {
-      const id = decodeURIComponent(streamMatch[1])
+      const id = decodePathParam(response, streamMatch[1])
+      if (id == null) return
       const allSegments = await segmentFeed(ctx)
       const segments = allSegments.filter((segment) => segment.streamId === id).map(summarizeSegment)
       const latestStationSegment = latestPublishedSegment(allSegments)
@@ -4390,7 +4744,8 @@ const server = http.createServer(async (request, response) => {
 
     const healthMatch = parsed.pathname.match(/^\/api\/streams\/([^/]+)\/health$/)
     if (healthMatch) {
-      const id = decodeURIComponent(healthMatch[1])
+      const id = decodePathParam(response, healthMatch[1])
+      if (id == null) return
       const allSegments = await segmentFeed(ctx)
       const blobspace = await slotMetrics(slotWindow, ctx)
       return sendJson(response, summarizeHealth(id, allSegments, blobspace, ctx))
@@ -4398,7 +4753,8 @@ const server = http.createServer(async (request, response) => {
 
     const payloadMatch = parsed.pathname.match(/^\/api\/segments\/([^/]+)\/(\d+)\/payload$/)
     if (payloadMatch) {
-      const id = decodeURIComponent(payloadMatch[1])
+      const id = decodePathParam(response, payloadMatch[1])
+      if (id == null) return
       const sequence = Number(payloadMatch[2])
       const segment = (await segmentFeed(ctx)).find(
         (candidate) => candidate.streamId === id && Number(candidate.sequence) === sequence,
@@ -4416,9 +4772,11 @@ const server = http.createServer(async (request, response) => {
 
     const mediaMatch = parsed.pathname.match(/^\/media\/([^/]+)\/(\d+)\.webm$/)
     if (mediaMatch) {
-      const id = decodeURIComponent(mediaMatch[1])
+      const id = decodePathParam(response, mediaMatch[1])
+      if (id == null) return
       const sequence = Number(mediaMatch[2])
-      const mediaPath = path.join(reconstructedDir, `${safeStreamId(id)}-${sequence}.webm`)
+      const mediaPath = safeMediaPath(id, sequence)
+      if (!mediaPath) return send(response, 404, 'media not found')
       if (!fs.existsSync(mediaPath)) return send(response, 404, 'media not found')
       return sendMedia(request, response, mediaPath)
     }
@@ -4426,7 +4784,7 @@ const server = http.createServer(async (request, response) => {
     send(response, 404, 'not found')
   } catch (error) {
     console.error(error)
-    sendJson(response, { error: error.message }, 500)
+    sendJson(response, { error: publicErrorMessage(error, ctx) }, 500)
   }
 })
 

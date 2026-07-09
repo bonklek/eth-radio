@@ -11,8 +11,9 @@ node_modules/
 __pycache__/
 *.py[cod]
 
-# Local generated media, testnet state, research worktrees, and experiments.
+# Local generated media, testnet state, private notes, research worktrees, and experiments.
 # These are preserved on disk but intentionally kept out of the published repo.
+.private/
 work/
 video/*.pdf
 

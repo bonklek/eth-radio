@@ -12,13 +12,13 @@ import {
   hexToBytes,
   http,
   keccak256,
-  parseGwei,
   stringToBytes,
   toBlobs,
   zeroHash,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { assertRpcChain, chainFromEnv, chainNames, requireMainnetConfirmation, requireSupportedChain } from './chains.mjs'
+import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
 import {
   formatEth,
   hasCostBudget,
@@ -27,6 +27,8 @@ import {
   readSegmentFilesAsCostSegments,
   runCostPreflightOrExit,
 } from './lib/cost-preflight.mjs'
+import { makePublisherState, publisherStateInteger, readPublisherStateWithRecovery } from './lib/publisher-state.mjs'
+import { gasLimitEnv, optionalGweiEnv } from './lib/tx-env.mjs'
 function usage(exitCode = 1) {
   const output = exitCode === 0 ? console.log : console.error
   output(`Usage:
@@ -35,7 +37,7 @@ function usage(exitCode = 1) {
        [--max-blobs 6] [--max-bytes 761856] [--poll-ms 1000]
        [--max-pending 2] [--max-pending-min 1] [--max-pending-max 4] [--adaptive-pending]
        [--send-retries 8] [--retry-ms 5000]
-       [--require-manifest] [--state <state.json>]
+       [--require-manifest] [--state <state.json>] [--dry-run] [--recover-state]
        [--max-cost-eth 0.1] [--stream-duration-ms 3600000] [--skip-wallet-balance-check]
 
 Environment:
@@ -43,16 +45,6 @@ Environment:
   optional ETH_SEND_RPC_URLS comma-separated fallback list
 `)
   process.exit(exitCode)
-}
-
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
-}
-
-function hasFlag(name) {
-  return process.argv.includes(`--${name}`)
 }
 
 if (hasFlag('help')) usage(0)
@@ -65,17 +57,66 @@ function sanitize(value) {
   return value.replace(/[^a-zA-Z0-9_.-]/g, '_')
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'))
 }
 
-function segmentFiles(dir, streamId) {
-  const prefix = `${streamId}-`
+function segmentEntries(dir, filePrefix) {
+  const pattern = new RegExp(`^${escapeRegExp(filePrefix)}-(\\d+)\\.webm$`)
   return fs
     .readdirSync(dir)
-    .filter((name) => name.startsWith(prefix) && name.endsWith('.webm'))
-    .sort()
-    .map((name) => path.join(dir, name))
+    .map((name) => {
+      const match = name.match(pattern)
+      return match ? { sequence: Number(match[1]), file: path.join(dir, name) } : null
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.sequence - b.sequence)
+}
+
+function manifestSegmentFile({ dir, filePrefix, sequence, segment }) {
+  const fileValue = String(segment.file || '')
+  if (!fileValue) throw new Error(`Manifest segment ${sequence} is missing file`)
+
+  const file = path.isAbsolute(fileValue) ? path.resolve(fileValue) : path.resolve(dir, fileValue)
+  const root = path.resolve(dir)
+  const expectedName = `${filePrefix}-${String(sequence).padStart(6, '0')}.webm`
+  if (path.dirname(file) !== root || path.basename(file) !== expectedName) {
+    throw new Error(`Manifest segment ${sequence} points outside the watched segment file: ${fileValue}`)
+  }
+  return file
+}
+
+function manifestSegments(manifestPath, manifest) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error(`Manifest ${manifestPath} must be a JSON object`)
+  }
+  if (!Array.isArray(manifest.segments)) {
+    throw new Error(`Manifest ${manifestPath} segments must be an array`)
+  }
+  return manifest.segments
+}
+
+function manifestNonNegativeInteger(value, label) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const number = Number(value)
+    if (Number.isSafeInteger(number)) return number
+  }
+  throw new Error(`${label} must be a non-negative integer`)
+}
+
+function manifestSegmentSequence(entry, index, manifestPath) {
+  return manifestNonNegativeInteger(entry?.sequence, `Manifest ${manifestPath} segment ${index} sequence`)
+}
+
+function manifestSegmentBytes(segment, sequence) {
+  const bytes = manifestNonNegativeInteger(segment.bytes, `Manifest segment ${sequence} bytes`)
+  if (bytes <= 0) throw new Error(`Manifest segment ${sequence} bytes must be greater than zero`)
+  return bytes
 }
 
 async function waitForStableFile(file, pollMs) {
@@ -90,27 +131,47 @@ async function waitForStableFile(file, pollMs) {
   }
 }
 
-async function waitForManifestSegment(dir, streamId, sequence, pollMs, required) {
-  const manifestPath = path.join(dir, `${streamId}.segments.json`)
+async function waitForManifestSegment(dir, filePrefix, sequence, pollMs, required) {
+  const manifestPath = path.join(dir, `${filePrefix}.segments.json`)
+  let warned = false
   while (required || fs.existsSync(manifestPath)) {
+    if (!fs.existsSync(manifestPath)) {
+      await sleep(Math.min(1000, Math.max(250, pollMs)))
+      continue
+    }
+
     try {
-      if (fs.existsSync(manifestPath)) {
-        const manifest = readJson(manifestPath)
-        const segment = (manifest.segments || []).find((entry) => Number(entry.sequence) === sequence)
-        if (segment && segment.bytes > 0 && fs.existsSync(segment.file)) {
-          const stat = fs.statSync(segment.file)
-          if (stat.size === segment.bytes) return segment
+      const manifest = readJson(manifestPath)
+      const segment = manifestSegments(manifestPath, manifest)
+        .find((entry, index) => manifestSegmentSequence(entry, index, manifestPath) === sequence)
+      if (segment) {
+        const bytes = manifestSegmentBytes(segment, sequence)
+        const file = manifestSegmentFile({ dir, filePrefix, sequence, segment })
+        if (bytes > 0 && fs.existsSync(file)) {
+          const stat = fs.statSync(file)
+          if (stat.size === bytes) return { ...segment, file, bytes }
         }
       }
-    } catch {
-      // Generator may be rewriting the manifest while we poll.
+    } catch (error) {
+      if (!warned) {
+        const mode = required
+          ? (error instanceof SyntaxError ? 'waiting for a valid manifest' : 'failing because --require-manifest is set')
+          : 'falling back to segment file'
+        console.warn(`Ignoring invalid segment manifest ${manifestPath}: ${error.message}; ${mode}`)
+        warned = true
+      }
+      if (!required) return null
+      if (!(error instanceof SyntaxError)) throw error
+      await sleep(Math.min(1000, Math.max(250, pollMs)))
+      continue
     }
     await sleep(Math.min(1000, Math.max(250, pollMs)))
   }
   return null
 }
 
-function saveState(statePath, state) {
+function saveState(statePath, state, { dryRun = false } = {}) {
+  if (dryRun) return
   fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
 }
 
@@ -136,13 +197,38 @@ function timingMs(start, end) {
   return Date.parse(end) - Date.parse(start)
 }
 
+function normalizeBlobVersionedHashes(value, label, { optional = false } = {}) {
+  if (value === undefined || value === null) {
+    if (optional) return null
+    throw new Error(`${label} must be an array`)
+  }
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`)
+  return value.map((hash) => {
+    const normalized = String(hash || '').toLowerCase()
+    if (!/^0x[0-9a-f]{64}$/.test(normalized)) throw new Error(`${label} contains invalid bytes32 hash: ${hash}`)
+    return normalized
+  })
+}
+
+function stationEventSequenceMatches(eventSequence, expectedSequence) {
+  return eventSequence === BigInt(expectedSequence)
+}
+
+function manifestBlobVersionedHashes(transaction, stationEvent) {
+  const eventHashes = normalizeBlobVersionedHashes(stationEvent.args.blobVersionedHashes, 'Station event blobVersionedHashes')
+  const transactionHashes = normalizeBlobVersionedHashes(transaction?.blobVersionedHashes, 'transaction blobVersionedHashes', {
+    optional: true,
+  })
+  return transactionHashes ?? eventHashes
+}
+
 function pendingAgeMs(item, now = Date.now()) {
   const submittedAt = Date.parse(item.submittedAt || item.startedAt || '')
   return Number.isFinite(submittedAt) ? now - submittedAt : 0
 }
 
 function adaptivePendingLimit({ state, baseMaxPending, minPending, maxPending, segmentMs }) {
-  const pending = state.submitted || []
+  const pending = state.submitted
   if (!pending.length) return baseMaxPending
   const oldestMs = Math.max(...pending.map((item) => pendingAgeMs(item)))
   if (oldestMs > segmentMs * 4) return minPending
@@ -220,29 +306,38 @@ function buildStationData({ streamId, sequence, durationMs, payloadBytes, payloa
 }
 
 async function main() {
-  const dirArg = arg('dir')
-  const streamId = arg('stream-id')
+  const dirArg = readArg('dir')
+  const streamId = readArg('stream-id')
   if (!dirArg || !streamId) usage()
-  if (!process.env.ETH_RPC_URL || !process.env.PRIVATE_KEY || !process.env.STATION_ADDRESS) usage()
+  const safeStreamId = sanitize(streamId)
+  const dryRun = hasFlag('dry-run')
+  if (!dryRun && (!process.env.ETH_RPC_URL || !process.env.PRIVATE_KEY || !process.env.STATION_ADDRESS)) usage()
 
-  const { chainName, chain } = chainFromEnv()
-  requireSupportedChain(chain)
-  requireMainnetConfirmation(chainName, 'publish live blob transactions')
+  let chainName = process.env.CHAIN || 'sepolia'
+  let chain = null
+  if (!dryRun) {
+    const chainConfig = chainFromEnv()
+    chainName = chainConfig.chainName
+    chain = chainConfig.chain
+    requireSupportedChain(chain)
+    requireMainnetConfirmation(chainName, 'publish live blob transactions')
+  }
 
   const dir = path.resolve(dirArg)
-  const segmentMs = Number(arg('segment-ms', '24000'))
-  const codec = arg('codec', 'av1-opus/webm')
-  const startSeq = Number(arg('start-seq', '0'))
-  const maxBlobs = Number(arg('max-blobs', '6'))
-  const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
-  const baseMaxPending = Number(arg('max-pending', '2'))
-  const minPending = Number(arg('max-pending-min', '1'))
-  const hardMaxPending = Number(arg('max-pending-max', String(Math.max(baseMaxPending, 4))))
-  const pollMs = Number(arg('poll-ms', '1000'))
-  const sendRetries = Number(arg('send-retries', '8'))
-  const retryMs = Number(arg('retry-ms', '5000'))
+  const segmentMs = numberArg('segment-ms', '24000', { min: 1 })
+  const codec = readArg('codec', 'av1-opus/webm')
+  const startSeq = numberArg('start-seq', '0', { integer: true, min: 0 })
+  const maxBlobs = numberArg('max-blobs', '6', { integer: true, min: 1 })
+  const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
+  const baseMaxPending = numberArg('max-pending', '2', { integer: true, min: 1 })
+  const minPending = numberArg('max-pending-min', '1', { integer: true, min: 1 })
+  const hardMaxPending = numberArg('max-pending-max', String(Math.max(baseMaxPending, 4)), { integer: true, min: 1 })
+  const pollMs = numberArg('poll-ms', '1000', { integer: true, min: 1 })
+  const sendRetries = numberArg('send-retries', '8', { integer: true, min: 1 })
+  const retryMs = numberArg('retry-ms', '5000', { integer: true, min: 0 })
   const requireManifest = hasFlag('require-manifest')
-  const statePath = path.resolve(arg('state', `work/blob-radio-testnet/live-state/${sanitize(streamId)}.pipelined.json`))
+  const recoverState = hasFlag('recover-state')
+  const statePath = path.resolve(readArg('state', `work/blob-radio-testnet/live-state/${safeStreamId}.pipelined.json`))
   const once = hasFlag('once')
   const exitWhenCaughtUp = hasFlag('exit-when-caught-up')
   const adaptivePending = hasFlag('adaptive-pending')
@@ -255,53 +350,50 @@ async function main() {
   if (!Number.isInteger(hardMaxPending) || hardMaxPending < baseMaxPending) {
     throw new Error(`Invalid --max-pending-max ${hardMaxPending}; must be >= --max-pending`)
   }
-  fs.mkdirSync(path.dirname(statePath), { recursive: true })
+  if (!dryRun) fs.mkdirSync(path.dirname(statePath), { recursive: true })
 
-  let state = {
+  let state = makePublisherState({
     streamId,
-    nextSequence: startSeq,
+    startSeq,
     previousSegmentHash: zeroHash,
-    submitted: [],
-    published: [],
-    metrics: {
-      submittedCount: 0,
-      confirmedCount: 0,
-      latestPendingLimit: baseMaxPending,
-      latestTimings: null,
-      actualSpendWei: '0',
-      actualExecutionSpendWei: '0',
-      actualBlobSpendWei: '0',
-      runtimeBudgetWei: runtimeBudgetWei?.toString() || null,
-      runtimeBudgetExhausted: false,
-    },
-  }
-  if (fs.existsSync(statePath) && !hasFlag('reset')) {
-    state = readJson(statePath)
-    state.submitted ||= []
-    state.published ||= []
-    state.metrics ||= {}
-    state.metrics.actualSpendWei ||= '0'
-    state.metrics.actualExecutionSpendWei ||= '0'
-    state.metrics.actualBlobSpendWei ||= '0'
+    submitted: true,
+  })
+  state.metrics.latestPendingLimit = baseMaxPending
+  state.metrics.runtimeBudgetWei = runtimeBudgetWei?.toString() || null
+  if (!dryRun && fs.existsSync(statePath) && !hasFlag('reset')) {
+    const recoveredState = readPublisherStateWithRecovery(statePath, state, { submitted: true, recover: recoverState })
+    state = recoveredState.state
+    if (recoveredState.recovered) {
+      console.warn(`Recovered from invalid publisher state: moved ${statePath} to ${recoveredState.quarantinePath}`)
+      console.warn(`Recovery status written to ${recoveredState.statusPath}`)
+    }
   }
   if (runtimeBudgetWei) state.metrics.runtimeBudgetWei = runtimeBudgetWei.toString()
 
-  const account = privateKeyToAccount(process.env.PRIVATE_KEY)
-  const clients = makeClients({ urls: rpcUrls(), account, chain })
-  const publicClient = clients[0].publicClient
-  await assertRpcChain(publicClient, chain)
-  const wasmKzg = await loadKZG()
-  const kzg = {
-    blobToKzgCommitment(blob) {
-      return hexToBytes(wasmKzg.blobToKzgCommitment(bytesToHex(blob)))
-    },
-    computeBlobKzgProof(blob, commitment) {
-      return hexToBytes(wasmKzg.computeBlobKZGProof(bytesToHex(blob), bytesToHex(commitment)))
-    },
+  let account = null
+  let clients = []
+  let kzg = null
+  let nextNonce = 0
+  if (!dryRun) {
+    account = privateKeyToAccount(process.env.PRIVATE_KEY)
+    clients = makeClients({ urls: rpcUrls(), account, chain })
+    const publicClient = clients[0].publicClient
+    await assertRpcChain(publicClient, chain)
+    const wasmKzg = await loadKZG()
+    kzg = {
+      blobToKzgCommitment(blob) {
+        return hexToBytes(wasmKzg.blobToKzgCommitment(bytesToHex(blob)))
+      },
+      computeBlobKzgProof(blob, commitment) {
+        return hexToBytes(wasmKzg.computeBlobKZGProof(bytesToHex(blob), bytesToHex(commitment)))
+      },
+    }
+    nextNonce = await publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' })
   }
-
-  let nextNonce = await publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' })
-  const maxSubmittedNonce = state.submitted.reduce((max, item) => Math.max(max, Number(item.nonce ?? -1)), -1)
+  const maxSubmittedNonce = state.submitted.reduce((max, item) => {
+    if (item.nonce === undefined || item.nonce === null || item.nonce === '') return max
+    return Math.max(max, publisherStateInteger(item.nonce, 'submitted nonce'))
+  }, -1)
   nextNonce = Math.max(nextNonce, maxSubmittedNonce + 1)
 
   console.log(`pipelined publisher watching ${dir}`)
@@ -310,12 +402,20 @@ async function main() {
   console.log(`max pending: ${baseMaxPending}${adaptivePending ? ` adaptive ${minPending}-${hardMaxPending}` : ''}`)
   console.log(`send retries: ${sendRetries}, retry ms: ${retryMs}`)
   console.log(`next nonce: ${nextNonce}`)
-  console.log(`rpc read: ${clients[0].url}`)
-  console.log(`rpc send order: ${clients.map((client) => client.url).join(', ')}`)
+  if (dryRun) {
+    console.log('dry run: validating local segment discovery and guardrails without publishing')
+  } else {
+    console.log(`rpc read: ${clients[0].url}`)
+    console.log(`rpc send order: ${clients.map((client) => client.url).join(', ')}`)
+  }
 
-  if (hasCostBudget()) {
+  if (!dryRun && hasCostBudget()) {
     await runCostPreflightOrExit({
-      segments: readSegmentFilesAsCostSegments(segmentFiles(dir, streamId).slice(state.nextSequence)),
+      segments: readSegmentFilesAsCostSegments(
+        segmentEntries(dir, safeStreamId)
+          .filter((entry) => entry.sequence >= state.nextSequence)
+          .map((entry) => entry.file),
+      ),
       segmentMs,
     })
   }
@@ -372,7 +472,7 @@ async function main() {
         return (
           log.args.publisher.toLowerCase() === account.address.toLowerCase() &&
           log.args.streamIdHash === streamIdHash &&
-          Number(log.args.sequence) === Number(item.sequence)
+          stationEventSequenceMatches(log.args.sequence, item.sequence)
         )
       })
     if (!stationEvent) {
@@ -409,14 +509,15 @@ async function main() {
         blockHash: receipt.blockHash,
         blockNumber: receipt.blockNumber.toString(),
         transactionIndex: receipt.transactionIndex,
-        blobVersionedHashes: transaction?.blobVersionedHashes || stationEvent.args.blobVersionedHashes || [],
+        blobVersionedHashes: manifestBlobVersionedHashes(transaction, stationEvent),
         createdAt: new Date().toISOString(),
       }
       fs.mkdirSync('work/blob-radio-testnet/manifests', { recursive: true })
       const manifestPath = path.resolve(`work/blob-radio-testnet/manifests/${sanitize(streamId)}-${item.sequence}.json`)
       fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-      if (!state.published.some((published) => Number(published.sequence) === Number(item.sequence))) {
+      const itemSequence = publisherStateInteger(item.sequence, 'submitted sequence')
+      if (!state.published.some((published) => publisherStateInteger(published.sequence, 'published sequence') === itemSequence)) {
         const costs = receiptCostWei(receipt)
         const includedAt = manifest.createdAt
         const timings = {
@@ -445,14 +546,14 @@ async function main() {
           blobCostWei: costs.blobWei.toString(),
           costEth: formatEth(costs.totalWei),
         })
-        state.published.sort((a, b) => Number(a.sequence) - Number(b.sequence))
-        state.metrics.confirmedCount = Number(state.metrics.confirmedCount || 0) + 1
+        state.published.sort((a, b) => publisherStateInteger(a.sequence, 'published sequence') - publisherStateInteger(b.sequence, 'published sequence'))
+        state.metrics.confirmedCount = publisherStateInteger(state.metrics.confirmedCount, 'metrics.confirmedCount') + 1
         state.metrics.latestTimings = timings
-        state.metrics.actualSpendWei = (BigInt(state.metrics.actualSpendWei || '0') + costs.totalWei).toString()
+        state.metrics.actualSpendWei = (BigInt(state.metrics.actualSpendWei) + costs.totalWei).toString()
         state.metrics.actualExecutionSpendWei = (
-          BigInt(state.metrics.actualExecutionSpendWei || '0') + costs.executionWei
+          BigInt(state.metrics.actualExecutionSpendWei) + costs.executionWei
         ).toString()
-        state.metrics.actualBlobSpendWei = (BigInt(state.metrics.actualBlobSpendWei || '0') + costs.blobWei).toString()
+        state.metrics.actualBlobSpendWei = (BigInt(state.metrics.actualBlobSpendWei) + costs.blobWei).toString()
         state.metrics.actualSpendEth = formatEth(BigInt(state.metrics.actualSpendWei))
         state.metrics.actualExecutionSpendEth = formatEth(BigInt(state.metrics.actualExecutionSpendWei))
         state.metrics.actualBlobSpendEth = formatEth(BigInt(state.metrics.actualBlobSpendWei))
@@ -471,17 +572,17 @@ async function main() {
       console.log(`confirmed seq ${item.sequence}: ${item.txHash} block ${receipt.blockNumber}`)
     }
     state.submitted = remaining
-    saveState(statePath, state)
+    saveState(statePath, state, { dryRun })
   }
 
   async function submitNext() {
-    const files = segmentFiles(dir, streamId)
-    const file = files[state.nextSequence]
-    if (!file) return false
+    const entry = segmentEntries(dir, safeStreamId).find((candidate) => candidate.sequence === state.nextSequence)
+    if (!entry) return false
 
     const firstSeenAt = new Date().toISOString()
-    const manifestSegment = await waitForManifestSegment(dir, streamId, state.nextSequence, pollMs, requireManifest)
-    const stat = manifestSegment ? fs.statSync(manifestSegment.file) : await waitForStableFile(file, pollMs)
+    const manifestSegment = await waitForManifestSegment(dir, safeStreamId, state.nextSequence, pollMs, requireManifest)
+    const file = manifestSegment?.file || entry.file
+    const stat = manifestSegment ? fs.statSync(file) : await waitForStableFile(file, pollMs)
     const generatedAt = new Date(stat.mtimeMs).toISOString()
     const payload = fs.readFileSync(file)
     const blobs = toBlobs({ data: bytesToHex(payload) })
@@ -494,6 +595,14 @@ async function main() {
 
     const sequence = state.nextSequence
     const previousSegmentHash = state.previousSegmentHash
+    if (dryRun) {
+      console.log(`would submit seq ${sequence}: ${payload.length} bytes, ${blobs.length} blob(s), previous ${previousSegmentHash}`)
+      state.metrics.submittedCount = publisherStateInteger(state.metrics.submittedCount, 'metrics.submittedCount') + 1
+      state.nextSequence += 1
+      state.previousSegmentHash = `0x${payloadSha256}`
+      return true
+    }
+
     const data = buildStationData({
       streamId,
       sequence,
@@ -512,13 +621,14 @@ async function main() {
       data,
       nonce: nextNonce,
     }
-    if (process.env.MAX_FEE_PER_BLOB_GAS_GWEI) tx.maxFeePerBlobGas = parseGwei(process.env.MAX_FEE_PER_BLOB_GAS_GWEI)
-    if (process.env.MAX_FEE_PER_GAS_GWEI) tx.maxFeePerGas = parseGwei(process.env.MAX_FEE_PER_GAS_GWEI)
-    if (process.env.MAX_PRIORITY_FEE_PER_GAS_GWEI) {
-      tx.maxPriorityFeePerGas = parseGwei(process.env.MAX_PRIORITY_FEE_PER_GAS_GWEI)
-    }
-    if (process.env.GAS_LIMIT) tx.gas = BigInt(process.env.GAS_LIMIT)
-    else tx.gas = 180000n
+    const maxFeePerBlobGas = optionalGweiEnv('MAX_FEE_PER_BLOB_GAS_GWEI')
+    const maxFeePerGas = optionalGweiEnv('MAX_FEE_PER_GAS_GWEI')
+    const maxPriorityFeePerGas = optionalGweiEnv('MAX_PRIORITY_FEE_PER_GAS_GWEI')
+    const gas = gasLimitEnv('GAS_LIMIT', 180000n)
+    if (maxFeePerBlobGas !== undefined) tx.maxFeePerBlobGas = maxFeePerBlobGas
+    if (maxFeePerGas !== undefined) tx.maxFeePerGas = maxFeePerGas
+    if (maxPriorityFeePerGas !== undefined) tx.maxPriorityFeePerGas = maxPriorityFeePerGas
+    if (gas !== undefined) tx.gas = gas
 
     const submittedAt = new Date().toISOString()
     console.log(`submitting seq ${sequence}: ${payload.length} bytes, ${blobs.length} blob(s), nonce ${nextNonce}`)
@@ -537,22 +647,22 @@ async function main() {
       generatedAt,
       submittedAt,
     })
-    state.metrics.submittedCount = Number(state.metrics.submittedCount || 0) + 1
+    state.metrics.submittedCount = publisherStateInteger(state.metrics.submittedCount, 'metrics.submittedCount') + 1
     state.nextSequence += 1
     state.previousSegmentHash = `0x${payloadSha256}`
     nextNonce += 1
-    saveState(statePath, state)
+    saveState(statePath, state, { dryRun })
     return true
   }
 
   while (true) {
-    await confirmSubmitted()
-    if (runtimeBudgetWei && BigInt(state.metrics.actualSpendWei || '0') >= runtimeBudgetWei) {
+    if (!dryRun) await confirmSubmitted()
+    if (runtimeBudgetWei && BigInt(state.metrics.actualSpendWei) >= runtimeBudgetWei) {
       state.metrics.runtimeBudgetExhausted = true
       state.metrics.runtimeBudgetExhaustedAt ||= new Date().toISOString()
-      saveState(statePath, state)
+      saveState(statePath, state, { dryRun })
       console.log(
-        `runtime budget exhausted: spent ${formatEth(BigInt(state.metrics.actualSpendWei || '0'))} ETH / ${formatEth(runtimeBudgetWei)} ETH`,
+        `runtime budget exhausted: spent ${formatEth(BigInt(state.metrics.actualSpendWei))} ETH / ${formatEth(runtimeBudgetWei)} ETH`,
       )
       break
     }
@@ -563,7 +673,7 @@ async function main() {
       : baseMaxPending
     state.metrics.latestPendingLimit = pendingLimit
     state.metrics.pendingCount = state.submitted.length
-    saveState(statePath, state)
+    saveState(statePath, state, { dryRun })
 
     while (state.submitted.length < pendingLimit) {
       const didSubmit = await submitNext()
@@ -576,9 +686,9 @@ async function main() {
     await sleep(pollMs)
   }
 
-  await confirmSubmitted()
-  saveState(statePath, state)
-  console.log(`state: ${statePath}`)
+  if (!dryRun) await confirmSubmitted()
+  saveState(statePath, state, { dryRun })
+  console.log(dryRun ? 'dry run complete: no state written' : `state: ${statePath}`)
 }
 
 main().catch((error) => {

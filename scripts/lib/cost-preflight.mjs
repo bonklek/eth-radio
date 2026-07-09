@@ -2,36 +2,39 @@ import fs from 'node:fs'
 import { bytesToHex, createPublicClient, formatEther, http, parseGwei, toBlobs } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mainnet, sepolia } from 'viem/chains'
+import { readArg } from './cli-args.mjs'
 
 export const chains = { mainnet, sepolia }
 
 const WEI_PER_ETH = 10n ** 18n
 const BLOB_GAS_PER_BLOB = 131_072n
 
-function argvValue(name, fallback = undefined, argv = process.argv) {
-  const idx = argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return argv[idx + 1]
-}
-
 export function hasCostBudget(argv = process.argv) {
   return argv.includes('--max-cost-eth')
 }
 
 export function readCostOptions(argv = process.argv) {
+  const safetyMultiplier = readArg('cost-safety-multiplier', process.env.COST_SAFETY_MULTIPLIER || '1.25', argv)
+  decimalMultiplier(safetyMultiplier)
   return {
-    maxCostEth: argvValue('max-cost-eth', undefined, argv),
-    mode: argvValue('cost-mode', 'block', argv),
-    safetyMultiplier: Number(argvValue('cost-safety-multiplier', process.env.COST_SAFETY_MULTIPLIER || '1.25', argv)),
-    gasPerSegment: BigInt(argvValue('cost-gas-per-segment', process.env.GAS_LIMIT || '180000', argv)),
-    maxFeePerGasGwei: argvValue('cost-max-fee-per-gas-gwei', process.env.MAX_FEE_PER_GAS_GWEI, argv),
-    maxFeePerBlobGasGwei: argvValue(
+    maxCostEth: readArg('max-cost-eth', undefined, argv),
+    mode: readArg('cost-mode', 'block', argv),
+    safetyMultiplier,
+    gasPerSegment: parsePositiveBigInt(
+      readArg('cost-gas-per-segment', process.env.GAS_LIMIT || '180000', argv),
+      '--cost-gas-per-segment',
+    ),
+    maxFeePerGasGwei: parseOptionalGwei(
+      readArg('cost-max-fee-per-gas-gwei', process.env.MAX_FEE_PER_GAS_GWEI, argv),
+      '--cost-max-fee-per-gas-gwei',
+    ),
+    maxFeePerBlobGasGwei: parseOptionalGwei(readArg(
       'cost-max-fee-per-blob-gas-gwei',
       process.env.MAX_FEE_PER_BLOB_GAS_GWEI,
       argv,
-    ),
-    streamDurationMs: argvValue('stream-duration-ms', undefined, argv),
-    expectedSegments: argvValue('expected-segments', undefined, argv),
+    ), '--cost-max-fee-per-blob-gas-gwei'),
+    streamDurationMs: parseOptionalPositiveInteger(readArg('stream-duration-ms', undefined, argv), '--stream-duration-ms'),
+    expectedSegments: parseOptionalPositiveInteger(readArg('expected-segments', undefined, argv), '--expected-segments'),
     skipWalletBalanceCheck: argv.includes('--skip-wallet-balance-check'),
   }
 }
@@ -54,6 +57,33 @@ function decimalMultiplier(value) {
   return { numerator: BigInt(whole) * scale + BigInt(frac), denominator: scale }
 }
 
+function parsePositiveBigInt(value, label) {
+  const text = String(value || '').trim()
+  if (!/^\d+$/.test(text)) throw new Error(`Invalid ${label}: ${text}; expected a positive integer`)
+  const parsed = BigInt(text)
+  if (parsed <= 0n) throw new Error(`Invalid ${label}: ${text}; expected a positive integer`)
+  return parsed
+}
+
+function parseOptionalPositiveInteger(value, label) {
+  if (value === undefined || value === null || value === '') return undefined
+  const text = String(value).trim()
+  if (!/^\d+$/.test(text)) throw new Error(`Invalid ${label}: ${text}; expected a positive integer`)
+  const parsed = Number(text)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${label}: ${text}; expected a positive integer`)
+  }
+  return String(parsed)
+}
+
+function parseOptionalGwei(value, label) {
+  if (value === undefined || value === null || value === '') return undefined
+  const text = String(value).trim()
+  if (!/^\d+(\.\d+)?$/.test(text)) throw new Error(`Invalid ${label}: ${text}; expected a non-negative gwei amount`)
+  parseGwei(text)
+  return text
+}
+
 function multiplyWei(wei, multiplier) {
   const { numerator, denominator } = decimalMultiplier(multiplier)
   return (wei * numerator + denominator - 1n) / denominator
@@ -72,9 +102,34 @@ function percentile(values, p) {
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]
 }
 
+function optionalNonNegativeInteger(value, label) {
+  if (value === undefined || value === null || value === '') return 0
+  const text = String(value).trim()
+  if (!/^\d+$/.test(text)) throw new Error(`Invalid cost segment ${label}: ${value}; expected a non-negative integer`)
+  const parsed = Number(text)
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`Invalid cost segment ${label}: ${value}; expected a non-negative integer`)
+  }
+  return parsed
+}
+
+function segmentBlobCount(segment, index) {
+  return optionalNonNegativeInteger(
+    segment.blobCount !== undefined ? segment.blobCount : segment.estimatedBlobs,
+    `[${index}].blobCount`,
+  )
+}
+
+function segmentBytes(segment, index) {
+  return optionalNonNegativeInteger(
+    segment.payloadBytes !== undefined ? segment.payloadBytes : segment.bytes,
+    `[${index}].payloadBytes`,
+  )
+}
+
 export function segmentStats(segments) {
-  const blobCounts = segments.map((segment) => Number(segment.blobCount || segment.estimatedBlobs || 0))
-  const bytes = segments.map((segment) => Number(segment.payloadBytes || segment.bytes || 0))
+  const blobCounts = segments.map((segment, index) => segmentBlobCount(segment, index))
+  const bytes = segments.map((segment, index) => segmentBytes(segment, index))
   return {
     segments: segments.length,
     totalBlobs: blobCounts.reduce((sum, value) => sum + value, 0),

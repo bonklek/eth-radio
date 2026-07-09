@@ -11,14 +11,16 @@ import {
   encodeFunctionData,
   hexToBytes,
   http,
+  isAddress,
   keccak256,
-  parseGwei,
   stringToBytes,
   zeroHash,
   toBlobs,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { assertRpcChain, chainFromEnv, chainNames, requireMainnetConfirmation, requireSupportedChain } from './chains.mjs'
+import { numberArg, readArg } from './lib/cli-args.mjs'
+import { gasLimitEnv, optionalGweiEnv } from './lib/tx-env.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -28,12 +30,6 @@ Environment:
   ETH_RPC_URL, PRIVATE_KEY, CHAIN=${chainNames}, optional TO_ADDRESS, STATION_ADDRESS, GAS_LIMIT
 `)
   process.exit(1)
-}
-
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
 }
 
 function sleep(ms) {
@@ -55,8 +51,49 @@ async function getTransactionWithRetry(hash, attempts = 8, retryMs = 3000) {
   throw lastError
 }
 
-const input = arg('input')
+function assertBytes32Hex(value, name) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) throw new Error(`Invalid --${name}: expected 32-byte hex`)
+}
+
+function normalizeBlobVersionedHashes(value, label, { optional = false } = {}) {
+  if (value === undefined || value === null) {
+    if (optional) return null
+    throw new Error(`${label} must be an array`)
+  }
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`)
+  return value.map((hash) => {
+    const normalized = String(hash || '').toLowerCase()
+    if (!/^0x[0-9a-f]{64}$/.test(normalized)) throw new Error(`${label} contains invalid bytes32 hash: ${hash}`)
+    return normalized
+  })
+}
+
+function stationEventSequenceMatches(eventSequence, expectedSequence) {
+  return eventSequence === BigInt(expectedSequence)
+}
+
+function manifestBlobVersionedHashes(transaction, stationEvent) {
+  if (!stationEvent) return normalizeBlobVersionedHashes(transaction.blobVersionedHashes, 'transaction blobVersionedHashes')
+  const eventHashes = normalizeBlobVersionedHashes(stationEvent.args.blobVersionedHashes, 'Station event blobVersionedHashes')
+  const transactionHashes = normalizeBlobVersionedHashes(transaction.blobVersionedHashes, 'transaction blobVersionedHashes', {
+    optional: true,
+  })
+  return transactionHashes ?? eventHashes
+}
+
+const input = readArg('input')
 if (!input) usage()
+
+const inputPath = path.resolve(input)
+const streamId = readArg('stream-id', `eth-radio-${new Date().toISOString()}`)
+const sequence = numberArg('seq', '0', { integer: true, min: 0 })
+const durationMs = numberArg('duration-ms', '0', { integer: true, min: 0 })
+const codec = readArg('codec', 'av1/webm')
+const previousSegmentHash = readArg('previous-hash', zeroHash)
+const stationAddress = readArg('station-address', process.env.STATION_ADDRESS)
+assertBytes32Hex(previousSegmentHash, 'previous-hash')
+if (stationAddress && !isAddress(stationAddress)) throw new Error(`Invalid --station-address: ${stationAddress}`)
+if (!fs.existsSync(inputPath)) throw new Error(`Input not found: ${inputPath}`)
 
 const rpcUrl = process.env.ETH_RPC_URL
 const privateKey = process.env.PRIVATE_KEY
@@ -66,13 +103,12 @@ if (!rpcUrl || !privateKey) usage()
 requireSupportedChain(chain)
 requireMainnetConfirmation(chainName, 'publish blob transaction')
 
-const inputPath = path.resolve(input)
+const maxFeePerBlobGas = optionalGweiEnv('MAX_FEE_PER_BLOB_GAS_GWEI')
+const maxFeePerGas = optionalGweiEnv('MAX_FEE_PER_GAS_GWEI')
+const maxPriorityFeePerGas = optionalGweiEnv('MAX_PRIORITY_FEE_PER_GAS_GWEI')
+const gas = gasLimitEnv()
+
 const payload = fs.readFileSync(inputPath)
-const streamId = arg('stream-id', `eth-radio-${new Date().toISOString()}`)
-const sequence = Number(arg('seq', '0'))
-const durationMs = Number(arg('duration-ms', '0'))
-const codec = arg('codec', 'av1/webm')
-const previousSegmentHash = arg('previous-hash', zeroHash)
 
 const account = privateKeyToAccount(privateKey)
 const to = process.env.TO_ADDRESS || account.address
@@ -136,7 +172,6 @@ const segmentPublishedEvent = {
   ],
 }
 
-const stationAddress = arg('station-address', process.env.STATION_ADDRESS)
 const data = stationAddress
   ? encodeFunctionData({
       abi: stationAbi,
@@ -176,18 +211,10 @@ const tx = {
   data,
 }
 
-if (process.env.MAX_FEE_PER_BLOB_GAS_GWEI) {
-  tx.maxFeePerBlobGas = parseGwei(process.env.MAX_FEE_PER_BLOB_GAS_GWEI)
-}
-if (process.env.MAX_FEE_PER_GAS_GWEI) {
-  tx.maxFeePerGas = parseGwei(process.env.MAX_FEE_PER_GAS_GWEI)
-}
-if (process.env.MAX_PRIORITY_FEE_PER_GAS_GWEI) {
-  tx.maxPriorityFeePerGas = parseGwei(process.env.MAX_PRIORITY_FEE_PER_GAS_GWEI)
-}
-if (process.env.GAS_LIMIT) {
-  tx.gas = BigInt(process.env.GAS_LIMIT)
-}
+if (maxFeePerBlobGas !== undefined) tx.maxFeePerBlobGas = maxFeePerBlobGas
+if (maxFeePerGas !== undefined) tx.maxFeePerGas = maxFeePerGas
+if (maxPriorityFeePerGas !== undefined) tx.maxPriorityFeePerGas = maxPriorityFeePerGas
+if (gas !== undefined) tx.gas = gas
 
 console.log(`Publishing ${payload.length} bytes as ${blobs.length} blob(s) on ${chain.name}...`)
 const hash = await walletClient.sendTransaction(tx)
@@ -199,8 +226,9 @@ if (receipt.status !== 'success') {
 }
 const transaction = await getTransactionWithRetry(hash)
 const streamIdHash = keccak256(stringToBytes(streamId))
+let stationEvent = null
 if (stationAddress) {
-  const stationEvent = receipt.logs
+  stationEvent = receipt.logs
     .filter((log) => log.address.toLowerCase() === stationAddress.toLowerCase())
     .map((log) => {
       try {
@@ -214,7 +242,7 @@ if (stationAddress) {
       return (
         log.args.publisher.toLowerCase() === account.address.toLowerCase() &&
         log.args.streamIdHash === streamIdHash &&
-        Number(log.args.sequence) === sequence
+        stationEventSequenceMatches(log.args.sequence, sequence)
       )
     })
   if (!stationEvent) {
@@ -239,7 +267,7 @@ const manifest = {
   txHash: hash,
   blockHash: receipt.blockHash,
   blockNumber: receipt.blockNumber.toString(),
-  blobVersionedHashes: transaction.blobVersionedHashes || [],
+  blobVersionedHashes: manifestBlobVersionedHashes(transaction, stationEvent),
   createdAt: new Date().toISOString(),
 }
 

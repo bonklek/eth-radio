@@ -1,21 +1,20 @@
 # Radio Free Ethereum
 
-Radio Free Ethereum is an Ethereum blob radio prototype: it segments media,
-publishes segment metadata through a Sepolia Station contract, reconstructs
-payloads from blob sidecars, and serves a live web tuner from the same Node
-workspace.
+Radio Free Ethereum is an Ethereum blob radio prototype: it publishes media
+segments through an Ethereum Station contract and serves a browser tuner that
+can verify and play those segments.
 
-The repository keeps backend scripts, the Solidity contract, and the frontend
-demo together in one package. Large local media, generated chain state, research
-scratchpads, virtual environments, and copied external worktrees remain on disk
-under ignored paths.
+The repository keeps the Solidity contract, publishing utilities, and browser
+client together in one package. Local media, generated state, credentials, and
+private operator notes are intentionally ignored.
 
 ## Project Layout
 
 - `contracts/Station.sol` - Station contract that records published stream
   segments and blob versioned hashes.
-- `scripts/` - Node and Python tooling for deployment, blob publishing,
-  media segmentation, reconstruction, monitoring, and the live demo server.
+- `scripts/` - Local tooling for contract, media, publisher, and static-client
+  workflows.
+- `public/decentralized/` - Browser-only watcher intended for static hosting.
 - `public/rfe-assets/` - Small tracked visual assets used by the live demo UI.
 - `.env.example` - Configuration template. Copy it to `.env` locally and use a
   fresh low-value testnet key.
@@ -26,25 +25,24 @@ under ignored paths.
 pnpm install
 Copy-Item .env.example .env
 pnpm station:compile
-pnpm demo:live
+pnpm web:build
+pnpm web:static
 ```
 
-The demo server defaults to `http://127.0.0.1:5173/`. Set `PORT`, `STREAM_ID`,
-`ETH_RPC_URL`, and `BEACON_RPC_URL` in `.env` as needed.
+Use `.env` for local settings. Never commit real credentials.
 
 ## Common Commands
 
 ```powershell
 pnpm station:compile
-pnpm station:deploy
 pnpm media:segment
-pnpm live:publish:pipelined
-pnpm live:monitor
+pnpm web:build
+pnpm web:static
+pnpm web:serve
 pnpm demo:live
 ```
 
-Tune the command options with `--help` on the relevant script for publishing
-flows and health checks.
+Tune command options with `--help` on the relevant script.
 
 ## Publishing Notes
 
@@ -52,45 +50,16 @@ Do not commit `.env`, generated `work/` contents, virtual environments, local
 media PDFs, or dependency folders. The tracked files are the source and small
 runtime assets needed to clone, install, compile, and run the demo.
 
-### Cost Preflight
+Public releases must be produced from tracked source, a clean clone, `git
+archive`, or the static build output in `dist/decentralized/`. Do not create a
+GitHub release, source archive, IPFS upload, or copied release bundle by zipping
+the full working directory: local `.env` files, `work/` state, generated media,
+private RPC URLs, publisher state, private keys, and private notes are
+operator-local only.
 
-Publishing scripts can refuse to start if the projected stream cost exceeds an
-operator budget:
-
-```powershell
-pnpm live:run -- --input .\video\test.mp4 --stream-id demo --publish --max-cost-eth 0.1
-pnpm live:publish:pipelined -- --dir .\work\blob-radio-testnet\live-runs\demo\segments --stream-id demo --max-cost-eth 0.1
-```
-
-The estimate uses actual segment byte/blob counts when files already exist. For
-a directory that is still being generated, pass either `--stream-duration-ms` or
-`--expected-segments` so the preflight can project the full run. By default it
-uses a `1.25x` safety multiplier and blocks on insufficient budget; use
-`--cost-mode warn` only for an intentional override.
-
-If `MAX_FEE_PER_GAS_GWEI` and `MAX_FEE_PER_BLOB_GAS_GWEI` are set, the preflight
-estimates against those caps. Otherwise it queries `ETH_RPC_URL` for current
-execution gas and blob base fee.
-
-When `PRIVATE_KEY` is configured, the preflight also checks the publisher wallet
-balance against the safety-budgeted estimate before any live publish loop starts.
-Use `--skip-wallet-balance-check` only when the balance lookup RPC is unavailable
-and the wallet has been verified separately.
-
-### Speed Tuning
-
-Use the pipelined publisher for low-latency live tests:
-
-```powershell
-pnpm live:publish:pipelined -- --dir .\work\blob-radio-testnet\live-runs\demo\segments --stream-id demo --segment-ms 12000 --max-pending 2 --adaptive-pending --max-pending-max 4 --max-cost-eth 0.1
-```
-
-The pipelined state file records per-segment timing fields:
-`firstSeenAt`, `generatedAt`, `submittedAt`, `includedAt`, plus
-`timings.generatedToSubmitMs`, `timings.submitToIncludedMs`, and
-`timings.generatedToIncludedMs`. Playback APIs sort stream segments by
-`streamId`, then `sequence`, with block/transaction/log indexes only as
-tie-breakers.
+The canonical public watcher is the browser-only static client in
+`public/decentralized/`, built to `dist/decentralized/`. The Node live demo is a
+local development surface; do not present it as the hosted public watcher.
 
 ## License
 

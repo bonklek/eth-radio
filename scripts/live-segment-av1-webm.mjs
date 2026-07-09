@@ -4,6 +4,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import { bytesToHex, toBlobs } from 'viem'
 import ffmpegPath from 'ffmpeg-static'
+import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
+import { readExistingSegmentManifest, upsertSegment } from './lib/live-segment-manifest.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -23,16 +25,6 @@ when the input video already contains the required RFE overlay in its pixels.
 Use --allow-raw-test only for an explicitly approved raw publish test.
 `)
   process.exit(1)
-}
-
-function arg(name, fallback) {
-  const idx = process.argv.indexOf(`--${name}`)
-  if (idx === -1) return fallback
-  return process.argv[idx + 1]
-}
-
-function hasFlag(name) {
-  return process.argv.includes(`--${name}`)
 }
 
 function sleep(ms) {
@@ -83,8 +75,8 @@ function sha256(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
 }
 
-const input = arg('input')
-const streamId = arg('stream-id')
+const input = readArg('input')
+const streamId = readArg('stream-id')
 if (!input || !streamId) usage()
 if (!ffmpegPath) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
 
@@ -92,24 +84,26 @@ const inputPath = path.resolve(input)
 if (!fs.existsSync(inputPath)) throw new Error(`Input not found: ${inputPath}`)
 
 const safeStreamId = sanitize(streamId)
-const outDir = path.resolve(arg('out-dir', 'work/blob-radio-testnet/live-segments'))
+const outDir = path.resolve(readArg('out-dir', 'work/blob-radio-testnet/live-segments'))
 const manifestPath = path.join(outDir, `${safeStreamId}.segments.json`)
-const segmentMs = Number(arg('segment-ms', '24000'))
-const startSeq = Number(arg('start-seq', '0'))
-const width = Number(arg('width', '640'))
-const height = Number(arg('height', '360'))
-const fps = Number(arg('fps', '24'))
-const videoBitrate = arg('video-bitrate', '360k')
-const audioBitrate = arg('audio-bitrate', '32k')
-const maxBlobs = Number(arg('max-blobs', '6'))
-const maxBytes = Number(arg('max-bytes', String(maxBlobs * 126_976)))
+const segmentMs = numberArg('segment-ms', '24000', { integer: true, min: 1 })
+const startSeq = numberArg('start-seq', '0', { integer: true, min: 0 })
+const width = numberArg('width', '640', { integer: true, min: 1 })
+const height = numberArg('height', '360', { integer: true, min: 1 })
+const fps = numberArg('fps', '24', { min: 1 })
+const videoBitrate = readArg('video-bitrate', '360k')
+const audioBitrate = readArg('audio-bitrate', '32k')
+const maxBlobs = numberArg('max-blobs', '6', { integer: true, min: 1 })
+const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
 const noAudio = hasFlag('no-audio')
 const pace = hasFlag('pace')
 const reset = hasFlag('reset')
 const inputHasOverlay = hasFlag('input-has-overlay')
 const allowRawTest = hasFlag('allow-raw-test')
-const maxSegmentsArg = arg('max-segments')
-const maxSegments = maxSegmentsArg == null ? null : Number(maxSegmentsArg)
+const maxSegmentsArg = readArg('max-segments')
+const maxSegments = maxSegmentsArg !== undefined
+  ? numberArg('max-segments', undefined, { integer: true, min: 1 })
+  : null
 const segmentSeconds = segmentMs / 1000
 const durationMs = probeDurationMs(inputPath)
 
@@ -123,19 +117,14 @@ if (inputHasOverlay && allowRawTest) {
 }
 if (!Number.isFinite(segmentMs) || segmentMs <= 0) throw new Error(`Invalid --segment-ms ${segmentMs}`)
 if (!Number.isInteger(startSeq) || startSeq < 0) throw new Error(`Invalid --start-seq ${startSeq}`)
-if (maxSegments != null && (!Number.isInteger(maxSegments) || maxSegments < 1)) {
-  throw new Error(`Invalid --max-segments ${maxSegmentsArg}`)
-}
-
 fs.mkdirSync(outDir, { recursive: true })
 if (reset && fs.existsSync(manifestPath)) fs.rmSync(manifestPath, { force: true })
 
-let manifest = fs.existsSync(manifestPath)
-  ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-  : {
+let manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix: safeStreamId }) || {
       app: 'eth-radio',
       kind: 'live-segment-set',
-      streamId: safeStreamId,
+      streamId,
+      filePrefix: safeStreamId,
       input: inputPath,
       outDir,
       segmentMs,
@@ -152,6 +141,8 @@ let manifest = fs.existsSync(manifestPath)
 
 manifest = {
   ...manifest,
+  streamId,
+  filePrefix: safeStreamId,
   outDir,
   overlay: inputHasOverlay ? 'input-has-overlay' : 'raw-test-approved',
   updatedAt: new Date().toISOString(),
@@ -241,9 +232,7 @@ for (let sequence = startSeq; ; sequence += 1) {
     )
   }
 
-  manifest.segments = [
-    ...manifest.segments.filter((segment) => Number(segment.sequence) !== sequence),
-    {
+  manifest.segments = upsertSegment(manifest.segments, {
       sequence,
       file: finalPath,
       bytes,
@@ -251,8 +240,7 @@ for (let sequence = startSeq; ; sequence += 1) {
       payloadSha256: sha256(finalPath),
       startMs,
       durationMs: Math.min(segmentMs, durationMs == null ? segmentMs : Math.max(0, durationMs - startMs)),
-    },
-  ].sort((a, b) => Number(a.sequence) - Number(b.sequence))
+    })
   manifest.updatedAt = new Date().toISOString()
   atomicWriteJson(manifestPath, manifest)
   console.log(`seq ${sequence}: ${bytes} bytes / ${estimatedBlobs} blob(s)`)
