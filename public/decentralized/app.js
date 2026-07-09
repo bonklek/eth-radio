@@ -39,11 +39,69 @@ const EVENT_TOPIC = '0xfd61253da387da4d87d036a0276340bc4f04ff7c1173999c8392b1580
 const DB_NAME = 'radio-free-ethereum-static-v3'
 const DB_VERSION = 3
 const MAX_BLOBS_PER_BLOCK = 21
+const TARGET_BLOBS_PER_BLOCK = 14
 const SLOT_WINDOW = 10
 const DEFAULT_BLOBSPACE_ROWS = []
+const LAYOUT_KEY = 'rfe-static-layout-preset'
+const LAYOUT_SETTINGS_KEY = 'rfe-static-layout-settings-v1'
+const FAVORITES_KEY = 'rfe-static-favorites-v1'
+const CLOCK_KEY = 'rfe-static-clock-v1'
+const BLOB_FEE_SAMPLES_KEY = 'rfe-static-blob-fee-samples-v1'
+const BLOB_FEE_PREFS_KEY = 'rfe-static-blob-fee-prefs-v1'
+const BLOB_GAS_PER_BLOB = 131_072n
+const BLOB_FEE_UNITS = {
+  eth: 'ETH',
+  gwei: 'Gwei',
+  wei: 'Wei',
+}
+const WEI_PER_GWEI = 1_000_000_000n
+const WEI_PER_ETH = 1_000_000_000_000_000_000n
+const BLOB_FEE_HISTORY_CHUNK_BLOCKS = 1024
+const BLOB_FEE_REFRESH_MS = 45_000
+const BLOB_FEE_HIDDEN_REFRESH_MS = 5 * 60_000
+const BLOB_FEE_HISTORY_WINDOWS = {
+  tenMinute: { label: '10m avg', blocks: 50, cacheMs: 90_000 },
+  hour: { label: '1h avg', blocks: 300, cacheMs: 3 * 60_000 },
+  day: { label: '1d avg', blocks: 7200, cacheMs: 20 * 60_000 },
+  week: { label: '1w avg', blocks: 50400, cacheMs: 60 * 60_000 },
+}
+const ARCHIVE_DEFAULT_WINDOW_BLOCKS = 50_000
+const ARCHIVE_SCAN_CHUNK_BLOCKS = 2_000
+const ARCHIVE_MAX_BLOCKS = 250_000
+const PANEL_POSITIONS = {
+  left: 'Left rail',
+  main: 'Main',
+  right: 'Right rail',
+  bottom: 'Bottom',
+}
+const PANEL_LABELS = {
+  player: 'Player',
+  feeds: 'Blobspace feed',
+  archive: 'Archive/favorites',
+  blobFees: 'Blob fee tracker',
+}
 const INITIAL_URL_STATE = readUrlState()
 const els = {
+  shell: document.querySelector('#app-shell'),
   form: document.querySelector('#settings'),
+  settingsToggle: document.querySelector('#settings-toggle'),
+  settingsModal: document.querySelector('#settings-modal'),
+  settingsClose: document.querySelector('#settings-close'),
+  settingsTabs: document.querySelectorAll('[data-settings-tab]'),
+  settingsPanels: document.querySelectorAll('[data-settings-panel]'),
+  layoutPresets: document.querySelector('#layout-presets'),
+  panelZones: {
+    player: document.querySelector('.panel-player'),
+    feeds: document.querySelector('.panel-feeds'),
+    archive: document.querySelector('.panel-archive'),
+    blobFees: document.querySelector('.panel-blob-fees'),
+  },
+  panelShow: document.querySelectorAll('[data-panel-show]'),
+  panelPosition: document.querySelectorAll('[data-panel-position]'),
+  panelOrder: document.querySelectorAll('[data-panel-order]'),
+  layoutBottomSpan: document.querySelector('#layout-bottom-span'),
+  clockMode: document.querySelector('#clock-mode'),
+  clockTimeZone: document.querySelector('#clock-time-zone'),
   themeToggle: document.querySelector('#theme-toggle'),
   chainButtons: document.querySelectorAll('[data-chain-preset]'),
   chainPreset: document.querySelector('#chain-preset'),
@@ -61,6 +119,9 @@ const els = {
   cacheLimit: document.querySelector('#cache-limit'),
   refresh: document.querySelector('#refresh'),
   streamToggle: document.querySelector('#stream-toggle'),
+  favoriteStream: document.querySelector('#favorite-stream'),
+  favoriteStation: document.querySelector('#favorite-station'),
+  favoriteChannel: document.querySelector('#favorite-channel'),
   loopToggle: document.querySelector('#loop-toggle'),
   muteToggle: document.querySelector('#mute-toggle'),
   volume: document.querySelector('#volume'),
@@ -74,6 +135,7 @@ const els = {
   segmentLookup: document.querySelector('#segment-lookup'),
   lookupMessage: document.querySelector('#lookup-message'),
   watchSegment: document.querySelector('#watch-segment'),
+  segmentsTitle: document.querySelector('#segments-title'),
   metricSegment: document.querySelector('#metric-segment'),
   metricPayload: document.querySelector('#metric-payload'),
   metricBlobs: document.querySelector('#metric-blobs'),
@@ -98,6 +160,34 @@ const els = {
   slots: document.querySelector('#slots'),
   segmentRailResizer: document.querySelector('#segment-rail-resizer'),
   segments: document.querySelector('#segments'),
+  archiveDetails: document.querySelector('#archive-details'),
+  archiveModeButtons: document.querySelectorAll('[data-archive-mode]'),
+  archiveModeFields: document.querySelectorAll('[data-archive-field]'),
+  archiveScanForm: document.querySelector('#archive-scan-form'),
+  archiveStation: document.querySelector('#archive-station'),
+  archiveInbox: document.querySelector('#archive-inbox'),
+  archivePublisher: document.querySelector('#archive-publisher'),
+  archiveStreamFilter: document.querySelector('#archive-stream-filter'),
+  archiveFromBlock: document.querySelector('#archive-from-block'),
+  archiveFromDate: document.querySelector('#archive-from-date'),
+  archiveToDate: document.querySelector('#archive-to-date'),
+  archiveScan: document.querySelector('#archive-scan'),
+  archiveStop: document.querySelector('#archive-stop'),
+  archiveProgress: document.querySelector('#archive-progress'),
+  archiveProgressBar: document.querySelector('#archive-progress-bar'),
+  archiveResults: document.querySelector('#archive-results'),
+  favoritesList: document.querySelector('#favorites-list'),
+  blobFeeStatus: document.querySelector('#blob-fee-status'),
+  blobFeeUnit: document.querySelector('#blob-fee-unit'),
+  blobFeeWindow: document.querySelector('#blob-fee-window'),
+  blobFeeBase: document.querySelector('#blob-fee-base'),
+  blobFeePerBlob: document.querySelector('#blob-fee-per-blob'),
+  blobFeeAverageLabel: document.querySelector('#blob-fee-average-label'),
+  blobFeeAverage: document.querySelector('#blob-fee-average'),
+  blobFeeUtilization: document.querySelector('#blob-fee-utilization'),
+  blobFeeUpdated: document.querySelector('#blob-fee-updated'),
+  blobFeeMessage: document.querySelector('#blob-fee-message'),
+  blobFeeSparkline: document.querySelector('#blob-fee-sparkline'),
 }
 
 const sunIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>'
@@ -122,6 +212,7 @@ let state = {
   metadataUpdatedAt: '',
   currentRecordKey: '',
   playbackState: 'waiting',
+  segmentNotice: '',
   selectedSegmentQuery: INITIAL_URL_STATE.segment,
   blockTimes: new Map(),
   muteTouched: false,
@@ -133,8 +224,23 @@ let state = {
   anchor: null,
   refreshTimer: null,
   blobspaceTimer: null,
+  blobFeeTimer: null,
   prefetching: new Set(),
   prefetchPromises: new Map(),
+  layoutPreset: loadLayoutPreset(),
+  layoutSettings: loadLayoutSettings(),
+  clock: loadClockPrefs(),
+  favorites: loadFavorites(),
+  archive: {
+    scanning: false,
+    cancel: false,
+    mode: 'station',
+    tunedKey: '',
+    streams: [],
+    segmentsByKey: new Map(),
+  },
+  blobFees: loadBlobFeeSamples(),
+  blobFeePrefs: loadBlobFeePrefs(),
 }
 
 function parseLines(value) {
@@ -165,6 +271,245 @@ function sameList(left, right) {
   return a.length === b.length && a.every((value, index) => value === b[index])
 }
 
+function loadLayoutPreset() {
+  const saved = localStorage.getItem(LAYOUT_KEY)
+  return ['default', 'player-side', 'player-top', 'player-bottom', 'horizontal-rails', 'archive-side', 'archive-bottom', 'custom'].includes(saved) ? saved : 'default'
+}
+
+function saveLayoutPreset(preset) {
+  state.layoutPreset = loadLayoutPresetFromValue(preset)
+  localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+  state.layoutSettings = layoutSettingsForPreset(state.layoutPreset)
+  saveLayoutSettings()
+  applyLayoutPreset()
+}
+
+function loadLayoutPresetFromValue(value) {
+  return ['default', 'player-side', 'player-top', 'player-bottom', 'horizontal-rails', 'archive-side', 'archive-bottom', 'custom'].includes(value) ? value : 'default'
+}
+
+function defaultLayoutSettings() {
+  return {
+    bottomSpan: 'between',
+    player: { visible: true, position: 'main', order: 1 },
+    feeds: { visible: true, position: 'right', order: 1 },
+    archive: { visible: true, position: 'bottom', order: 1 },
+    blobFees: { visible: false, position: 'bottom', order: 2 },
+  }
+}
+
+function layoutSettingsForPreset(preset) {
+  const base = defaultLayoutSettings()
+  if (preset === 'custom') return base
+  const presets = {
+    default: base,
+    'player-side': {
+      player: { visible: true, position: 'main', order: 1 },
+      feeds: { visible: true, position: 'right', order: 1 },
+      archive: { visible: true, position: 'right', order: 2 },
+    },
+    'player-top': {
+      player: { visible: true, position: 'main', order: 1 },
+      feeds: { visible: true, position: 'bottom', order: 1 },
+      archive: { visible: true, position: 'bottom', order: 2 },
+    },
+    'player-bottom': {
+      feeds: { visible: true, position: 'main', order: 1 },
+      archive: { visible: true, position: 'right', order: 1 },
+      player: { visible: true, position: 'bottom', order: 1 },
+    },
+    'horizontal-rails': {
+      player: { visible: true, position: 'main', order: 1 },
+      feeds: { visible: true, position: 'bottom', order: 1 },
+      archive: { visible: true, position: 'bottom', order: 2 },
+    },
+    'archive-side': {
+      player: { visible: true, position: 'main', order: 1 },
+      feeds: { visible: true, position: 'right', order: 1 },
+      archive: { visible: true, position: 'left', order: 1 },
+    },
+    'archive-bottom': base,
+  }
+  return normalizeLayoutSettings(presets[preset] || base)
+}
+
+function normalizeLayoutSettings(value) {
+  const fallback = defaultLayoutSettings()
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const next = {
+    bottomSpan: input.bottomSpan === 'full' ? 'full' : 'between',
+  }
+  for (const panel of Object.keys(PANEL_LABELS)) {
+    const config = input[panel] && typeof input[panel] === 'object' ? input[panel] : fallback[panel]
+    const position = Object.hasOwn(PANEL_POSITIONS, config.position) ? config.position : fallback[panel].position
+    const order = Number(config.order)
+    next[panel] = {
+      visible: config.visible !== false,
+      position,
+      order: Number.isSafeInteger(order) && order > 0 && order <= 4 ? order : fallback[panel].order,
+    }
+  }
+  if (!Object.values(next).some((panel) => panel.visible)) next.player.visible = true
+  return next
+}
+
+function loadLayoutSettings() {
+  const saved = safeJsonObject(localStorage.getItem(LAYOUT_SETTINGS_KEY))
+  if (Object.keys(saved).length) return normalizeLayoutSettings(saved)
+  return layoutSettingsForPreset(loadLayoutPreset())
+}
+
+function saveLayoutSettings() {
+  state.layoutSettings = normalizeLayoutSettings(state.layoutSettings)
+  localStorage.setItem(LAYOUT_SETTINGS_KEY, JSON.stringify(state.layoutSettings))
+}
+
+function loadClockPrefs() {
+  const saved = safeJsonObject(localStorage.getItem(CLOCK_KEY))
+  return normalizeClockPrefs(saved)
+}
+
+function normalizeClockPrefs(value) {
+  const mode = ['utc', 'local', 'timezone'].includes(value?.mode) ? value.mode : 'utc'
+  const timeZone = String(value?.timeZone || '').trim().slice(0, 80)
+  return { mode, timeZone }
+}
+
+function saveClockPrefs() {
+  state.clock = normalizeClockPrefs(state.clock)
+  localStorage.setItem(CLOCK_KEY, JSON.stringify(state.clock))
+}
+
+function normalizeFavoriteItem(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+  const type = ['station', 'channel', 'stream', 'inbox', 'inbox-channel', 'inbox-stream'].includes(item.type) ? item.type : ''
+  const stationAddress = normalizeStationAddressInput(item.stationAddress)
+  const inboxAddress = normalizeStationAddressInput(item.inboxAddress)
+  const publisher = normalizeStationAddressInput(item.publisher || '')
+  const streamId = String(item.streamId || '').trim()
+  const streamIdHash = isBytes32Hex(item.streamIdHash) ? normalizeHex(item.streamIdHash) : ''
+  const firstBlock = Number(item.firstBlock)
+  const latestBlock = Number(item.latestBlock)
+  const hasArchiveRange = Number.isSafeInteger(firstBlock) && firstBlock >= 0
+    && Number.isSafeInteger(latestBlock) && latestBlock >= firstBlock
+  if (!type) return null
+  if (type.startsWith('inbox')) {
+    if (!inboxAddress) return null
+    if (type === 'inbox-channel' && !publisher) return null
+    if (type === 'inbox-stream' && (!publisher || (!streamId && !streamIdHash))) return null
+  } else if (!stationAddress) return null
+  if (type === 'channel' && !publisher) return null
+  if (type === 'stream' && (!publisher || (!streamId && !streamIdHash))) return null
+  const id = favoriteId({ type, stationAddress, inboxAddress, publisher, streamId, streamIdHash })
+  return {
+    id,
+    type,
+    stationAddress,
+    inboxAddress,
+    publisher,
+    streamId,
+    streamIdHash,
+    firstBlock: hasArchiveRange ? firstBlock : null,
+    latestBlock: hasArchiveRange ? latestBlock : null,
+    label: String(item.label || '').trim().slice(0, 80),
+    createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+  }
+}
+
+function normalizeFavorites(value) {
+  const parsed = Array.isArray(value) ? value : []
+  const byId = new Map()
+  for (const item of parsed) {
+    const favorite = normalizeFavoriteItem(item)
+    if (favorite) byId.set(favorite.id, favorite)
+  }
+  return [...byId.values()]
+}
+
+function loadFavorites() {
+  try {
+    return normalizeFavorites(JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]'))
+  } catch {
+    return []
+  }
+}
+
+function saveFavorites() {
+  state.favorites = normalizeFavorites(state.favorites)
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(state.favorites))
+}
+
+function normalizeBlobFeeSample(sample) {
+  if (!sample || typeof sample !== 'object' || Array.isArray(sample)) return null
+  const timestamp = Number(sample.timestamp)
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return null
+  const value = String(sample.baseFeePerBlobGasWei || '')
+  if (!/^\d+$/.test(value)) return null
+  return { timestamp, baseFeePerBlobGasWei: value }
+}
+
+function loadBlobFeeSamples() {
+  let samples = []
+  try {
+    const saved = JSON.parse(localStorage.getItem(BLOB_FEE_SAMPLES_KEY) || '[]')
+    samples = Array.isArray(saved) ? saved.map(normalizeBlobFeeSample).filter(Boolean) : []
+  } catch {
+    samples = []
+  }
+  return {
+    status: 'Unavailable',
+    message: 'Blob fee tracker is off.',
+    currentBaseFeeWei: null,
+    currentBlobFeeWei: null,
+    averages: {},
+    utilization: null,
+    history: {},
+    samples: pruneBlobFeeSamples(samples),
+    updatedAt: 0,
+    loading: false,
+  }
+}
+
+function pruneBlobFeeSamples(samples) {
+  const cutoff = Date.now() - 8 * 24 * 60 * 60 * 1000
+  return samples
+    .map(normalizeBlobFeeSample)
+    .filter((sample) => sample && sample.timestamp >= cutoff)
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-1400)
+}
+
+function saveBlobFeeSamples() {
+  state.blobFees.samples = pruneBlobFeeSamples(state.blobFees.samples)
+  localStorage.setItem(BLOB_FEE_SAMPLES_KEY, JSON.stringify(state.blobFees.samples))
+}
+
+function normalizeBlobFeePrefs(value) {
+  const unit = Object.hasOwn(BLOB_FEE_UNITS, value?.unit) ? value.unit : 'eth'
+  const historyWindow = Object.hasOwn(BLOB_FEE_HISTORY_WINDOWS, value?.historyWindow) ? value.historyWindow : 'hour'
+  return { unit, historyWindow }
+}
+
+function loadBlobFeePrefs() {
+  return normalizeBlobFeePrefs(safeJsonObject(localStorage.getItem(BLOB_FEE_PREFS_KEY)))
+}
+
+function saveBlobFeePrefs() {
+  state.blobFeePrefs = normalizeBlobFeePrefs(state.blobFeePrefs)
+  localStorage.setItem(BLOB_FEE_PREFS_KEY, JSON.stringify(state.blobFeePrefs))
+}
+
+function favoriteId(item) {
+  return [
+    item.type,
+    normalizeHex(item.stationAddress),
+    normalizeHex(item.inboxAddress || ''),
+    normalizeHex(item.publisher || ''),
+    normalizeHex(item.streamIdHash || ''),
+    item.streamId || '',
+  ].join(':')
+}
+
 function isHttpEndpoint(value) {
   try {
     const url = new URL(value)
@@ -186,6 +531,24 @@ function normalizeStationAddressInput(value) {
   if (address) return address
   const trimmed = String(value || '').trim()
   return /^0x[a-fA-F0-9]{40}$/.test(trimmed) ? trimmed.toLowerCase() : ''
+}
+
+function parseArchiveStationInput(value) {
+  const raw = String(value || '').trim()
+  const txHash = extractTxHash(raw)
+  if (txHash && !/\/address\//i.test(raw)) return { kind: 'tx', address: '', txHash }
+  const address = normalizeStationAddressInput(raw)
+  if (address) return { kind: 'address', address, txHash: '' }
+  return { kind: 'invalid', address: '', txHash: '' }
+}
+
+function normalizeBlobVersionedHashes(value) {
+  if (!Array.isArray(value)) return []
+  return value.map(normalizeHex).filter(isBytes32Hex)
+}
+
+function txBlobVersionedHashes(tx) {
+  return normalizeBlobVersionedHashes(tx?.blobVersionedHashes || tx?.blob_versioned_hashes || [])
 }
 
 function readUrlState() {
@@ -272,9 +635,36 @@ function initTheme() {
   setTheme(saved === 'light' ? 'light' : 'dark')
 }
 
+function segmentRailBounds() {
+  const min = 180
+  const fallbackMax = Math.max(560, Math.floor(window.innerHeight * 0.82))
+  const feedPanel = document.querySelector('.panel-feeds')
+  const blobspacePanel = document.querySelector('.blobspace-panel')
+  const segmentsPanel = document.querySelector('.segments-panel')
+  if (!feedPanel || !blobspacePanel || !segmentsPanel || feedPanel.hidden) {
+    return { min, max: fallbackMax }
+  }
+  const style = getComputedStyle(feedPanel)
+  const rowGap = Number.parseFloat(style.rowGap || style.gap || '0') || 0
+  const fixedChildren = [...feedPanel.children].filter((child) => child !== blobspacePanel && child !== segmentsPanel)
+  const fixedHeight = fixedChildren.reduce((sum, child) => sum + child.getBoundingClientRect().height, 0)
+  const verticalPadding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
+  const gapTotal = rowGap * Math.max(0, feedPanel.children.length - 1)
+  const blobspaceMin = 112
+  const available = feedPanel.getBoundingClientRect().height - verticalPadding - gapTotal - fixedHeight - blobspaceMin
+  const max = Math.max(min, Math.floor(available))
+  return { min, max }
+}
+
 function applySegmentRailHeight(height) {
-  const next = Math.max(180, Math.min(560, Number(height) || 280))
+  const bounds = segmentRailBounds()
+  const next = Math.max(bounds.min, Math.min(bounds.max, Number(height) || 280))
   document.documentElement.style.setProperty('--segment-rail-height', `${next}px`)
+  if (els.segmentRailResizer) {
+    els.segmentRailResizer.setAttribute('aria-valuemin', String(bounds.min))
+    els.segmentRailResizer.setAttribute('aria-valuemax', String(bounds.max))
+    els.segmentRailResizer.setAttribute('aria-valuenow', String(next))
+  }
   try {
     localStorage.setItem('rfe-segment-rail-height', String(next))
   } catch {
@@ -318,6 +708,23 @@ function initSegmentRailResize() {
 
 function setStatus(value) {
   els.status.textContent = value
+}
+
+function setArchiveProgress(message, { current = 0n, total = 0n, active = false } = {}) {
+  if (els.archiveProgress) els.archiveProgress.textContent = message
+  if (!els.archiveProgressBar) return
+  const totalValue = typeof total === 'bigint' ? total : BigInt(Math.max(0, Number(total) || 0))
+  const currentValue = typeof current === 'bigint' ? current : BigInt(Math.max(0, Number(current) || 0))
+  const percent = totalValue > 0n
+    ? Number((currentValue > totalValue ? totalValue : currentValue) * 100n / totalValue)
+    : 0
+  els.archiveProgressBar.value = Math.max(0, Math.min(100, percent))
+  els.archiveProgressBar.classList.toggle('active', Boolean(active))
+  els.archiveProgressBar.setAttribute('aria-valuetext', active ? `${percent}%` : message)
+}
+
+function resetArchiveProgress(message) {
+  setArchiveProgress(message, { current: 0n, total: 0n, active: false })
 }
 
 function defaultBlobspaceRows() {
@@ -518,9 +925,79 @@ function fmtUtcClock(date = new Date()) {
   return `${date.toISOString().slice(11, 19)} UTC`
 }
 
+function fmtClock(date = new Date()) {
+  if (state.clock.mode === 'local') {
+    return `${new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date)} local`
+  }
+  if (state.clock.mode === 'timezone' && state.clock.timeZone) {
+    try {
+      return `${new Intl.DateTimeFormat([], {
+        timeZone: state.clock.timeZone,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(date)} ${state.clock.timeZone}`
+    } catch {
+      return fmtUtcClock(date)
+    }
+  }
+  return fmtUtcClock(date)
+}
+
 function fmtLatency(segment) {
   if (!segment?.createdAt) return '-'
   return fmtAge(segment.createdAt)
+}
+
+function formatWeiCompact(value) {
+  if (value == null) return '-'
+  const wei = typeof value === 'bigint' ? value : BigInt(value)
+  if (wei === 0n) return '0 Wei'
+  if (wei < WEI_PER_GWEI) return `${wei.toString()} Wei`
+  const whole = wei / WEI_PER_GWEI
+  const fraction = (wei % WEI_PER_GWEI).toString().padStart(9, '0').slice(0, 3).replace(/0+$/, '')
+  return `${whole.toString()}${fraction ? `.${fraction}` : ''} Gwei`
+}
+
+function formatEthFromWei(value) {
+  if (value == null) return '-'
+  const wei = typeof value === 'bigint' ? value : BigInt(value)
+  const whole = wei / WEI_PER_ETH
+  const fraction = (wei % WEI_PER_ETH).toString().padStart(18, '0').slice(0, 8).replace(/0+$/, '')
+  return `${whole.toString()}${fraction ? `.${fraction}` : ''} ETH`
+}
+
+function formatGweiFromWei(value) {
+  if (value == null) return '-'
+  const wei = typeof value === 'bigint' ? value : BigInt(value)
+  const whole = wei / WEI_PER_GWEI
+  const fraction = (wei % WEI_PER_GWEI).toString().padStart(9, '0').slice(0, 4).replace(/0+$/, '')
+  return `${whole.toString()}${fraction ? `.${fraction}` : ''} Gwei`
+}
+
+function formatBlobFeeAmount(value, unit = state.blobFeePrefs.unit) {
+  if (value == null) return '-'
+  const wei = typeof value === 'bigint' ? value : BigInt(value)
+  if (unit === 'wei') return `${wei.toString()} Wei`
+  if (unit === 'gwei') return formatGweiFromWei(wei)
+  return formatEthFromWei(wei)
+}
+
+function blobFeeWei(baseFeePerBlobGasWei) {
+  return BigInt(baseFeePerBlobGasWei) * BLOB_GAS_PER_BLOB
+}
+
+function averageBigInts(values) {
+  const usable = values.filter((value) => typeof value === 'bigint' && value > 0n)
+  if (!usable.length) return null
+  return usable.reduce((sum, value) => sum + value, 0n) / BigInt(usable.length)
+}
+
+function percentileBigInt(values, percentile) {
+  const usable = values.filter((value) => typeof value === 'bigint' && value > 0n).sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
+  if (!usable.length) return null
+  const index = Math.min(usable.length - 1, Math.max(0, Math.ceil((percentile / 100) * usable.length) - 1))
+  return usable[index]
 }
 
 function fmtUtcMinute(timestampMs) {
@@ -644,6 +1121,27 @@ function rpcQuantityNumber(value, label) {
   return number
 }
 
+function parseBlockInput(value, label) {
+  const text = String(value || '').trim()
+  if (!/^\d+$/.test(text)) throw new Error(`${label} must be a non-negative block number`)
+  const number = Number(text)
+  if (!Number.isSafeInteger(number)) throw new Error(`${label} exceeds safe integer range`)
+  return BigInt(number)
+}
+
+function datetimeLocalValue(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function parseDatetimeLocal(value, label) {
+  const text = String(value || '').trim()
+  if (!text) return null
+  const ms = Date.parse(text)
+  if (!Number.isFinite(ms)) throw new Error(`${label} must be a valid date and time`)
+  return ms
+}
+
 function bigintSafeInteger(value, label) {
   const number = Number(value)
   if (!Number.isSafeInteger(number)) throw new Error(`${label} exceeds safe integer range`)
@@ -757,6 +1255,169 @@ async function rpc(method, params = []) {
   })
 }
 
+async function executionBlock(blockNumber, fullTransactions = false) {
+  const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), fullTransactions])
+  if (!block || typeof block !== 'object') throw new Error(`Execution block ${blockNumber} was not found`)
+  return block
+}
+
+async function blockTimestampMs(blockNumber) {
+  const block = await executionBlock(blockNumber, false)
+  return timestampMsFromSeconds(block.timestamp, 'block timestamp')
+}
+
+async function blockAtOrBeforeTimestamp(targetMs, head) {
+  const headMs = await blockTimestampMs(head)
+  if (targetMs >= headMs) return head
+  const genesisBlock = 0n
+  let low = genesisBlock
+  let high = head
+  while (low < high) {
+    const mid = (low + high + 1n) / 2n
+    const midMs = await blockTimestampMs(mid)
+    if (midMs <= targetMs) low = mid
+    else high = mid - 1n
+  }
+  return low
+}
+
+async function archiveDateBlockRange(head) {
+  const fromMs = parseDatetimeLocal(els.archiveFromDate?.value, 'Archive from-date')
+  const toMs = parseDatetimeLocal(els.archiveToDate?.value, 'Archive to-date')
+  if (fromMs == null && toMs == null) return null
+  if (fromMs != null && toMs != null && fromMs > toMs) throw new Error('Archive from-date must be before to-date')
+  const from = fromMs == null ? 0n : await blockAtOrBeforeTimestamp(fromMs, head)
+  const to = toMs == null ? head : await blockAtOrBeforeTimestamp(toMs, head)
+  return { from, to: to > head ? head : to }
+}
+
+function rpcQuantityBigInt(value, label) {
+  if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error(`${label} must be an RPC quantity`)
+  return BigInt(value)
+}
+
+function blobFeeHistoryValues(response) {
+  const fees = Array.isArray(response?.baseFeePerBlobGas) ? response.baseFeePerBlobGas : null
+  if (!fees) throw new Error('eth_feeHistory response missing baseFeePerBlobGas')
+  const ratios = Array.isArray(response?.blobGasUsedRatio) ? response.blobGasUsedRatio : []
+  return {
+    baseFees: fees.map((value) => rpcQuantityBigInt(value, 'baseFeePerBlobGas')).filter((value) => value > 0n),
+    utilization: ratios
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value >= 0 && value <= 1),
+    oldestBlock: response.oldestBlock ? rpcQuantityBigInt(response.oldestBlock, 'feeHistory oldestBlock') : null,
+  }
+}
+
+async function fetchCurrentBlobBaseFee() {
+  const value = await rpc('eth_blobBaseFee')
+  return rpcQuantityBigInt(value, 'eth_blobBaseFee')
+}
+
+async function fetchBlobFeeHistory(blocks) {
+  const baseFees = []
+  const utilization = []
+  let newestBlock = 'latest'
+  let remaining = blocks
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, BLOB_FEE_HISTORY_CHUNK_BLOCKS)
+    const response = await rpc('eth_feeHistory', [chunk, newestBlock, []])
+    const parsed = blobFeeHistoryValues(response)
+    baseFees.push(...parsed.baseFees)
+    utilization.push(...parsed.utilization)
+    if (!parsed.oldestBlock || parsed.oldestBlock === 0n) break
+    newestBlock = `0x${(parsed.oldestBlock - 1n).toString(16)}`
+    remaining -= chunk
+  }
+  return { baseFees, utilization }
+}
+
+function cachedBlobFeeWindow(key, now = Date.now()) {
+  const cached = state.blobFees.history[key]
+  const windowConfig = BLOB_FEE_HISTORY_WINDOWS[key]
+  if (!cached || !windowConfig || now - cached.updatedAt > windowConfig.cacheMs) return null
+  return cached
+}
+
+async function refreshBlobFeeWindow(key) {
+  const windowConfig = BLOB_FEE_HISTORY_WINDOWS[key]
+  const cached = cachedBlobFeeWindow(key)
+  if (cached) return cached
+  try {
+    const history = await fetchBlobFeeHistory(windowConfig.blocks)
+    const average = averageBigInts(history.baseFees)
+    if (average == null) throw new Error('No blob fee samples returned')
+    const next = {
+      status: 'ok',
+      updatedAt: Date.now(),
+      averageWei: average.toString(),
+      percentile75Wei: percentileBigInt(history.baseFees, 75)?.toString() || '',
+      percentile90Wei: percentileBigInt(history.baseFees, 90)?.toString() || '',
+      percentile97Wei: percentileBigInt(history.baseFees, 97)?.toString() || '',
+      sampleBlocks: history.utilization.length,
+      blobCount: Math.round(history.utilization.reduce((sum, value) => sum + value * MAX_BLOBS_PER_BLOCK, 0)),
+      utilization: history.utilization.length
+        ? history.utilization.reduce((sum, value) => sum + value, 0) / history.utilization.length
+        : null,
+    }
+    state.blobFees.history[key] = next
+    return next
+  } catch (error) {
+    const next = { status: 'limited', updatedAt: Date.now(), message: key === 'day' || key === 'week' ? 'provider limited' : publicErrorMessage(error) }
+    state.blobFees.history[key] = next
+    return next
+  }
+}
+
+function classifyBlobFee(current, hourWindow) {
+  if (current == null) return 'Unavailable'
+  if (!hourWindow || hourWindow.status !== 'ok' || !hourWindow.averageWei) return 'Normal'
+  const average = BigInt(hourWindow.averageWei)
+  const p75 = hourWindow.percentile75Wei ? BigInt(hourWindow.percentile75Wei) : null
+  const p90 = hourWindow.percentile90Wei ? BigInt(hourWindow.percentile90Wei) : null
+  const p97 = hourWindow.percentile97Wei ? BigInt(hourWindow.percentile97Wei) : null
+  if ((average > 0n && current > average * 4n) || (p97 != null && current > p97)) return 'Extreme'
+  if ((average > 0n && current > average * 2n) || (p90 != null && current > p90)) return 'High'
+  if ((average > 0n && current * 100n > average * 125n) || (p75 != null && current > p75)) return 'Elevated'
+  return 'Normal'
+}
+
+async function refreshBlobFees() {
+  if (!state.layoutSettings.blobFees?.visible || state.blobFees.loading) return
+  state.blobFees.loading = true
+  renderBlobFees()
+  try {
+    const current = await fetchCurrentBlobBaseFee()
+    state.blobFees.currentBaseFeeWei = current.toString()
+    state.blobFees.currentBlobFeeWei = blobFeeWei(current).toString()
+    state.blobFees.samples.push({ timestamp: Date.now(), baseFeePerBlobGasWei: current.toString() })
+    saveBlobFeeSamples()
+    const entries = await Promise.all(Object.keys(BLOB_FEE_HISTORY_WINDOWS).map(async (key) => [key, await refreshBlobFeeWindow(key)]))
+    state.blobFees.averages = Object.fromEntries(entries)
+    const hourWindow = state.blobFees.averages.hour
+    state.blobFees.status = classifyBlobFee(current, hourWindow)
+    state.blobFees.utilization = hourWindow?.utilization ?? state.blobFees.averages.tenMinute?.utilization ?? null
+    state.blobFees.message = ''
+    state.blobFees.updatedAt = Date.now()
+  } catch (error) {
+    state.blobFees.status = 'Unavailable'
+    state.blobFees.message = 'Blob fee data unavailable from this RPC.'
+    state.blobFees.updatedAt = Date.now()
+  } finally {
+    state.blobFees.loading = false
+    renderBlobFees()
+  }
+}
+
+function startBlobFeeTracker() {
+  clearInterval(state.blobFeeTimer)
+  state.blobFeeTimer = null
+  if (!state.layoutSettings.blobFees?.visible) return
+  void refreshBlobFees()
+  const interval = document.hidden ? BLOB_FEE_HIDDEN_REFRESH_MS : BLOB_FEE_REFRESH_MS
+  state.blobFeeTimer = setInterval(() => void refreshBlobFees(), interval)
+}
+
 async function beacon(pathname) {
   return withEndpointFallback('beacon', state.config.beaconApis, async (endpoint) => {
     const response = await fetch(`${endpoint}${pathname}`, { headers: { accept: 'application/json' } })
@@ -836,8 +1497,15 @@ async function fetchLogs() {
 }
 
 async function fetchSegmentLogs(fromBlock, toBlock, { streamId = state.config.streamId } = {}) {
+  return fetchSegmentLogsForStation(state.config.stationAddress, fromBlock, toBlock, { streamId })
+}
+
+async function fetchSegmentLogsForStation(stationAddress, fromBlock, toBlock, { streamId = '', publisher = '' } = {}) {
+  const station = normalizeStationAddressInput(stationAddress)
+  if (!station) throw new Error('Station must be a 20-byte address before reading logs.')
+  const publisherAddress = normalizeStationAddressInput(publisher || '')
   const logs = await rpc('eth_getLogs', [{
-    address: state.config.stationAddress,
+    address: station,
     fromBlock: toBlockHex(fromBlock),
     toBlock: toBlockHex(toBlock),
     topics: [EVENT_TOPIC],
@@ -845,6 +1513,7 @@ async function fetchSegmentLogs(fromBlock, toBlock, { streamId = state.config.st
   const segments = logs
     .map(decodeSegmentLog)
     .filter((segment) => !streamId || segment.streamId === streamId)
+    .filter((segment) => !publisherAddress || normalizeHex(segment.publisher) === publisherAddress)
     .sort((a, b) =>
       a.sequence - b.sequence ||
       a.blockNumber - b.blockNumber ||
@@ -852,6 +1521,434 @@ async function fetchSegmentLogs(fromBlock, toBlock, { streamId = state.config.st
       a.logIndex - b.logIndex)
   await hydrateSegmentTimes(segments)
   return segments
+}
+
+function archiveStreamKey(segment) {
+  return `${normalizeHex(segment.publisher)}:${normalizeHex(segment.streamIdHash)}:${segment.streamId}`
+}
+
+function groupOldStreamsFromSegmentPublishedLogs(segments) {
+  const groups = new Map()
+  for (const segment of segments) {
+    const key = archiveStreamKey(segment)
+    const existing = groups.get(key) || {
+      key,
+      publisher: segment.publisher,
+      streamIdHash: normalizeHex(segment.streamIdHash),
+      streamId: segment.streamId,
+      title: segment.streamId || shortHash(segment.streamIdHash),
+      segmentCount: 0,
+      firstSequence: segment.sequence,
+      latestSequence: segment.sequence,
+      firstBlock: segment.blockNumber,
+      latestBlock: segment.blockNumber,
+    }
+    existing.segmentCount += 1
+    existing.firstSequence = Math.min(existing.firstSequence, segment.sequence)
+    existing.latestSequence = Math.max(existing.latestSequence, segment.sequence)
+    existing.firstBlock = Math.min(existing.firstBlock, segment.blockNumber)
+    existing.latestBlock = Math.max(existing.latestBlock, segment.blockNumber)
+    groups.set(key, existing)
+  }
+  return [...groups.values()].sort((a, b) => b.latestBlock - a.latestBlock || a.title.localeCompare(b.title))
+}
+
+async function resolveArchiveStationTarget(value) {
+  const parsed = parseArchiveStationInput(value)
+  if (parsed.kind === 'address') return { station: parsed.address, deploymentBlock: null, txHash: '' }
+  if (parsed.kind !== 'tx') {
+    throw new Error('Station input must be a 20-byte address, deployment transaction hash, or explorer URL.')
+  }
+  const receipt = await rpc('eth_getTransactionReceipt', [parsed.txHash])
+  if (!receipt) throw new Error(`Deployment transaction ${shortHash(parsed.txHash)} was not found on ${CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset}.`)
+  const contractAddress = normalizeStationAddressInput(receipt.contractAddress || '')
+  if (!contractAddress) {
+    throw new Error(`Transaction ${shortHash(parsed.txHash)} did not create a contract. Paste the Station contract address or its deployment transaction.`)
+  }
+  const deploymentBlock = rpcQuantityNumber(receipt.blockNumber, 'deployment receipt blockNumber')
+  return { station: contractAddress, deploymentBlock, txHash: parsed.txHash }
+}
+
+function archiveScanErrorMessage(error) {
+  const message = publicErrorMessage(error)
+  if (/execution endpoints failed/i.test(message) || /HTTP 4\d\d/i.test(message)) {
+    return `${message}. The execution RPC refused this archive log request. Try a deployment transaction so the scan starts at the Station creation block, use a later from-block, or apply a browser-accessible custom RPC in Settings.`
+  }
+  return message
+}
+
+async function scanOldStreams({ stationAddress, publisher = '', fromBlock = '' } = {}) {
+  const target = await resolveArchiveStationTarget(stationAddress)
+  const station = target.station
+  if (els.archiveStation) els.archiveStation.value = station
+  const publisherAddress = publisher ? normalizeStationAddressInput(publisher) : ''
+  if (publisher && !publisherAddress) throw new Error('Publisher/channel must be a 20-byte address or explorer address URL.')
+  const head = BigInt(await rpc('eth_blockNumber'))
+  els.headBlock.textContent = head.toString()
+  const dateRange = await archiveDateBlockRange(head)
+  const useBlockInput = Boolean(fromBlock && !dateRange)
+  const deploymentBlock = target.deploymentBlock == null ? null : BigInt(target.deploymentBlock)
+  let from = useBlockInput ? parseBlockInput(fromBlock, 'Archive from-block') : (dateRange?.from ?? deploymentBlock ?? (head > BigInt(ARCHIVE_DEFAULT_WINDOW_BLOCKS) ? head - BigInt(ARCHIVE_DEFAULT_WINDOW_BLOCKS) : 0n))
+  let to = dateRange?.to ?? head
+  if (deploymentBlock != null && from < deploymentBlock) from = deploymentBlock
+  if (els.archiveFromBlock) els.archiveFromBlock.value = from.toString()
+  if (from < 0n || from > head) throw new Error(`From block must be between 0 and current head ${head}.`)
+  if (to < from || to > head) throw new Error(`Archive date range must resolve between block ${from} and current head ${head}.`)
+  if (to - from > BigInt(ARCHIVE_MAX_BLOCKS)) {
+    throw new Error(`Archive scans are capped at ${ARCHIVE_MAX_BLOCKS.toLocaleString()} blocks in the browser. Choose a newer from-block${target.txHash ? '' : ' or paste the Station deployment transaction so the creation block can be used'}.`)
+  }
+  state.archive.scanning = true
+  state.archive.cancel = false
+  state.archive.streams = []
+  state.archive.segmentsByKey = new Map()
+  if (els.archiveScan) els.archiveScan.disabled = true
+  renderArchive()
+  const allSegments = []
+  const totalBlocks = to - from + 1n
+  let scannedBlocks = 0n
+  setArchiveProgress(`Scanning blocks ${from.toString()}-${to.toString()}...`, { current: 0n, total: totalBlocks, active: true })
+  for (let start = from; start <= to; start += BigInt(ARCHIVE_SCAN_CHUNK_BLOCKS + 1)) {
+    if (state.archive.cancel) break
+    const end = start + BigInt(ARCHIVE_SCAN_CHUNK_BLOCKS) > to ? to : start + BigInt(ARCHIVE_SCAN_CHUNK_BLOCKS)
+    setArchiveProgress(`Scanning blocks ${start.toString()}-${end.toString()} of ${to.toString()}...`, {
+      current: start - from,
+      total: totalBlocks,
+      active: true,
+    })
+    let chunk
+    try {
+      chunk = await fetchSegmentLogsForStation(station, start, end, { publisher: publisherAddress })
+    } catch (error) {
+      throw new Error(`Archive scan failed for blocks ${start.toString()}-${end.toString()}: ${archiveScanErrorMessage(error)}`)
+    }
+    allSegments.push(...chunk)
+    state.archive.streams = groupOldStreamsFromSegmentPublishedLogs(allSegments)
+    state.archive.segmentsByKey = groupedArchiveSegments(allSegments)
+    scannedBlocks = end - from + 1n
+    setArchiveProgress(`Scanning blocks ${start.toString()}-${end.toString()} of ${to.toString()}...`, {
+      current: scannedBlocks,
+      total: totalBlocks,
+      active: true,
+    })
+    renderArchive()
+  }
+  state.archive.scanning = false
+  if (els.archiveScan) els.archiveScan.disabled = false
+  const stopped = state.archive.cancel
+  state.archive.cancel = false
+  if (els.archiveProgress) {
+    const message = stopped
+      ? `Stopped after discovering ${state.archive.streams.length} stream${state.archive.streams.length === 1 ? '' : 's'}.`
+      : `Discovered ${state.archive.streams.length} stream${state.archive.streams.length === 1 ? '' : 's'} from ${allSegments.length} segment log${allSegments.length === 1 ? '' : 's'}.`
+    setArchiveProgress(message, { current: stopped ? scannedBlocks : totalBlocks, total: totalBlocks, active: false })
+  }
+}
+
+function groupedArchiveSegments(segments) {
+  const byKey = new Map()
+  for (const segment of segments) {
+    const key = archiveStreamKey(segment)
+    const list = byKey.get(key) || []
+    list.push(segment)
+    byKey.set(key, list)
+  }
+  for (const list of byKey.values()) {
+    list.sort((a, b) =>
+      a.sequence - b.sequence ||
+      a.blockNumber - b.blockNumber ||
+      a.transactionIndex - b.transactionIndex ||
+      a.logIndex - b.logIndex)
+  }
+  return byKey
+}
+
+async function archiveSegmentsForWatch(key, summary) {
+  const existing = state.archive.segmentsByKey.get(key) || []
+  if (existing.length) return existing
+  if (state.archive.mode !== 'station') {
+    throw new Error('This inbox stream is no longer loaded in browser memory. Scan the inbox again, then choose Watch.')
+  }
+  const station = normalizeStationAddressInput(els.archiveStation?.value || state.config.stationAddress)
+  if (!station) throw new Error('Set the Station contract before watching this archived stream.')
+  const fromBlock = BigInt(summary.firstBlock)
+  const toBlock = BigInt(summary.latestBlock)
+  if (fromBlock > toBlock) throw new Error('Archived stream block range is invalid. Scan again and choose a stream.')
+  if (els.archiveProgress) {
+    setArchiveProgress(`Reloading "${summary.title}" segments from blocks ${fromBlock.toString()}-${toBlock.toString()}...`, {
+      current: 0n,
+      total: toBlock - fromBlock + 1n,
+      active: true,
+    })
+  }
+  const segments = await fetchSegmentLogsForStation(station, fromBlock, toBlock, {
+    streamId: summary.streamId,
+    publisher: summary.publisher,
+  })
+  const matching = segments.filter((segment) => archiveStreamKey(segment) === key)
+  if (!matching.length) {
+    throw new Error(`No segment logs for "${summary.title}" were found in blocks ${summary.firstBlock}-${summary.latestBlock}. Scan again with a wider range.`)
+  }
+  const nextGroups = groupedArchiveSegments([...state.archive.segmentsByKey.values()].flat().concat(matching))
+  state.archive.segmentsByKey = nextGroups
+  return nextGroups.get(key) || matching
+}
+
+function parseRfe1Envelope(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 8) return null
+  if (bytes[0] !== 0x52 || bytes[1] !== 0x46 || bytes[2] !== 0x45 || bytes[3] !== 0x31) return null
+  const headerLength = new DataView(bytes.buffer, bytes.byteOffset + 4, 4).getUint32(0, false)
+  const headerStart = 8
+  const headerEnd = headerStart + headerLength
+  if (!Number.isSafeInteger(headerLength) || headerLength <= 0 || headerEnd > bytes.length) return null
+  let header
+  try {
+    header = JSON.parse(new TextDecoder().decode(bytes.subarray(headerStart, headerEnd)))
+  } catch {
+    return null
+  }
+  if (!header || typeof header !== 'object' || Array.isArray(header)) return null
+  const payload = bytes.subarray(headerEnd)
+  const publisher = normalizeStationAddressInput(header.publisher)
+  const streamId = String(header.streamId || '').trim()
+  const sequence = Number(header.sequence)
+  const payloadSha256Hex = normalizeHex(header.payloadSha256 || '')
+  const streamIdHash = isBytes32Hex(header.streamIdHash) ? normalizeHex(header.streamIdHash) : ''
+  if (!publisher || !streamId || !Number.isSafeInteger(sequence) || sequence < 0 || !isBytes32Hex(payloadSha256Hex)) return null
+  const durationMs = Number(header.durationMs ?? 0)
+  const payloadBytes = Number(header.payloadBytes ?? payload.byteLength)
+  if (!Number.isSafeInteger(durationMs) || durationMs < 0) return null
+  if (!Number.isSafeInteger(payloadBytes) || payloadBytes < 0 || payloadBytes > payload.byteLength) return null
+  const previousSegmentHash = isBytes32Hex(header.previousSegmentHash) ? normalizeHex(header.previousSegmentHash) : `0x${'0'.repeat(64)}`
+  return {
+    header,
+    payload: payload.subarray(0, payloadBytes),
+    publisher,
+    streamId,
+    streamIdHash,
+    sequence,
+    durationMs,
+    payloadBytes,
+    payloadSha256Hex,
+    payloadSha256: strip0x(payloadSha256Hex),
+    codec: String(header.codec || 'video/webm').slice(0, 120),
+    previousSegmentHash,
+  }
+}
+
+async function blockBlobTransactions(blockNumber, inboxAddress) {
+  const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), true])
+  if (!block || typeof block !== 'object' || !Array.isArray(block.transactions)) {
+    throw new Error(`block ${blockNumber} response did not include transactions`)
+  }
+  const inbox = normalizeHex(inboxAddress)
+  const blockNumberValue = rpcQuantityNumber(block.number, 'inbox blockNumber')
+  const blockHash = isBytes32Hex(block.hash) ? normalizeHex(block.hash) : ''
+  const createdAt = new Date(timestampMsFromSeconds(block.timestamp, 'inbox block timestamp')).toISOString()
+  return block.transactions
+    .filter((tx) => normalizeHex(tx?.to) === inbox && txBlobVersionedHashes(tx).length)
+    .map((tx) => ({
+      tx,
+      blockNumber: blockNumberValue,
+      blockHash,
+      createdAt,
+      txHash: normalizeHex(tx.hash),
+      transactionIndex: rpcQuantityNumber(tx.transactionIndex, 'inbox transactionIndex'),
+      blobVersionedHashes: txBlobVersionedHashes(tx),
+    }))
+}
+
+async function inboxSegmentFromSidecar({ inboxAddress, txRecord, sidecar, logIndex }) {
+  const versionedHash = normalizeHex(sidecar.versionedHash)
+  if (!isBytes32Hex(versionedHash) || !isBlobHex(sidecar.blob)) return null
+  const envelopeBytes = await reconstructPayload({ blobVersionedHashes: [versionedHash], payloadBytes: 131072 }, { matches: [sidecar] })
+  const envelope = parseRfe1Envelope(envelopeBytes)
+  if (!envelope) return null
+  const actual = strip0x(await sha256Hex(envelope.payload))
+  if (actual !== envelope.payloadSha256) return null
+  const segment = {
+    app: 'eth-radio',
+    version: 1,
+    source: 'blob-inbox',
+    inboxAddress,
+    publisher: envelope.publisher,
+    streamIdHash: envelope.streamIdHash || `rfe1:${envelope.publisher}:${envelope.streamId}`,
+    sequence: envelope.sequence,
+    streamId: envelope.streamId,
+    durationMs: envelope.durationMs,
+    payloadBytes: envelope.payloadBytes,
+    payloadSha256Hex: envelope.payloadSha256Hex,
+    payloadSha256: envelope.payloadSha256,
+    codec: envelope.codec,
+    previousSegmentHash: envelope.previousSegmentHash,
+    blobVersionedHashes: [versionedHash],
+    txHash: txRecord.txHash,
+    transactionHash: txRecord.txHash,
+    blockNumber: txRecord.blockNumber,
+    blockHash: txRecord.blockHash,
+    transactionIndex: txRecord.transactionIndex,
+    logIndex,
+    slot: sidecarIndex(sidecar.slot ?? sidecar.index, 'inbox sidecar slot'),
+    createdAt: txRecord.createdAt,
+    embeddedPayload: envelope.payload,
+  }
+  segment.blobCount = segment.blobVersionedHashes.length
+  segment.cacheKey = `inbox:${normalizeHex(inboxAddress)}:${segment.streamId}:${segment.sequence}:${segment.txHash}:${versionedHash}`
+  return segment
+}
+
+async function scanBlobInboxStreams({ inboxAddress, publisher = '', streamId = '', fromBlock = '' } = {}) {
+  const inbox = normalizeStationAddressInput(inboxAddress)
+  if (!inbox) throw new Error('Blob inbox must be a 20-byte destination address or explorer address URL.')
+  if (els.archiveInbox) els.archiveInbox.value = inbox
+  const publisherAddress = publisher ? normalizeStationAddressInput(publisher) : ''
+  if (publisher && !publisherAddress) throw new Error('Publisher/channel must be a 20-byte address or explorer address URL.')
+  const head = BigInt(await rpc('eth_blockNumber'))
+  els.headBlock.textContent = head.toString()
+  const dateRange = await archiveDateBlockRange(head)
+  const useBlockInput = Boolean(fromBlock && !dateRange)
+  const recentWindow = Math.min(ARCHIVE_DEFAULT_WINDOW_BLOCKS, 2_000)
+  const from = useBlockInput ? parseBlockInput(fromBlock, 'Inbox from-block') : (dateRange?.from ?? (head > BigInt(recentWindow) ? head - BigInt(recentWindow) : 0n))
+  const to = dateRange?.to ?? head
+  if (els.archiveFromBlock) els.archiveFromBlock.value = from.toString()
+  if (from < 0n || from > head) throw new Error(`From block must be between 0 and current head ${head}.`)
+  if (to < from || to > head) throw new Error(`Inbox date range must resolve between block ${from} and current head ${head}.`)
+  if (to - from > BigInt(ARCHIVE_MAX_BLOCKS)) throw new Error(`Blob inbox scans are capped at ${ARCHIVE_MAX_BLOCKS.toLocaleString()} blocks in the browser. Choose a newer from-block.`)
+  state.archive.scanning = true
+  state.archive.cancel = false
+  state.archive.streams = []
+  state.archive.segmentsByKey = new Map()
+  if (els.archiveScan) els.archiveScan.disabled = true
+  renderArchive()
+  const allSegments = []
+  const totalBlocks = to - from + 1n
+  let scannedBlocks = 0n
+  setArchiveProgress(`Scanning inbox blocks ${from.toString()}-${to.toString()}...`, { current: 0n, total: totalBlocks, active: true })
+  for (let start = from; start <= to; start += BigInt(ARCHIVE_SCAN_CHUNK_BLOCKS + 1)) {
+    if (state.archive.cancel) break
+    const end = start + BigInt(ARCHIVE_SCAN_CHUNK_BLOCKS) > to ? to : start + BigInt(ARCHIVE_SCAN_CHUNK_BLOCKS)
+    setArchiveProgress(`Scanning inbox blocks ${start.toString()}-${end.toString()} of ${to.toString()}...`, {
+      current: start - from,
+      total: totalBlocks,
+      active: true,
+    })
+    for (let blockNumber = Number(start); blockNumber <= Number(end); blockNumber += 1) {
+      if (state.archive.cancel) break
+      let txRecords
+      try {
+        txRecords = await blockBlobTransactions(blockNumber, inbox)
+      } catch (error) {
+        throw new Error(`Inbox scan failed at block ${blockNumber}: ${archiveScanErrorMessage(error)}`)
+      }
+      for (const txRecord of txRecords) {
+        let slot
+        try {
+          slot = await segmentSlot({ txHash: txRecord.txHash })
+          const sidecarRecord = await sidecarsForSlot(slot)
+          const wanted = new Set(txRecord.blobVersionedHashes.map(normalizeHex))
+          let index = 0
+          for (const sidecar of sidecarRecord.sidecars.filter((candidate) => wanted.has(normalizeHex(candidate.versionedHash)))) {
+            const segment = await inboxSegmentFromSidecar({ inboxAddress: inbox, txRecord: { ...txRecord, slot }, sidecar: { ...sidecar, slot }, logIndex: index })
+            index += 1
+            if (!segment) continue
+            if (publisherAddress && normalizeHex(segment.publisher) !== publisherAddress) continue
+            if (streamId && segment.streamId !== streamId) continue
+            allSegments.push(segment)
+            state.verified.set(segment.cacheKey, {
+              cacheKey: segment.cacheKey,
+              streamId: segment.streamId,
+              sequence: segment.sequence,
+              txHash: segment.txHash,
+              payload: segment.embeddedPayload,
+              payloadSha256: segment.payloadSha256,
+              bytes: segment.embeddedPayload.byteLength,
+              codec: segment.codec,
+              slot,
+              source: 'blob-inbox',
+              verifiedAt: new Date().toISOString(),
+            })
+          }
+        } catch {
+        }
+      }
+      scannedBlocks = BigInt(blockNumber) - from + 1n
+      setArchiveProgress(`Scanning inbox block ${blockNumber} of ${to.toString()}...`, {
+        current: scannedBlocks,
+        total: totalBlocks,
+        active: true,
+      })
+      state.archive.streams = groupOldStreamsFromSegmentPublishedLogs(allSegments)
+      state.archive.segmentsByKey = groupedArchiveSegments(allSegments)
+      renderArchive()
+    }
+  }
+  state.archive.scanning = false
+  if (els.archiveScan) els.archiveScan.disabled = false
+  const stopped = state.archive.cancel
+  state.archive.cancel = false
+  if (els.archiveProgress) {
+    const message = stopped
+      ? `Stopped after discovering ${state.archive.streams.length} inbox stream${state.archive.streams.length === 1 ? '' : 's'}.`
+      : `Discovered ${state.archive.streams.length} inbox stream${state.archive.streams.length === 1 ? '' : 's'} from ${allSegments.length} compatible RFE1 segment${allSegments.length === 1 ? '' : 's'}.`
+    setArchiveProgress(message, { current: stopped ? scannedBlocks : totalBlocks, total: totalBlocks, active: false })
+  }
+}
+
+async function tuneArchiveStream(key) {
+  const summary = state.archive.streams.find((stream) => stream.key === key)
+  if (!summary) throw new Error('Archive stream is no longer available. Scan again and choose a stream.')
+  const segments = await archiveSegmentsForWatch(key, summary)
+  if (!segments.length) throw new Error('Archive stream is no longer available. Scan again and choose a stream.')
+  setStatus(`Watching ${state.archive.mode === 'inbox' ? 'blob inbox' : 'Station'} stream "${summary.title}"...`)
+  stopStreaming()
+  state.config = {
+    ...state.config,
+    stationAddress: normalizeStationAddressInput(els.archiveStation?.value) || state.config.stationAddress,
+    streamId: summary.streamId || state.config.streamId,
+    fromBlock: String(summary.firstBlock),
+  }
+  saveConfig(state.config)
+  resetRuntimeState()
+  state.anchor = { blockNumber: summary.firstBlock, order: segmentOrder(segments[0]), txHash: segments[0].txHash }
+  state.segments = segments
+  state.archive.tunedKey = key
+  state.selectedSegmentQuery = segments[0]?.txHash || ''
+  state.metadataUpdatedAt = new Date().toISOString()
+  state.playbackState = 'waiting'
+  state.segmentNotice = `Loaded ${segments.length} segment${segments.length === 1 ? '' : 's'} for "${summary.title}". Choose GET or a segment number to verify and play.`
+  fillForm()
+  syncUrlState()
+  render()
+  revealTunedStream()
+  setStatus(`Loaded "${summary.title}" with ${summary.segmentCount} segment${summary.segmentCount === 1 ? '' : 's'}. Choose GET or a segment number to verify and play.`)
+  await cacheSegmentMetadata(state.segments)
+  for (const segment of state.segments) {
+    try {
+      if (segment.source === 'blob-inbox' && segment.embeddedPayload instanceof Uint8Array) {
+        const record = await verifySegment(segment)
+        state.verified.set(segment.cacheKey, record)
+      } else {
+        const cached = await cachedSegment(segment.cacheKey)
+        if (cached) state.verified.set(segment.cacheKey, cached)
+      }
+    } catch (error) {
+      setStatus(`Loaded "${summary.title}", but segment #${segment.sequence} still needs manual verification: ${publicErrorMessage(error)}`)
+    }
+  }
+  await refreshCacheStats()
+  await refreshBlobspace()
+  render()
+  const ready = firstVerifiedRecord()
+  if (ready) {
+    state.segmentNotice = ''
+    playRecord(ready, { userRequested: true })
+    render()
+    setStatus(`Now watching "${summary.title}" from verified segment #${ready.sequence}.`)
+  } else {
+    prefetchWindow()
+    state.segmentNotice = `Loaded ${summary.segmentCount} segment${summary.segmentCount === 1 ? '' : 's'} for "${summary.title}". Choose GET/PLAY in Stream Segments to verify and replay.`
+    render()
+    setStatus(`Loaded "${summary.title}" with ${summary.segmentCount} segment${summary.segmentCount === 1 ? '' : 's'}. Choose GET/PLAY in Stream Segments to verify and replay.`)
+  }
 }
 
 function tuneToStream(stream, { reset = true } = {}) {
@@ -863,7 +1960,7 @@ function tuneToStream(stream, { reset = true } = {}) {
     resetRuntimeState()
     render()
   }
-  setStatus(`Tuned watcher to stream ${stream.streamId}${stream.sequence != null ? ` from segment #${stream.sequence}` : ''}.`)
+  setStatus(`Watching stream ${stream.streamId}${stream.sequence != null ? ` from segment #${stream.sequence}` : ''}.`)
   return true
 }
 
@@ -1216,7 +2313,7 @@ async function cacheSegmentMetadata(segments) {
     chainPreset: state.config.chainPreset,
     stationAddress: state.config.stationAddress,
     streamId: state.config.streamId,
-    segments,
+    segments: segments.map(({ embeddedPayload, ...segment }) => segment),
     updatedAt: new Date().toISOString(),
   }
   await putRecord('metadata', record)
@@ -1275,6 +2372,7 @@ async function clearCache() {
   await clearStore('sidecars')
   state.verified.clear()
   state.segments = []
+  state.segmentNotice = ''
   state.metadataUpdatedAt = ''
   state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
   state.sidecarMemoryCache.clear()
@@ -1347,6 +2445,28 @@ async function verifySegment(segment) {
       state.verified.delete(segment.cacheKey)
       setStatus(`Discarded cached segment #${segment.sequence}: ${publicErrorMessage(error)}`)
     }
+  }
+
+  if (segment.source === 'blob-inbox' && segment.embeddedPayload instanceof Uint8Array) {
+    await verifyPayloadHash(segment, segment.embeddedPayload)
+    const record = {
+      cacheKey: segment.cacheKey,
+      streamId: segment.streamId,
+      sequence: segment.sequence,
+      txHash: segment.txHash,
+      payload: segment.embeddedPayload,
+      payloadSha256: segment.payloadSha256,
+      bytes: segment.embeddedPayload.byteLength,
+      codec: segment.codec,
+      slot: segment.slot || null,
+      source: 'blob-inbox',
+      archiveUrl: null,
+      verifiedAt: new Date().toISOString(),
+    }
+    await putCachedSegment(record)
+    state.verified.set(segment.cacheKey, record)
+    await refreshCacheStats()
+    return record
   }
 
   let source = 'beacon'
@@ -1426,6 +2546,10 @@ function latestVerifiedRecord() {
   return [...state.verified.values()].sort((a, b) => a.sequence - b.sequence).at(-1)
 }
 
+function firstVerifiedRecord() {
+  return [...state.verified.values()].sort((a, b) => a.sequence - b.sequence)[0] || null
+}
+
 function nextVerifiedRecord(currentRecord) {
   return [...state.verified.values()]
     .filter((record) => record.sequence > currentRecord.sequence)
@@ -1469,6 +2593,13 @@ function prefetchWindow() {
 function warmNextSegment(record) {
   const nextSegment = nextSegmentAfter(record)
   if (nextSegment) void prefetchSegment(nextSegment)
+}
+
+function revealTunedStream() {
+  requestAnimationFrame(() => {
+    const target = document.querySelector('.segments-panel') || document.querySelector('.viewer-frame')
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
 }
 
 function streamBlobMap() {
@@ -1635,6 +2766,93 @@ function renderHealth() {
   els.beaconHealth.title = beacon.message || publicUrlLabel(state.activeBeaconApi)
 }
 
+function blobFeeAverageText(key) {
+  const entry = state.blobFees.averages[key] || state.blobFees.history[key]
+  if (!entry) return { text: '-', title: '' }
+  if (entry.status !== 'ok') {
+    return { text: entry.message || 'provider limited', title: '' }
+  }
+  return {
+    text: formatBlobFeeAmount(blobFeeWei(BigInt(entry.averageWei))),
+    title: `${formatWeiCompact(BigInt(entry.averageWei))} blob base fee`,
+  }
+}
+
+function formatBlobWindowUsage(entry) {
+  const blocks = Number(entry?.sampleBlocks || 0)
+  const blobs = Number(entry?.blobCount || 0)
+  if (!Number.isSafeInteger(blocks) || blocks <= 0 || !Number.isFinite(blobs)) return { text: '-', title: '' }
+  return {
+    text: `${blocks} blocks - ~${Math.round(blobs)} blobs`,
+    title: `Approximate total blobs observed in the selected window, derived from blobGasUsedRatio * ${MAX_BLOBS_PER_BLOCK} max blobs per block. Current mainnet target is ${TARGET_BLOBS_PER_BLOCK}; max is ${MAX_BLOBS_PER_BLOCK}.`,
+  }
+}
+
+function renderBlobFeeSparkline() {
+  if (!els.blobFeeSparkline) return
+  const samples = pruneBlobFeeSamples(state.blobFees.samples).slice(-80)
+  if (samples.length < 2) {
+    els.blobFeeSparkline.innerHTML = ''
+    return
+  }
+  const values = samples.map((sample) => BigInt(sample.baseFeePerBlobGasWei))
+  const max = values.reduce((largest, value) => value > largest ? value : largest, 0n)
+  if (max === 0n) {
+    els.blobFeeSparkline.innerHTML = ''
+    return
+  }
+  const points = values.map((value, index) => {
+    const x = samples.length === 1 ? 0 : Math.round((index / (samples.length - 1)) * 1000) / 10
+    const y = 32 - Number((value * 30n) / max)
+    return `${x},${y}`
+  }).join(' ')
+  els.blobFeeSparkline.innerHTML = `<svg viewBox="0 0 100 34" preserveAspectRatio="none" aria-hidden="true"><polyline points="${points}"></polyline></svg>`
+}
+
+function renderBlobFees() {
+  if (!els.blobFeeStatus) return
+  const current = state.blobFees.currentBaseFeeWei != null ? BigInt(state.blobFees.currentBaseFeeWei) : null
+  const perBlob = state.blobFees.currentBlobFeeWei != null ? BigInt(state.blobFees.currentBlobFeeWei) : null
+  const selectedWindow = state.blobFeePrefs.historyWindow
+  const selectedAverage = blobFeeAverageText(selectedWindow)
+  els.blobFeeStatus.textContent = state.blobFees.loading ? 'Updating' : state.blobFees.status
+  els.blobFeeStatus.dataset.state = String(state.blobFees.status || 'Unavailable').toLowerCase()
+  if (els.blobFeeUnit) {
+    els.blobFeeUnit.innerHTML = Object.entries(BLOB_FEE_UNITS)
+      .map(([key, label]) => `<option value="${key}">${escapeHtml(label)}</option>`)
+      .join('')
+    els.blobFeeUnit.value = state.blobFeePrefs.unit
+  }
+  if (els.blobFeeWindow) {
+    els.blobFeeWindow.innerHTML = Object.entries(BLOB_FEE_HISTORY_WINDOWS)
+      .map(([key, config]) => `<option value="${key}">${escapeHtml(config.label)}</option>`)
+      .join('')
+    els.blobFeeWindow.value = selectedWindow
+  }
+  if (els.blobFeeBase) els.blobFeeBase.textContent = formatWeiCompact(current)
+  if (els.blobFeePerBlob) els.blobFeePerBlob.textContent = formatBlobFeeAmount(perBlob)
+  if (els.blobFeeAverageLabel) {
+    els.blobFeeAverageLabel.textContent = BLOB_FEE_HISTORY_WINDOWS[selectedWindow]?.label || 'Average'
+  }
+  if (els.blobFeeAverage) {
+    els.blobFeeAverage.textContent = selectedAverage.text
+    els.blobFeeAverage.title = selectedAverage.title
+  }
+  if (els.blobFeeUtilization) {
+    const selectedEntry = state.blobFees.averages[selectedWindow] || state.blobFees.history[selectedWindow]
+    const usageDisplay = formatBlobWindowUsage(selectedEntry)
+    els.blobFeeUtilization.textContent = usageDisplay.text
+    els.blobFeeUtilization.title = usageDisplay.title
+  }
+  if (els.blobFeeUpdated) {
+    els.blobFeeUpdated.textContent = state.blobFees.updatedAt ? fmtClock(new Date(state.blobFees.updatedAt)) : '-'
+  }
+  if (els.blobFeeMessage) {
+    els.blobFeeMessage.textContent = state.blobFees.message || (state.layoutSettings.blobFees?.visible ? 'Using configured execution RPC.' : 'Enable in Settings to start polling.')
+  }
+  renderBlobFeeSparkline()
+}
+
 function endpointMode() {
   const preset = CHAIN_PRESETS[state.config.chainPreset] || CHAIN_PRESETS[DEFAULTS.chainPreset]
   return sameList(state.config.executionRpcs, preset.executionRpcs)
@@ -1680,6 +2898,22 @@ function playbackStateLabel() {
   return labels[state.playbackState] || 'waiting for next slot'
 }
 
+function renderEmptyState({ activeRecord, latestSegment, health, tunedSummary }) {
+  if (!els.empty) return
+  els.empty.classList.toggle('hidden', Boolean(activeRecord))
+  if (activeRecord) return
+  const title = els.empty.querySelector('strong')
+  const detail = els.empty.querySelector('span')
+  if (!title || !detail) return
+  if (state.segments.length) {
+    title.textContent = tunedSummary ? `Ready to watch ${tunedSummary.title}` : 'Stream segments loaded'
+    detail.textContent = `${state.segments.length} segment${state.segments.length === 1 ? '' : 's'} loaded. Choose GET or a segment number in Stream Segments to verify and play.`
+    return
+  }
+  title.textContent = 'No recent station signal'
+  detail.textContent = 'No recent segment announcements are available. The viewer stays idle until Ethereum carries new blobs for this stream.'
+}
+
 function streamHealthSummary(latestSegment) {
   const activeRecord = currentRecord()
   if (!state.config.executionRpcs.length || !state.config.beaconApis.length) return 'endpoint-blocked'
@@ -1706,9 +2940,290 @@ function playbackSourceLabel(record) {
   return 'cache / verified'
 }
 
+function applyLayoutPreset() {
+  const preset = loadLayoutPresetFromValue(state.layoutPreset)
+  const settings = normalizeLayoutSettings(state.layoutSettings)
+  if (els.shell) els.shell.dataset.layout = preset
+  if (els.shell) {
+    const visiblePositions = Object.values(settings).filter((panel) => panel.visible).map((panel) => panel.position)
+    els.shell.dataset.leftRail = visiblePositions.includes('left') ? 'true' : 'false'
+    els.shell.dataset.rightRail = visiblePositions.includes('right') ? 'true' : 'false'
+    els.shell.dataset.bottomSpan = settings.bottomSpan
+  }
+  const bottomSlots = Object.entries(settings)
+    .filter(([, config]) => config && config.visible && config.position === 'bottom')
+    .sort((a, b) => a[1].order - b[1].order)
+    .map(([panel]) => panel)
+  for (const [panel, element] of Object.entries(els.panelZones)) {
+    const config = settings[panel]
+    if (!element || !config) continue
+    element.hidden = !config.visible
+    const bottomIndex = bottomSlots.indexOf(panel)
+    element.style.gridArea = bottomIndex >= 0 ? `bottom${bottomIndex + 1}` : config.position
+    element.style.order = String(config.order)
+    element.dataset.panelPosition = config.position
+  }
+  renderLayoutControls()
+  if ((preset === 'archive-side' || preset === 'archive-bottom') && els.archiveDetails) {
+    els.archiveDetails.open = true
+  }
+  startBlobFeeTracker()
+}
+
+function renderLayoutControls() {
+  const settings = normalizeLayoutSettings(state.layoutSettings)
+  for (const select of els.panelPosition) {
+    const panel = select.dataset.panelPosition
+    select.innerHTML = Object.entries(PANEL_POSITIONS)
+      .map(([value, label]) => `<option value="${value}">${label}</option>`)
+      .join('')
+    select.value = settings[panel]?.position || 'main'
+  }
+  for (const select of els.panelOrder) {
+    const panel = select.dataset.panelOrder
+    select.innerHTML = [1, 2, 3, 4].map((value) => `<option value="${value}">${value}</option>`).join('')
+    select.value = String(settings[panel]?.order || 1)
+  }
+  for (const input of els.panelShow) {
+    const panel = input.dataset.panelShow
+    input.checked = settings[panel]?.visible !== false
+  }
+  if (els.layoutPresets) {
+    for (const button of els.layoutPresets.querySelectorAll('[data-layout-preset]')) {
+      button.classList.toggle('active', button.dataset.layoutPreset === state.layoutPreset)
+    }
+  }
+  if (els.layoutBottomSpan) els.layoutBottomSpan.value = settings.bottomSpan
+}
+
+function renderClockControls() {
+  if (els.clockMode) els.clockMode.value = state.clock.mode
+  if (els.clockTimeZone) {
+    els.clockTimeZone.value = state.clock.timeZone
+    els.clockTimeZone.disabled = state.clock.mode !== 'timezone'
+  }
+  if (els.utcClock) els.utcClock.textContent = fmtClock()
+}
+
+function openSettings(tab = 'appearance') {
+  if (!els.settingsModal) return
+  els.settingsModal.hidden = false
+  document.body.classList.add('settings-open')
+  showSettingsTab(tab)
+}
+
+function closeSettings() {
+  if (!els.settingsModal) return
+  els.settingsModal.hidden = true
+  document.body.classList.remove('settings-open')
+}
+
+function showSettingsTab(tab) {
+  for (const button of els.settingsTabs) {
+    const active = button.dataset.settingsTab === tab
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-selected', active ? 'true' : 'false')
+  }
+  for (const panel of els.settingsPanels) {
+    panel.hidden = panel.dataset.settingsPanel !== tab
+  }
+}
+
+function currentStreamFavorite() {
+  const latestSegment = [...state.segments].sort((a, b) => b.sequence - a.sequence)[0]
+  return normalizeFavoriteItem({
+    type: 'stream',
+    stationAddress: state.config.stationAddress,
+    publisher: latestSegment?.publisher || '',
+    streamId: state.config.streamId,
+    streamIdHash: latestSegment?.streamIdHash || '',
+    label: state.config.streamId,
+  })
+}
+
+function currentChannelFavorite() {
+  const latestSegment = [...state.segments].sort((a, b) => b.sequence - a.sequence)[0]
+  if (!latestSegment?.publisher) return null
+  return normalizeFavoriteItem({
+    type: 'channel',
+    stationAddress: state.config.stationAddress,
+    publisher: latestSegment.publisher,
+    label: shortHash(latestSegment.publisher),
+  })
+}
+
+function upsertFavorite(item) {
+  const favorite = normalizeFavoriteItem(item)
+  if (!favorite) throw new Error('Nothing valid to save yet.')
+  const existing = state.favorites.find((candidate) => candidate.id === favorite.id)
+  if (existing) {
+    existing.label = favorite.label || existing.label
+    existing.firstBlock = favorite.firstBlock ?? existing.firstBlock ?? null
+    existing.latestBlock = favorite.latestBlock ?? existing.latestBlock ?? null
+  } else {
+    state.favorites.unshift(favorite)
+  }
+  saveFavorites()
+  renderFavorites()
+  return favorite
+}
+
+function favoriteLabel(item) {
+  if (item.label) return item.label
+  if (item.type === 'station') return `Station ${shortHash(item.stationAddress)}`
+  if (item.type === 'channel') return `Channel ${shortHash(item.publisher)}`
+  if (item.type === 'inbox') return `Inbox ${shortHash(item.inboxAddress)}`
+  if (item.type === 'inbox-channel') return `Inbox channel ${shortHash(item.publisher)}`
+  return item.streamId || shortHash(item.streamIdHash)
+}
+
+function renderFavorites() {
+  if (!els.favoritesList) return
+  if (!state.favorites.length) {
+    els.favoritesList.innerHTML = '<div class="empty-row">No local favorites saved yet</div>'
+    return
+  }
+  els.favoritesList.innerHTML = state.favorites.map((item) => `
+    <section class="favorite-row" data-favorite-id="${escapeHtml(item.id)}">
+      <div>
+        <strong>${escapeHtml(favoriteLabel(item))}</strong>
+        <span>${escapeHtml(item.type)} · ${escapeHtml(shortHash(item.stationAddress || item.inboxAddress))}${item.publisher ? ` · ${escapeHtml(shortHash(item.publisher))}` : ''}</span>
+      </div>
+      <button type="button" data-favorite-action="tune">Watch</button>
+      <button type="button" data-favorite-action="rename">Rename</button>
+      <button type="button" data-favorite-action="remove">Remove</button>
+    </section>
+  `).join('')
+}
+
+function renderArchive() {
+  if (!els.archiveResults) return
+  renderArchiveMode()
+  if (els.archiveStation && !els.archiveStation.value) els.archiveStation.value = state.config.stationAddress
+  if (!state.archive.streams.length) {
+    els.archiveResults.innerHTML = `<div class="empty-row">${state.archive.mode === 'inbox' ? 'No compatible inbox streams discovered in this scan' : 'No old streams discovered in this scan'}</div>`
+    return
+  }
+  els.archiveResults.innerHTML = state.archive.streams.map((stream) => {
+    const tuned = state.archive.tunedKey === stream.key
+    return `
+    <section class="archive-stream ${tuned ? 'active' : ''}" data-archive-key="${escapeHtml(stream.key)}">
+      <div>
+        <strong>${escapeHtml(stream.title)}${tuned ? ' · watching' : ''}</strong>
+        <span>${state.archive.mode === 'inbox' ? 'inbox stream' : 'station stream'} · publisher ${escapeHtml(shortHash(stream.publisher))}</span>
+        <span>segments ${escapeHtml(stream.segmentCount)} · seq ${escapeHtml(stream.firstSequence)}-${escapeHtml(stream.latestSequence)} · blocks ${escapeHtml(stream.firstBlock)}-${escapeHtml(stream.latestBlock)}</span>
+      </div>
+      <button type="button" data-archive-action="tune">${tuned ? 'View segments' : 'Watch'}</button>
+      <button type="button" data-archive-action="save">Save</button>
+    </section>
+  `}).join('')
+}
+
+function renderArchiveMode() {
+  for (const button of els.archiveModeButtons) {
+    const active = button.dataset.archiveMode === state.archive.mode
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-pressed', active ? 'true' : 'false')
+  }
+  for (const field of els.archiveModeFields) {
+    field.hidden = field.dataset.archiveField !== state.archive.mode
+  }
+  if (els.archiveFromDate && els.archiveToDate && !els.archiveFromDate.value && !els.archiveToDate.value) {
+    const now = new Date()
+    const hours = state.archive.mode === 'inbox' ? 2 : 24
+    els.archiveToDate.value = datetimeLocalValue(now)
+    els.archiveFromDate.value = datetimeLocalValue(new Date(now.getTime() - hours * 60 * 60 * 1000))
+  }
+  if (els.archiveProgress && !state.archive.scanning) {
+    resetArchiveProgress(state.archive.mode === 'inbox'
+      ? 'Scan recent blob transactions sent to an inbox and detect compatible RFE1 streams.'
+      : 'Scan a bounded block range to discover prior Station streams.')
+  }
+}
+
+function tunedArchiveSummary() {
+  return state.archive.tunedKey
+    ? state.archive.streams.find((stream) => stream.key === state.archive.tunedKey) || null
+    : null
+}
+
+async function watchStationFavorite(item) {
+  const summary = {
+    key: archiveStreamKey({
+      publisher: item.publisher,
+      streamIdHash: item.streamIdHash,
+      streamId: item.streamId,
+    }),
+    publisher: item.publisher,
+    streamIdHash: item.streamIdHash,
+    streamId: item.streamId,
+    title: favoriteLabel(item),
+    segmentCount: 0,
+    firstSequence: 0,
+    latestSequence: 0,
+    firstBlock: item.firstBlock,
+    latestBlock: item.latestBlock,
+  }
+  state.archive.mode = 'station'
+  state.archive.tunedKey = summary.key
+  if (!state.archive.streams.some((stream) => stream.key === summary.key)) {
+    state.archive.streams.unshift(summary)
+  }
+  if (els.archiveStation) els.archiveStation.value = item.stationAddress
+  if (els.archivePublisher) els.archivePublisher.value = item.publisher || ''
+  const segments = await archiveSegmentsForWatch(summary.key, summary)
+  summary.segmentCount = segments.length
+  summary.firstSequence = Math.min(...segments.map((segment) => segment.sequence))
+  summary.latestSequence = Math.max(...segments.map((segment) => segment.sequence))
+  summary.firstBlock = Math.min(...segments.map((segment) => segment.blockNumber))
+  summary.latestBlock = Math.max(...segments.map((segment) => segment.blockNumber))
+  await tuneArchiveStream(summary.key)
+}
+
+function tuneFavorite(item) {
+  if (!item) return
+  if (item.type.startsWith('inbox')) {
+    state.archive.mode = 'inbox'
+    if (els.archiveInbox) els.archiveInbox.value = item.inboxAddress
+    if (els.archivePublisher) els.archivePublisher.value = item.publisher || ''
+    if (els.archiveStreamFilter) els.archiveStreamFilter.value = item.streamId || ''
+    renderArchiveMode()
+    setStatus(`${favoriteLabel(item)} selected. Scan the saved blob inbox to find recent compatible segments.`)
+    return
+  }
+  state.config = {
+    ...state.config,
+    stationAddress: item.stationAddress,
+    streamId: item.streamId || state.config.streamId,
+  }
+  saveConfig(state.config)
+  resetRuntimeState()
+  fillForm()
+  if (els.archiveStation) els.archiveStation.value = item.stationAddress
+  if (els.archivePublisher) els.archivePublisher.value = item.publisher || ''
+  render()
+  if (item.type === 'stream') {
+    if (item.firstBlock != null && item.latestBlock != null) {
+      state.segmentNotice = `Loading saved stream "${favoriteLabel(item)}" from blocks ${item.firstBlock}-${item.latestBlock}...`
+      render()
+      void watchStationFavorite(item).catch((error) => {
+        const message = publicErrorMessage(error)
+        state.segmentNotice = message
+        setStatus(message)
+        render()
+      })
+    } else {
+      void refresh()
+    }
+  } else {
+    setStatus(`${favoriteLabel(item)} selected. Use Watch old streams to scan this saved ${item.type}.`)
+  }
+}
+
 function render() {
   const activeRecord = currentRecord()
   const latestSegment = [...state.segments].sort((a, b) => a.sequence - b.sequence).at(-1) || null
+  const tunedSummary = tunedArchiveSummary()
   els.knownCount.textContent = String(state.segments.length)
   els.verifiedCount.textContent = String(state.verified.size)
   els.metadataAge.textContent = fmtAge(state.metadataUpdatedAt)
@@ -1717,9 +3232,17 @@ function render() {
   els.streamHealth.title = `Playback: ${playbackStateLabel()}`
   els.streamToggle.textContent = state.streaming ? 'LIVE' : 'LIVE'
   els.streamToggle.classList.toggle('active', state.streaming)
+  const currentFavorite = currentStreamFavorite()
+  const streamSaved = currentFavorite ? state.favorites.some((item) => item.id === currentFavorite.id) : false
+  if (els.favoriteStream) {
+    els.favoriteStream.textContent = streamSaved ? '★' : '☆'
+    els.favoriteStream.setAttribute('aria-pressed', streamSaved ? 'true' : 'false')
+    els.favoriteStream.title = streamSaved ? 'Current stream saved' : 'Save current stream'
+  }
   els.loopToggle?.classList.toggle('active', state.loopReplay)
   const stationOnline = Boolean(activeRecord)
-  els.stationState.textContent = stationOnline ? 'LIVE' : 'OFFLINE'
+  const stationLoaded = !stationOnline && Boolean(latestSegment)
+  els.stationState.textContent = stationOnline ? 'LIVE' : stationLoaded ? 'LOADED' : 'OFFLINE'
   document.querySelector('.status-badge')?.classList.toggle('online', stationOnline)
   els.networkLabel.textContent = CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset
   const stationUrl = stationExplorerUrl()
@@ -1742,7 +3265,10 @@ function render() {
   els.nowTitle.textContent = activeRecord ? `${playbackStateLabel()} segment #${activeRecord.sequence}` : playbackStateLabel()
   els.nowDetail.textContent = activeRecord
     ? `Stream health: ${health}. Payload source: ${playbackSourceLabel(activeRecord)}.`
-    : `Stream health: ${health}. Execution RPC announces segments; beacon sidecars carry the bytes.`
+    : latestSegment
+      ? `Stream health: ${health}. Segment metadata is loaded; verify a segment to start playback.`
+      : `Stream health: ${health}. Execution RPC announces segments; beacon sidecars carry the bytes.`
+  renderEmptyState({ activeRecord, latestSegment, health, tunedSummary })
   els.metricSegment.textContent = activeRecord ? `#${activeRecord.sequence}` : latestSegment ? `#${latestSegment.sequence}` : '-'
   els.metricPayload.textContent = activeRecord ? fmtBytes(activeRecord.bytes) : latestSegment ? fmtBytes(latestSegment.payloadBytes) : '-'
   els.metricBlobs.textContent = latestSegment ? String(latestSegment.blobCount || '-') : '-'
@@ -1751,21 +3277,34 @@ function render() {
   renderHealth()
   renderEndpointSetup()
   renderBlobspace()
-  els.segments.innerHTML = state.segments.map((segment) => {
+  renderBlobFees()
+  renderArchive()
+  renderFavorites()
+  if (els.segmentsTitle) {
+    els.segmentsTitle.textContent = tunedSummary
+      ? `Stream Segments · ${tunedSummary.title}`
+      : `Stream Segments${state.config.streamId ? ` · ${state.config.streamId}` : ''}`
+  }
+  const segmentNotice = state.segmentNotice
+    ? `<div class="segment-notice">${escapeHtml(state.segmentNotice)}</div>`
+    : ''
+  const segmentRows = state.segments.map((segment) => {
     const record = state.verified.get(segment.cacheKey)
     const queued = state.prefetching.has(segment.cacheKey)
     const timeBlock = segmentTimeBlock(segment)
     const txLabel = middleEllipsis(segment.txHash, 8, 6)
+    const active = activeRecord?.cacheKey === segment.cacheKey
     return `
-      <section class="segment-row ${record ? 'verified' : ''}">
+      <section class="segment-row ${record ? 'verified' : ''} ${active ? 'active' : ''}" data-segment-key="${escapeHtml(segment.cacheKey)}">
         <button class="segment-jump" type="button" data-jump-key="${escapeHtml(segment.cacheKey)}">#${escapeHtml(segment.sequence)}</button>
         <span class="segment-time"><time>${escapeHtml(timeBlock.time)}</time><small>${escapeHtml(timeBlock.block)}</small></span>
         <a class="tx-link" href="${escapeHtml(explorerTxUrl(segment.txHash))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(segment.txHash)}">${escapeHtml(txLabel)}</a>
         <span>${escapeHtml(segment.blobCount)}</span>
-        <button type="button" data-key="${escapeHtml(segment.cacheKey)}">${record ? 'PLAY' : queued ? '...' : 'GET'}</button>
+        <button type="button" data-key="${escapeHtml(segment.cacheKey)}">${active ? 'NOW' : record ? 'PLAY' : queued ? '...' : 'GET'}</button>
       </section>
     `
-  }).join('') || '<div class="empty-row">No stream segments yet</div>'
+  }).join('')
+  els.segments.innerHTML = segmentNotice + (segmentRows || '<div class="empty-row">No stream segments yet</div>')
 }
 
 async function refresh() {
@@ -1779,6 +3318,7 @@ async function refresh() {
   if (!state.anchor) {
     state.segments = []
     state.verified.clear()
+    state.segmentNotice = ''
     state.metadataUpdatedAt = ''
     state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
     render()
@@ -1875,6 +3415,7 @@ function resetRuntimeState() {
   state.anchor = null
   state.segments = []
   state.verified.clear()
+  state.segmentNotice = ''
   state.sidecarMemoryCache.clear()
   state.activeExecutionRpc = ''
   state.activeBeaconApi = ''
@@ -1884,6 +3425,7 @@ function resetRuntimeState() {
   }
   state.metadataUpdatedAt = ''
   state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
+  state.blobFees = { ...loadBlobFeeSamples(), samples: state.blobFees.samples }
   els.refresh.disabled = false
   els.refresh.classList.remove('is-spinning')
   els.headBlock.textContent = '-'
@@ -2131,6 +3673,239 @@ on(els.clearCache, 'click', () => void clearCache().then(() => setStatus('Browse
 on(els.themeToggle, 'click', () => {
   setTheme(document.body.classList.contains('light') ? 'dark' : 'light')
 })
+on(els.settingsToggle, 'click', () => openSettings('appearance'))
+on(els.settingsClose, 'click', closeSettings)
+on(els.settingsModal, 'click', (event) => {
+  if (event.target.closest('[data-settings-close]')) closeSettings()
+})
+on(document, 'keydown', (event) => {
+  if (event.key === 'Escape' && els.settingsModal && !els.settingsModal.hidden) closeSettings()
+})
+on(document, 'visibilitychange', () => startBlobFeeTracker())
+for (const button of els.settingsTabs) {
+  on(button, 'click', () => showSettingsTab(button.dataset.settingsTab))
+}
+on(els.layoutPresets, 'click', (event) => {
+  const button = event.target.closest('[data-layout-preset]')
+  if (!button) return
+  saveLayoutPreset(button.dataset.layoutPreset)
+  setStatus(`Layout preset applied: ${button.textContent.trim()}.`)
+})
+for (const input of els.panelShow) {
+  on(input, 'change', () => {
+    const panel = input.dataset.panelShow
+    const nextConfig = { ...state.layoutSettings[panel], visible: input.checked }
+    if (panel === 'blobFees' && input.checked && state.layoutSettings[panel]?.visible === false) {
+      nextConfig.position = 'bottom'
+      nextConfig.order = 2
+    }
+    state.layoutSettings[panel] = nextConfig
+    saveLayoutSettings()
+    applyLayoutPreset()
+    setStatus(`${PANEL_LABELS[panel]} ${input.checked ? 'shown' : 'hidden'}.`)
+  })
+}
+for (const select of els.panelPosition) {
+  on(select, 'change', () => {
+    const panel = select.dataset.panelPosition
+    state.layoutSettings[panel] = { ...state.layoutSettings[panel], position: select.value }
+    state.layoutPreset = 'custom'
+    localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+    saveLayoutSettings()
+    applyLayoutPreset()
+    setStatus(`${PANEL_LABELS[panel]} moved to ${PANEL_POSITIONS[select.value]}.`)
+  })
+}
+for (const select of els.panelOrder) {
+  on(select, 'change', () => {
+    const panel = select.dataset.panelOrder
+    state.layoutSettings[panel] = { ...state.layoutSettings[panel], order: Number(select.value) }
+    state.layoutPreset = 'custom'
+    localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+    saveLayoutSettings()
+    applyLayoutPreset()
+    setStatus(`${PANEL_LABELS[panel]} order set to ${select.value}.`)
+  })
+}
+on(els.layoutBottomSpan, 'change', () => {
+  state.layoutSettings = { ...state.layoutSettings, bottomSpan: els.layoutBottomSpan.value }
+  state.layoutPreset = 'custom'
+  localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+  saveLayoutSettings()
+  applyLayoutPreset()
+  setStatus(els.layoutBottomSpan.value === 'full'
+    ? 'Bottom panels now stretch to the page edges.'
+    : 'Side rails now keep the lower corner space.')
+})
+on(els.clockMode, 'change', () => {
+  state.clock = { ...state.clock, mode: els.clockMode.value }
+  saveClockPrefs()
+  renderClockControls()
+  renderBlobFees()
+})
+on(els.clockTimeZone, 'input', () => {
+  state.clock = { ...state.clock, timeZone: els.clockTimeZone.value.trim() }
+  saveClockPrefs()
+  renderClockControls()
+  renderBlobFees()
+})
+on(els.blobFeeUnit, 'change', () => {
+  state.blobFeePrefs = { ...state.blobFeePrefs, unit: els.blobFeeUnit.value }
+  saveBlobFeePrefs()
+  renderBlobFees()
+})
+on(els.blobFeeWindow, 'change', () => {
+  state.blobFeePrefs = { ...state.blobFeePrefs, historyWindow: els.blobFeeWindow.value }
+  saveBlobFeePrefs()
+  renderBlobFees()
+})
+on(els.favoriteStream, 'click', () => {
+  try {
+    const favorite = upsertFavorite(currentStreamFavorite())
+    setStatus(`Saved stream favorite: ${favoriteLabel(favorite)}.`)
+    render()
+  } catch (error) {
+    setStatus(publicErrorMessage(error))
+  }
+})
+on(els.favoriteStation, 'click', () => {
+  try {
+    const favorite = upsertFavorite({
+      type: 'station',
+      stationAddress: state.config.stationAddress,
+      label: `Station ${shortHash(state.config.stationAddress)}`,
+    })
+    setStatus(`Saved Station favorite: ${favoriteLabel(favorite)}.`)
+  } catch (error) {
+    setStatus('Set a Station address before saving it.')
+  }
+})
+on(els.favoriteChannel, 'click', () => {
+  try {
+    const favorite = upsertFavorite(currentChannelFavorite())
+    setStatus(`Saved channel favorite: ${favoriteLabel(favorite)}.`)
+  } catch (error) {
+    setStatus('Load stream metadata before saving a publisher/channel favorite.')
+  }
+})
+for (const button of els.archiveModeButtons) {
+  on(button, 'click', () => {
+    state.archive.mode = button.dataset.archiveMode || 'station'
+    state.archive.streams = []
+    state.archive.segmentsByKey = new Map()
+    renderArchive()
+  })
+}
+on(els.archiveScanForm, 'submit', (event) => {
+  event.preventDefault()
+  const scan = state.archive.mode === 'inbox'
+    ? scanBlobInboxStreams({
+      inboxAddress: els.archiveInbox.value,
+      publisher: els.archivePublisher.value,
+      streamId: els.archiveStreamFilter.value.trim(),
+      fromBlock: els.archiveFromBlock.value.trim(),
+    })
+    : scanOldStreams({
+      stationAddress: els.archiveStation.value,
+      publisher: els.archivePublisher.value,
+      fromBlock: els.archiveFromBlock.value.trim(),
+    })
+  void scan.catch((error) => {
+    state.archive.scanning = false
+    if (els.archiveScan) els.archiveScan.disabled = false
+    resetArchiveProgress(archiveScanErrorMessage(error))
+    renderArchive()
+  })
+})
+on(els.archiveStop, 'click', () => {
+  state.archive.cancel = true
+  setArchiveProgress('Stopping after the current chunk...', {
+    current: BigInt(Math.round(Number(els.archiveProgressBar?.value || 0))),
+    total: 100n,
+    active: true,
+  })
+})
+on(els.archiveResults, 'click', (event) => {
+  const row = event.target.closest('[data-archive-key]')
+  const button = event.target.closest('[data-archive-action]')
+  if (!row || !button) return
+  const stream = state.archive.streams.find((candidate) => candidate.key === row.dataset.archiveKey)
+  if (!stream) return
+  if (button.dataset.archiveAction === 'save') {
+    try {
+      const favorite = upsertFavorite(state.archive.mode === 'inbox'
+        ? {
+          type: 'inbox-stream',
+          inboxAddress: els.archiveInbox.value,
+          publisher: stream.publisher,
+          streamId: stream.streamId,
+          streamIdHash: stream.streamIdHash,
+          firstBlock: stream.firstBlock,
+          latestBlock: stream.latestBlock,
+          label: stream.title,
+        }
+        : {
+          type: 'stream',
+          stationAddress: els.archiveStation.value || state.config.stationAddress,
+          publisher: stream.publisher,
+          streamId: stream.streamId,
+          streamIdHash: stream.streamIdHash,
+          firstBlock: stream.firstBlock,
+          latestBlock: stream.latestBlock,
+          label: stream.title,
+        })
+      setStatus(`Saved stream favorite: ${favoriteLabel(favorite)}.`)
+    } catch (error) {
+      setStatus(publicErrorMessage(error))
+    }
+    return
+  }
+  if (state.archive.tunedKey === row.dataset.archiveKey && state.segments.length) {
+    revealTunedStream()
+    setStatus(`Showing watched stream "${stream.title}" in Stream Segments.`)
+    return
+  }
+  button.disabled = true
+  const previousText = button.textContent
+  button.textContent = 'Watching...'
+  setStatus(`Watching "${stream.title}"...`)
+  void tuneArchiveStream(row.dataset.archiveKey)
+    .catch((error) => {
+      const message = publicErrorMessage(error)
+      state.segmentNotice = message
+      setStatus(message)
+      render()
+    })
+    .finally(() => {
+      button.disabled = false
+      button.textContent = previousText
+      renderArchive()
+    })
+})
+on(els.favoritesList, 'click', (event) => {
+  const row = event.target.closest('[data-favorite-id]')
+  const button = event.target.closest('[data-favorite-action]')
+  if (!row || !button) return
+  const favorite = state.favorites.find((item) => item.id === row.dataset.favoriteId)
+  if (!favorite) return
+  if (button.dataset.favoriteAction === 'remove') {
+    state.favorites = state.favorites.filter((item) => item.id !== favorite.id)
+    saveFavorites()
+    renderFavorites()
+    setStatus(`Removed favorite: ${favoriteLabel(favorite)}.`)
+    return
+  }
+  if (button.dataset.favoriteAction === 'rename') {
+    const label = window.prompt('Local favorite label', favoriteLabel(favorite))
+    if (label == null) return
+    favorite.label = String(label).trim().slice(0, 80)
+    saveFavorites()
+    renderFavorites()
+    setStatus(`Renamed favorite: ${favoriteLabel(favorite)}.`)
+    return
+  }
+  tuneFavorite(favorite)
+})
 on(els.player, 'ended', () => {
   const current = currentRecord()
   if (!state.streaming) {
@@ -2256,12 +4031,15 @@ on(els.segments, 'click', async (event) => {
 })
 
 setInterval(() => {
-  els.utcClock.textContent = fmtUtcClock()
+  if (els.utcClock) els.utcClock.textContent = fmtClock()
 }, 1000)
-els.utcClock.textContent = fmtUtcClock()
+if (els.utcClock) els.utcClock.textContent = fmtClock()
 initTheme()
 initSegmentRailResize()
 fillForm()
+applyLayoutPreset()
+renderClockControls()
+if (els.archiveStation) els.archiveStation.value = state.config.stationAddress
 if (els.segmentLookup && state.selectedSegmentQuery) els.segmentLookup.value = state.selectedSegmentQuery
 updateLookupMessage()
 if (els.refresh) els.refresh.innerHTML = refreshIcon

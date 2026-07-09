@@ -27,6 +27,7 @@
     "web:ipfs:prepare": "node scripts/prepare-ipfs-publish.mjs",
     "web:serve": "node scripts/serve-static-client.mjs --build --dist",
     "web:static": "node scripts/verify-static-client.mjs",
+    "test:static-client": "node scripts/test-static-client-ui-logic.mjs",
     "test:publishers": "node scripts/test-publisher-dry-run.mjs",
     "test:live-run": "node scripts/test-run-live-station-stream-id.mjs",
     "test:live-segment": "node scripts/test-live-segment-cli.mjs",

@@ -7,9 +7,10 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <main class="shell">
-    <section class="main-column">
+  <main id="app-shell" class="shell" data-layout="default">
+    <section class="main-column panel-zone panel-player">
       <header class="topbar">
+        <button id="settings-toggle" class="settings-toggle icon-button" type="button" aria-label="Open settings" title="Settings">&#9881;</button>
         <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
         <div class="chain-toggle" aria-label="Chain selector">
           <button id="chain-mainnet" type="button" data-chain-preset="mainnet" aria-pressed="false">ETH</button>
@@ -17,7 +18,7 @@
         </div>
         <div class="brand">
           <h1>Radio Free Ethereum</h1>
-          <p>Milady stream tuned through live Ethereum blobspace</p>
+          <p>Milady stream watched through live Ethereum blobspace</p>
         </div>
         <div class="header-badges">
           <span class="status-badge"><i></i><span id="station-state">OFFLINE</span></span>
@@ -26,6 +27,7 @@
       </header>
 
       <section class="viewer-frame">
+        <span id="status" class="player-status" role="status">Idle</span>
         <div class="screen">
           <div class="video-column">
             <video id="player" controls playsinline muted></video>
@@ -41,6 +43,7 @@
             <span id="now-detail">Execution RPC announces segments; beacon sidecars carry the bytes.</span>
           </div>
           <div class="now-controls">
+            <button id="favorite-stream" class="icon-button" type="button" aria-label="Save current stream" title="Save current stream">☆</button>
             <button id="stream-toggle" class="live-button" type="button">LIVE</button>
             <button id="loop-toggle" type="button">LOOP</button>
             <button id="refresh" class="icon-button" type="button" aria-label="Refresh">↻</button>
@@ -57,10 +60,9 @@
         <div><span>LATENCY</span><strong id="metric-latency">-</strong></div>
         <div><span>FETCH / DECODE</span><strong id="metric-fetch">- / -</strong></div>
       </div>
-      <span id="status" role="status">Idle</span>
     </section>
 
-    <aside class="panel">
+    <aside class="panel panel-zone panel-feeds">
       <div class="sidebar-heading">
         <div>
           <h2>Blobspace Feed</h2>
@@ -79,15 +81,15 @@
       </div>
 
       <div class="stats">
-        <div><span>Known</span><strong id="known-count">0</strong></div>
-        <div><span>Verified</span><strong id="verified-count">0</strong></div>
-        <div><span>Head</span><strong id="head-block">-</strong></div>
-        <div><span>Slot</span><strong id="head-slot">-</strong></div>
-        <div><span>Cache</span><strong id="cache-size">0 MB</strong></div>
-        <div><span>Execution</span><strong id="execution-health">-</strong></div>
-        <div><span>Beacon</span><strong id="beacon-health">-</strong></div>
-        <div><span>Metadata</span><strong id="metadata-age">-</strong></div>
-        <div><span>Health</span><strong id="stream-health">-</strong></div>
+        <div class="stat-item stat-short"><span>Known</span><strong id="known-count">0</strong></div>
+        <div class="stat-item stat-short"><span>Verified</span><strong id="verified-count">0</strong></div>
+        <div class="stat-item stat-code"><span>Head</span><strong id="head-block">-</strong></div>
+        <div class="stat-item stat-code"><span>Slot</span><strong id="head-slot">-</strong></div>
+        <div class="stat-item stat-short"><span>Cache</span><strong id="cache-size">0 MB</strong></div>
+        <div class="stat-item stat-health"><span>Execution</span><strong id="execution-health">-</strong></div>
+        <div class="stat-item stat-health"><span>Beacon</span><strong id="beacon-health">-</strong></div>
+        <div class="stat-item stat-short"><span>Metadata</span><strong id="metadata-age">-</strong></div>
+        <div class="stat-item stat-health"><span>Health</span><strong id="stream-health">-</strong></div>
       </div>
       <div id="blobspace-status" class="blobspace-status"></div>
 
@@ -98,7 +100,7 @@
       <section class="segments-panel">
         <div id="segment-rail-resizer" class="segment-rail-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize segment rail" tabindex="0"></div>
         <div class="segments-heading">
-          <strong>Stream Segments</strong>
+          <strong id="segments-title">Stream Segments</strong>
           <div class="lookup-box">
             <input id="segment-lookup" type="search" placeholder="Paste explorer URL, tx, block, or blob..." autocomplete="off" />
             <span id="lookup-message" class="lookup-message">Paste a transaction URL, transaction hash, blob hash, block number, or sequence.</span>
@@ -119,15 +121,192 @@
 
       <div class="cache-actions">
         <button id="play-latest" type="button">Play latest</button>
+        <button id="favorite-station" type="button">Save station</button>
+        <button id="favorite-channel" type="button">Save channel</button>
         <button id="export-index" type="button">Export index</button>
         <button id="clear-cache" type="button">Clear cache</button>
       </div>
 
-      <details class="settings-panel">
-        <summary>Connection settings</summary>
-        <div class="endpoint-setup" aria-label="Endpoint setup">
-          <div class="endpoint-summary">
-            <span>Active endpoints</span>
+    </aside>
+
+    <aside id="archive-panel" class="panel archive-panel panel-zone panel-archive">
+      <div class="archive-title">
+        <h2>Archive</h2>
+        <p>Find previous streams and local favorites.</p>
+      </div>
+      <details id="archive-details">
+        <summary>Watch old streams</summary>
+        <div class="archive-body">
+          <div class="archive-mode-toggle" aria-label="Discovery mode">
+            <button id="archive-mode-station" type="button" data-archive-mode="station">Indexed Station</button>
+            <button id="archive-mode-inbox" type="button" data-archive-mode="inbox">Blob inbox</button>
+          </div>
+          <form id="archive-scan-form" class="archive-form">
+            <label data-archive-field="station">
+              Station contract or deployment transaction
+              <input id="archive-station" name="archiveStation" autocomplete="off" placeholder="0x address, tx hash, or explorer URL" />
+            </label>
+            <label data-archive-field="inbox">
+              Blob inbox destination
+              <input id="archive-inbox" name="archiveInbox" autocomplete="off" placeholder="0x address or explorer URL" />
+            </label>
+            <p class="archive-source-note" data-archive-field="inbox">Uses the configured execution RPC and beacon API. Explorer links are accepted as inputs, but no Etherscan/Blobscan API key or backend is required.</p>
+            <label>
+              Publisher/channel (optional)
+              <input id="archive-publisher" name="archivePublisher" autocomplete="off" placeholder="0x... or explorer address URL" />
+            </label>
+            <label data-archive-field="inbox">
+              Stream id (optional)
+              <input id="archive-stream-filter" name="archiveStreamFilter" autocomplete="off" placeholder="any compatible RFE1 stream" />
+            </label>
+            <label>
+              From block
+              <input id="archive-from-block" name="archiveFromBlock" inputmode="numeric" placeholder="recent window, or deployment block" />
+            </label>
+            <div class="archive-date-range">
+              <label>
+                From date
+                <input id="archive-from-date" name="archiveFromDate" type="datetime-local" />
+              </label>
+              <label>
+                To date
+                <input id="archive-to-date" name="archiveToDate" type="datetime-local" />
+              </label>
+            </div>
+            <div class="archive-actions">
+              <button id="archive-scan" type="submit">Scan</button>
+              <button id="archive-stop" type="button">Stop</button>
+            </div>
+          </form>
+          <div class="archive-progress-row" role="status">
+            <progress id="archive-progress-bar" class="archive-progress-bar" max="100" value="0" aria-label="Archive scan progress"></progress>
+            <p id="archive-progress" class="archive-progress">Scan a bounded block range to discover prior Station streams.</p>
+          </div>
+          <div id="archive-results" class="archive-results"></div>
+        </div>
+      </details>
+      <details id="favorites-details" class="favorites-details">
+        <summary>Favorites</summary>
+        <div id="favorites-list" class="favorites-list"></div>
+      </details>
+    </aside>
+
+    <aside id="blob-fees-panel" class="panel blob-fees-panel panel-zone panel-blob-fees" hidden>
+      <div class="sidebar-heading">
+        <div>
+          <h2>Blob Fees</h2>
+          <p>Execution RPC blob base fee and recent history.</p>
+        </div>
+        <div class="blob-fee-meta">
+          <span class="blob-fee-updated-label">Updated <strong id="blob-fee-updated">-</strong></span>
+          <span id="blob-fee-status" class="blob-fee-status" data-state="unavailable">Unavailable</span>
+        </div>
+      </div>
+      <div class="blob-fee-controls">
+        <label>
+          Fee unit
+          <select id="blob-fee-unit" name="blobFeeUnit"></select>
+        </label>
+        <label>
+          Average window
+          <select id="blob-fee-window" name="blobFeeWindow"></select>
+        </label>
+      </div>
+      <div class="blob-fee-grid">
+        <div class="blob-fee-item"><span>Blob base fee</span><strong id="blob-fee-base">-</strong></div>
+        <div class="blob-fee-item"><span>Est. fee per blob</span><strong id="blob-fee-per-blob">-</strong></div>
+        <div class="blob-fee-item"><span id="blob-fee-average-label">1h avg</span><strong id="blob-fee-average">-</strong></div>
+        <div class="blob-fee-item"><span>Window usage</span><strong id="blob-fee-utilization">-</strong></div>
+      </div>
+      <div id="blob-fee-sparkline" class="blob-fee-sparkline"></div>
+      <p id="blob-fee-message" class="blob-fee-message">Enable in Settings to start polling.</p>
+    </aside>
+
+    <footer class="source-footer">
+      <a class="codebase-link" href="https://github.com/bonklek/eth-radio" target="_blank" rel="noreferrer">source code</a>
+    </footer>
+  </main>
+
+  <div id="settings-modal" class="settings-modal" hidden>
+    <div class="settings-backdrop" data-settings-close></div>
+    <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="settings-dialog-header">
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" class="icon-button" type="button" aria-label="Close settings">&times;</button>
+      </header>
+      <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button id="settings-tab-appearance" type="button" role="tab" aria-selected="true" data-settings-tab="appearance">Appearance</button>
+        <button id="settings-tab-layout" type="button" role="tab" aria-selected="false" data-settings-tab="layout">Layout</button>
+        <button id="settings-tab-connections" type="button" role="tab" aria-selected="false" data-settings-tab="connections">Connections</button>
+      </div>
+      <div class="settings-tab-panel" data-settings-panel="appearance" role="tabpanel" aria-labelledby="settings-tab-appearance">
+        <div class="settings-card">
+          <h3>Clock</h3>
+          <label>
+            Display time
+            <select id="clock-mode" name="clockMode">
+              <option value="utc">UTC</option>
+              <option value="local">Local time</option>
+              <option value="timezone">Choose time zone</option>
+            </select>
+          </label>
+          <label>
+            Time zone
+            <input id="clock-time-zone" name="clockTimeZone" autocomplete="off" placeholder="America/New_York" />
+          </label>
+        </div>
+      </div>
+      <div class="settings-tab-panel" data-settings-panel="layout" role="tabpanel" aria-labelledby="settings-tab-layout" hidden>
+        <div class="settings-card">
+          <h3>Presets</h3>
+          <div class="layout-presets" id="layout-presets">
+            <button type="button" data-layout-preset="default">Default</button>
+            <button type="button" data-layout-preset="player-side">Player side</button>
+            <button type="button" data-layout-preset="player-top">Player top</button>
+            <button type="button" data-layout-preset="player-bottom">Player bottom</button>
+            <button type="button" data-layout-preset="horizontal-rails">Horizontal rails</button>
+            <button type="button" data-layout-preset="archive-side">Archive side rail</button>
+            <button type="button" data-layout-preset="archive-bottom">Archive bottom</button>
+          </div>
+        </div>
+        <div class="settings-card">
+          <h3>Panels</h3>
+          <label>
+            Bottom panels
+            <select id="layout-bottom-span" name="layoutBottomSpan">
+              <option value="between">Between side rails</option>
+              <option value="full">Full width to the edges</option>
+            </select>
+          </label>
+          <div class="panel-layout-grid">
+            <section class="panel-layout-row" data-layout-panel-row="player">
+              <label class="panel-show"><input id="layout-show-player" type="checkbox" data-panel-show="player" /> Player</label>
+              <label>Position<select id="layout-position-player" data-panel-position="player"></select></label>
+              <label>Order<select id="layout-order-player" data-panel-order="player"></select></label>
+            </section>
+            <section class="panel-layout-row" data-layout-panel-row="feeds">
+              <label class="panel-show"><input id="layout-show-feeds" type="checkbox" data-panel-show="feeds" /> Blobspace feed</label>
+              <label>Position<select id="layout-position-feeds" data-panel-position="feeds"></select></label>
+              <label>Order<select id="layout-order-feeds" data-panel-order="feeds"></select></label>
+            </section>
+            <section class="panel-layout-row" data-layout-panel-row="archive">
+              <label class="panel-show"><input id="layout-show-archive" type="checkbox" data-panel-show="archive" /> Archive/favorites</label>
+              <label>Position<select id="layout-position-archive" data-panel-position="archive"></select></label>
+              <label>Order<select id="layout-order-archive" data-panel-order="archive"></select></label>
+            </section>
+            <section class="panel-layout-row" data-layout-panel-row="blobFees">
+              <label class="panel-show"><input id="layout-show-blob-fees" type="checkbox" data-panel-show="blobFees" /> Blob fee tracker</label>
+              <label>Position<select id="layout-position-blob-fees" data-panel-position="blobFees"></select></label>
+              <label>Order<select id="layout-order-blob-fees" data-panel-order="blobFees"></select></label>
+            </section>
+          </div>
+        </div>
+      </div>
+      <div class="settings-tab-panel" data-settings-panel="connections" role="tabpanel" aria-labelledby="settings-tab-connections" hidden>
+        <div class="settings-card">
+          <div class="endpoint-setup" aria-label="Endpoint setup">
+            <div class="endpoint-summary">
+              <span>Active endpoints</span>
             <strong id="endpoint-summary">Using preset endpoints</strong>
           </div>
           <div id="endpoint-presets" class="endpoint-presets"></div>
@@ -174,9 +353,10 @@
             <button id="reset-preset-endpoints" type="button">Reset to preset</button>
           </div>
         </form>
-      </details>
-    </aside>
-  </main>
+        </div>
+      </div>
+    </section>
+  </div>
 
   <script type="module" src="./app.js"></script>
 </body>

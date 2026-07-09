@@ -11,6 +11,7 @@ for (const name of required) {
 }
 
 const app = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8')
+const css = fs.readFileSync(path.join(staticDir, 'styles.css'), 'utf8')
 const staticBuilder = fs.readFileSync(path.join(root, 'scripts', 'build-static-client.mjs'), 'utf8')
 const staticServer = fs.readFileSync(path.join(root, 'scripts', 'serve-static-client.mjs'), 'utf8')
 const ipfsPrepare = fs.readFileSync(path.join(root, 'scripts', 'prepare-ipfs-publish.mjs'), 'utf8')
@@ -22,6 +23,9 @@ for (const token of forbidden) {
 
 if (!app.includes('indexedDB')) throw new Error('Static client should cache verified payloads in IndexedDB')
 if (!app.includes('eth_getLogs')) throw new Error('Static client should read Station logs from execution RPC')
+if (app.includes('process.env') || app.includes('import.meta.env')) {
+  throw new Error('Static client should not reference private environment variables')
+}
 if (!app.includes('/eth/v1/beacon/blob_sidecars/')) {
   throw new Error('Static client should fetch beacon blob sidecars directly')
 }
@@ -78,9 +82,53 @@ for (const id of [
   'lookup-message',
   'blobspace-status',
   'stream-health',
+  'settings-toggle',
+  'settings-modal',
+  'settings-tab-appearance',
+  'settings-tab-layout',
+  'settings-tab-connections',
+  'clock-mode',
+  'clock-time-zone',
+  'layout-presets',
+  'layout-bottom-span',
+  'layout-show-player',
+  'layout-position-player',
+  'layout-order-player',
+  'layout-show-blob-fees',
+  'layout-position-blob-fees',
+  'layout-order-blob-fees',
+  'blob-fee-unit',
+  'blob-fee-window',
+  'favorite-stream',
+  'favorite-station',
+  'favorite-channel',
+  'archive-scan-form',
+  'archive-mode-station',
+  'archive-mode-inbox',
+  'archive-station',
+  'archive-inbox',
+  'archive-publisher',
+  'archive-stream-filter',
+  'archive-from-block',
+  'archive-from-date',
+  'archive-to-date',
+  'archive-progress-bar',
+  'archive-results',
+  'favorites-list',
+  'blob-fees-panel',
+  'blob-fee-status',
+  'blob-fee-base',
+  'blob-fee-per-blob',
+  'blob-fee-average-label',
+  'blob-fee-average',
+  'blob-fee-updated',
 ]) {
   if (!html.includes(`id="${id}"`)) throw new Error(`Missing static client control: ${id}`)
 }
+if (!html.includes('https://github.com/bonklek/eth-radio') || !html.includes('target="_blank" rel="noreferrer"')) {
+  throw new Error('Static client should expose a safe GitHub codebase link')
+}
+if (!html.includes('source code')) throw new Error('Static client codebase link should be subtle source code text')
 if (!app.includes('CHAIN_PRESETS')) throw new Error('Static client should expose chain endpoint presets')
 if (!app.includes('mainnet')) throw new Error('Static client should include mainnet endpoint readiness')
 for (const forbiddenSync of [
@@ -109,6 +157,10 @@ function sourceSlice(source, startPattern, endPattern) {
   const end = source.indexOf(endPattern, start + startPattern.length)
   if (start === -1 || end === -1 || end <= start) return ''
   return source.slice(start, end)
+}
+
+function cssIncludesBottomSlots() {
+  return ['bottom1', 'bottom2', 'bottom3', 'bottom4'].every((slot) => css.includes(slot))
 }
 
 const liveDemoBlobspaceConfig = sourceSlice(liveDemo, 'function blobspaceConfig(ctx)', 'function networkContext')
@@ -185,8 +237,72 @@ for (const marker of [
   'sidecarVersionedHash',
   'publicUrlLabel',
   'publicErrorMessage',
+  'loadLayoutPreset',
+  'saveLayoutPreset',
+  'loadLayoutSettings',
+  'saveLayoutSettings',
+  'PANEL_POSITIONS',
+  'bottomSpan',
+  'loadClockPrefs',
+  'saveClockPrefs',
+  'normalizeFavorites',
+  'normalizeFavoriteItem',
+  'normalizeStationAddressInput',
+  'scanOldStreams',
+  'parseArchiveStationInput',
+  'resolveArchiveStationTarget',
+  'archiveScanErrorMessage',
+  'scanBlobInboxStreams',
+  'parseRfe1Envelope',
+  'blockBlobTransactions',
+  'inboxSegmentFromSidecar',
+  'txBlobVersionedHashes',
+  'groupOldStreamsFromSegmentPublishedLogs',
+  'fetchSegmentLogsForStation',
+  'ARCHIVE_SCAN_CHUNK_BLOCKS',
+  'eth_blobBaseFee',
+  'eth_feeHistory',
+  'baseFeePerBlobGas',
+  'blobGasUsedRatio',
+  'BLOB_GAS_PER_BLOB',
+  'TARGET_BLOBS_PER_BLOCK',
+  'MAX_BLOBS_PER_BLOCK',
+  'BLOB_FEE_HISTORY_CHUNK_BLOCKS',
+  'BLOB_FEE_REFRESH_MS',
+  'BLOB_FEE_HIDDEN_REFRESH_MS',
+  'BLOB_FEE_UNITS',
+  'WEI_PER_GWEI',
+  'WEI_PER_ETH',
+  'BLOB_FEE_PREFS_KEY',
+  'loadBlobFeeSamples',
+  'saveBlobFeeSamples',
+  'loadBlobFeePrefs',
+  'saveBlobFeePrefs',
+  'refreshBlobFees',
+  'classifyBlobFee',
+  'formatBlobWindowUsage',
 ]) {
   if (!app.includes(marker)) throw new Error(`Missing static client behavior marker: ${marker}`)
+}
+if (!app.includes("localStorage.setItem(LAYOUT_KEY")
+  || !app.includes("localStorage.setItem(LAYOUT_SETTINGS_KEY")
+  || !app.includes("localStorage.setItem(CLOCK_KEY")
+  || !app.includes("localStorage.setItem(FAVORITES_KEY")
+  || !app.includes("localStorage.setItem(BLOB_FEE_SAMPLES_KEY")
+  || !app.includes("localStorage.setItem(BLOB_FEE_PREFS_KEY")) {
+  throw new Error('Static client should persist layout, clock, favorites, and blob fee preferences/samples in localStorage')
+}
+if (!html.includes('id="blob-fee-unit"') || !app.includes('Object.entries(BLOB_FEE_UNITS)')) {
+  throw new Error('Blob fee tracker should expose ETH, Wei, and Gwei through a unit dropdown')
+}
+if (!app.includes('bottomIndex >= 0 ? `bottom${bottomIndex + 1}`') || !cssIncludesBottomSlots()) {
+  throw new Error('Layout should assign ordered bottom slots so bottom panels do not overlap')
+}
+if (app.includes('Blobscan') || app.includes('blobscan.com')) {
+  throw new Error('Blob fee tracker should not depend on Blobscan in the static client')
+}
+if (!app.includes('ARCHIVE_MAX_BLOCKS') || !app.includes('state.archive.cancel')) {
+  throw new Error('Static archive scans should be bounded and stoppable')
 }
 const staticHexToBytes = sourceSlice(app, 'function hexToBytes(value)', 'function bytesToHex(bytes)')
 if (!staticHexToBytes.includes('isByteHex(value)')) {
