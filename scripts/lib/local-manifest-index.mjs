@@ -35,7 +35,6 @@ export function createLocalManifestIndex({
   maxScanEntries,
   loadManifest,
   onWarning = /** @type {(key: string, message: string) => void} */ (() => {}),
-  onTrace = /** @type {(event: object) => void} */ (() => {}),
   negativeTtlMs = 10_000,
   now = Date.now,
 }) {
@@ -140,12 +139,6 @@ export function createLocalManifestIndex({
     while (entries.size > maxCacheEntries || cacheBytes > maxCacheBytes) {
       const victim = evictionCandidate(request)
       if (!victim) break
-      onTrace({
-        type: 'evict',
-        request,
-        victim: { name: victim.name, sequence: victim.manifest?.sequence, channelKey: victim.manifest?.channelKey },
-        entries: [...entries.values()].map((entry) => ({ name: entry.name, sequence: entry.manifest?.sequence, channelKey: entry.manifest?.channelKey })),
-      })
       removeEntry(victim.name)
     }
   }
@@ -188,7 +181,6 @@ export function createLocalManifestIndex({
     }
     entries.set(candidate.name, entry)
     cacheBytes += candidate.size
-    onTrace({ type: 'add', name: candidate.name, sequence: manifest.sequence, channelKey: manifest.channelKey })
     enforceBounds(request)
   }
 
@@ -228,6 +220,7 @@ export function createLocalManifestIndex({
       seenNames: new Set(),
       coverageKey: requestKey(request),
       coverageRequest: { ...request },
+      retentionRequest: { ...request },
     }
     eligibleCount = 0
   }
@@ -243,6 +236,9 @@ export function createLocalManifestIndex({
       startScan(signature, request)
     }
     if (!scan) return
+    if (!scan.retentionRequest?.streamId && request?.streamId) {
+      scan.retentionRequest = { ...request }
+    }
     if (scan.coverageKey !== requestKey(request)) {
       scan.coverageKey = null
       scan.coverageRequest = null
@@ -256,6 +252,7 @@ export function createLocalManifestIndex({
         const seenNames = scan.seenNames
         const coverageKey = scan.coverageKey
         const coverageRequest = scan.coverageRequest
+        const retentionRequest = scan.retentionRequest
         closeScan()
         for (const name of entries.keys()) {
           if (!seenNames.has(name)) removeEntry(name)
@@ -263,7 +260,7 @@ export function createLocalManifestIndex({
         const finalDirectorySignature = directorySignature(directoryPath)
         completedDirectorySignature = completedScanSignature
         scan = null
-        enforceBounds(request)
+        enforceBounds(retentionRequest)
         if (finalDirectorySignature !== completedScanSignature) {
           completedMisses.clear()
           startScan(finalDirectorySignature, request)
@@ -276,7 +273,7 @@ export function createLocalManifestIndex({
       }
       inspected += 1
       if (!directoryEntry.isFile() || !directoryEntry.name.endsWith('.json')) continue
-      inspectFile(directoryEntry.name, request, scan.seenNames)
+      inspectFile(directoryEntry.name, scan.retentionRequest, scan.seenNames)
     }
     onWarning(
       'local-scan-in-progress',

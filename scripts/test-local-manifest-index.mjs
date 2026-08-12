@@ -139,12 +139,14 @@ try {
 
   const sequenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eth-radio-local-index-sequence-'))
   try {
-    for (let sequence = 0; sequence < 5; sequence += 1) {
-      const filePath = path.join(sequenceDir, `${sequence}.json`)
+    const creationOrder = ['quiet', 4, 3, 0, 2, 1]
+    for (const item of creationOrder) {
+      const sequence = item === 'quiet' ? 0 : item
+      const filePath = path.join(sequenceDir, item === 'quiet' ? 'quiet.json' : `${sequence}.json`)
       fs.writeFileSync(filePath, JSON.stringify({
         streamId: 'sequence-order',
-        publisher: publisherA,
-        channelKey: 'sequence-order',
+        publisher: item === 'quiet' ? publisherB : publisherA,
+        channelKey: item === 'quiet' ? 'quiet-sequence-order' : 'sequence-order',
         sequence,
       }))
       const misleadingTime = new Date(1_700_000_000_000 + (sequence === 2 ? 10_000 : sequence * 1000))
@@ -161,12 +163,13 @@ try {
     let sequenceResult
     for (let pass = 0; pass < 5; pass += 1) {
       sequenceResult = sequenceIndex.query({ streamId: 'sequence-order', publisher: publisherA })
+      sequenceIndex.query()
       if (sequenceResult.complete) break
     }
     assert.deepEqual(
       sequenceResult.manifests.map((manifest) => manifest.sequence).sort((left, right) => left - right),
       [3, 4],
-      'same-channel retention must follow protocol sequence rather than filesystem timestamps',
+      'global monitoring must not replace publisher-scoped scan retention or protocol sequence order',
     )
   } finally {
     fs.rmSync(sequenceDir, { recursive: true, force: true })

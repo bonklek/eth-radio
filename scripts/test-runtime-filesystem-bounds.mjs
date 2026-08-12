@@ -187,7 +187,6 @@ const child = spawn(process.execPath, [path.join(root, 'scripts', 'serve-live-de
     LOCAL_MANIFEST_MAX_FILES: '2',
     LOCAL_MANIFEST_SCAN_MAX_ENTRIES: '2',
     LOCAL_MANIFEST_AGGREGATE_MAX_BYTES: '1048576',
-    LOCAL_MANIFEST_TRACE: '1',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 })
