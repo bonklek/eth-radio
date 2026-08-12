@@ -35,6 +35,7 @@ export function createLocalManifestIndex({
   maxScanEntries,
   loadManifest,
   onWarning = /** @type {(key: string, message: string) => void} */ (() => {}),
+  onTrace = /** @type {(event: object) => void} */ (() => {}),
   negativeTtlMs = 10_000,
   now = Date.now,
 }) {
@@ -139,6 +140,11 @@ export function createLocalManifestIndex({
     while (entries.size > maxCacheEntries || cacheBytes > maxCacheBytes) {
       const victim = evictionCandidate(request)
       if (!victim) break
+      onTrace({
+        type: 'evict',
+        victim: { name: victim.name, sequence: victim.manifest?.sequence, channelKey: victim.manifest?.channelKey },
+        entries: [...entries.values()].map((entry) => ({ name: entry.name, sequence: entry.manifest?.sequence, channelKey: entry.manifest?.channelKey })),
+      })
       removeEntry(victim.name)
     }
   }
@@ -181,6 +187,7 @@ export function createLocalManifestIndex({
     }
     entries.set(candidate.name, entry)
     cacheBytes += candidate.size
+    onTrace({ type: 'add', name: candidate.name, sequence: manifest.sequence, channelKey: manifest.channelKey })
     enforceBounds(request)
   }
 

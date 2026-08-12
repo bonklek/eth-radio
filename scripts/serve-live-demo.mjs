@@ -656,6 +656,9 @@ const localManifestIndex = createLocalManifestIndex({
     label: `local segment manifest ${candidate.name}`,
   })),
   onWarning: warnFilesystemOnce,
+  onTrace: process.env.LOCAL_MANIFEST_TRACE === '1'
+    ? (event) => console.warn(`local-manifest-trace ${JSON.stringify(event)}`)
+    : undefined,
 })
 
 function readManifests(request = {}) {
