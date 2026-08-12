@@ -201,11 +201,13 @@ try {
   const invalidPublisherResponse = await fetch(url.replace(publisher, 'not-an-address'))
   assert.equal(invalidPublisherResponse.status, 400, 'publisher validation must happen before identity-scoped index work')
   let body
-  for (let pass = 0; pass < 4; pass += 1) {
+  for (let pass = 0; pass < 10; pass += 1) {
     const response = await fetch(url)
     assert.equal(response.status, 200)
     body = await response.json()
+    if (body.discoveryComplete) break
   }
+  assert.equal(body.discoveryComplete, true, 'bounded manifest discovery must complete within the request ceiling')
   assert.deepEqual(body.segments.map((segment) => segment.sequence), [3, 4], 'incremental bounded scans must eventually discover the newest records beyond the first batch')
   assert.deepEqual(body.segments.map((segment) => segment.continuity.status), ['unknown', 'unknown'])
   assert.match(stderr, /oversized\.json: exceeds 4096 bytes/)
