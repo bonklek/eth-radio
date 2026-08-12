@@ -208,7 +208,11 @@ try {
     if (body.discoveryComplete) break
   }
   assert.equal(body.discoveryComplete, true, 'bounded manifest discovery must complete within the request ceiling')
-  assert.deepEqual(body.segments.map((segment) => segment.sequence), [3, 4], 'incremental bounded scans must eventually discover the newest records beyond the first batch')
+  assert.deepEqual(
+    body.segments.map((segment) => segment.sequence),
+    [3, 4],
+    `incremental bounded scans must eventually discover the newest records beyond the first batch; body=${JSON.stringify(body)} stderr=${stderr}`,
+  )
   assert.deepEqual(body.segments.map((segment) => segment.continuity.status), ['unknown', 'unknown'])
   assert.match(stderr, /oversized\.json: exceeds 4096 bytes/)
   assert.match(stderr, /processing at most 2 directory entries per request/)
