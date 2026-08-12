@@ -1,0 +1,115 @@
+{
+  "protocol": "rfe",
+  "schema": "station-constitution",
+  "version": 1,
+  "stationProtocolVersion": 2,
+  "observation": {
+    "chainId": "11155111",
+    "blockNumber": "12345678",
+    "blockHash": "0x9999999999999999999999999999999999999999999999999999999999999999"
+  },
+  "identity": {
+    "stationId": "0x9b8e526444e35c5a9fba24fba148b00aaa5bb55ad25b9377b62d5e9ed60824a1",
+    "gweiName": "radiofree.gwei",
+    "resolutionStatus": "VERIFIED",
+    "stationCore": "0x3333333333333333333333333333333333333333",
+    "directory": "0x4444444444444444444444444444444444444444",
+    "bindingStatus": "MUTABLE",
+    "bindingController": "0x1111111111111111111111111111111111111111"
+  },
+  "currentSeason": "4",
+  "modules": [
+    {
+      "moduleKind": "0x01010101",
+      "label": "Schedule",
+      "address": "0x5555555555555555555555555555555555555555",
+      "interfaceId": "0x11111111",
+      "verification": "VERIFIED",
+      "mutable": true,
+      "controllerCapability": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+    },
+    {
+      "moduleKind": "0x02020202",
+      "label": "Fee policy",
+      "address": "0x6666666666666666666666666666666666666666",
+      "interfaceId": "0x22222222",
+      "verification": "UNKNOWN",
+      "mutable": true,
+      "controllerCapability": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2"
+    }
+  ],
+  "capabilities": [
+    {
+      "capability": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+      "label": "Replace schedule module",
+      "transitions": [
+        {
+          "fromSeason": "0",
+          "controller": {
+            "kind": "ADDRESS",
+            "address": "0x1111111111111111111111111111111111111111"
+          },
+          "terminal": false
+        },
+        {
+          "fromSeason": "3",
+          "controller": {
+            "kind": "DAO",
+            "address": "0x2222222222222222222222222222222222222222"
+          },
+          "terminal": false
+        },
+        {
+          "fromSeason": "7",
+          "controller": {
+            "kind": "NONE",
+            "address": null
+          },
+          "terminal": true
+        }
+      ]
+    },
+    {
+      "capability": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+      "label": "Set fee policy",
+      "transitions": [
+        {
+          "fromSeason": "0",
+          "controller": {
+            "kind": "ADDRESS",
+            "address": "0x1111111111111111111111111111111111111111"
+          },
+          "terminal": false
+        },
+        {
+          "fromSeason": "5",
+          "controller": {
+            "kind": "NONE",
+            "address": null
+          },
+          "terminal": true
+        }
+      ]
+    }
+  ],
+  "vault": {
+    "balanceWei": "1000",
+    "protectedReserveWei": "500",
+    "totalLiabilitiesWei": "200",
+    "generalWithdrawalPath": false,
+    "withdrawalController": null
+  },
+  "revenue": {
+    "escrow": "0x7777777777777777777777777777777777777777",
+    "comminglesProtectedFunding": false
+  },
+  "rules": {
+    "standingFallbackEnabled": true,
+    "playbackDecisionVersion": 1,
+    "feePolicy": {
+      "moduleAddress": "0x6666666666666666666666666666666666666666",
+      "policyVersion": 1,
+      "verification": "UNKNOWN"
+    }
+  }
+}

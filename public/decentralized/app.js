@@ -1,21 +1,99 @@
+import {
+  annotateStreamContinuity,
+  assertPlayableContinuity,
+  calculateSegmentRailBounds,
+  canonicalStreamIdHash,
+  channelIdentity,
+  classifyPlaybackMode,
+  archiveStreamAccessibleName,
+  archiveStreamKey,
+  appendArchiveSegments,
+  clampCacheLimitMb,
+  createArchiveAccumulator,
+  endpointRequiresSessionStorage,
+  favoriteAccessibleName,
+  groupOldStreamsFromSegmentPublishedLogs,
+  isBytes32Hex,
+  matchingCachedMetadata,
+  metadataScopeForConfig,
+  normalizeArchiveTemplateList,
+  normalizeHex,
+  normalizeHttpEndpointList,
+  normalizeFavoriteItem,
+  normalizeFavorites,
+  normalizeStationAddressInput,
+  playbackModeLabel,
+  incrementalStationRange,
+  reconcileIncrementalStationSegments,
+  retainedVerifiedRecordKeys,
+  scopedSegmentIdentityKey,
+  segmentContinuityPresentation,
+  segmentActionAccessibleName,
+  segmentIdentityKey,
+  segmentIsQuarantined,
+  selectPublisherScopedChannel,
+  selectRecentSegmentsWithinByteBudget,
+  slotJumpAccessibleName,
+  withChannelIdentity,
+  v1ScopedChannelIdentity,
+} from './static-client-core.js'
+import {
+  executionTimestampSlot,
+  slotStartTimestamp,
+} from '../../packages/protocol/browser-kernel.js'
+import {
+  abiWordNumber,
+  bytesToHex,
+  fetchWithTimeout,
+  hexToBytes,
+  isAbortError,
+  isBlobHex,
+  isByteHex,
+  isBytes48Hex,
+  readBoundedJsonResponse,
+  readBoundedResponseBytes,
+  readBytes32,
+  readBytes32Array,
+  readString,
+  requestAbortError,
+  rpcQuantity,
+  rpcQuantityNumber,
+  runEndpointFallback,
+  singleFlight,
+  strip0x,
+} from './static-client-io.js'
+import { viewerAbiStringByteLimit } from './static-client-limits.js'
+import {
+  archiveUrl,
+  normalizeSidecarRecord,
+  reconstructPayload,
+  segmentBlobHashes,
+  segmentPayloadLength,
+  sidecarIndex,
+} from './static-client-media.js'
+const IO_MAX_ABI_STRING_BYTES = viewerAbiStringByteLimit()
 const CHAIN_PRESETS = {
   sepolia: {
+    chainId: '11155111',
     label: 'Sepolia',
     explorerTxBase: 'https://sepolia.etherscan.io/tx/',
     explorerAddressBase: 'https://sepolia.etherscan.io/address/',
     beaconSlotBase: 'https://sepolia.beaconcha.in/slot/',
     streamId: 'rfe-baked-clock-pipe-v6',
+    publisher: '',
     stationAddress: '0x060c51d481808b506dfae72f054f39e11e4f4017',
     fromBlock: '11226386',
     executionRpcs: ['https://sepolia.drpc.org', 'https://ethereum-sepolia-rpc.publicnode.com'],
     beaconApis: ['https://ethereum-sepolia-beacon-api.publicnode.com'],
   },
   mainnet: {
+    chainId: '1',
     label: 'Mainnet',
     explorerTxBase: 'https://etherscan.io/tx/',
     explorerAddressBase: 'https://etherscan.io/address/',
     beaconSlotBase: 'https://beaconscan.com/slot/',
     streamId: 'rfe-mainnet-live',
+    publisher: '',
     stationAddress: '',
     fromBlock: '0',
     executionRpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth-mainnet.g.alchemy.com/public'],
@@ -25,7 +103,9 @@ const CHAIN_PRESETS = {
 
 const DEFAULTS = {
   chainPreset: 'sepolia',
+  chainId: '11155111',
   streamId: 'rfe-baked-clock-pipe-v6',
+  publisher: '',
   stationAddress: '0x060c51d481808b506dfae72f054f39e11e4f4017',
   fromBlock: '11226386',
   logWindowBlocks: 96,
@@ -37,17 +117,47 @@ const DEFAULTS = {
 
 const EVENT_TOPIC = '0xfd61253da387da4d87d036a0276340bc4f04ff7c1173999c8392b158030f04c3'
 const DB_NAME = 'radio-free-ethereum-static-v3'
-const DB_VERSION = 3
+const DB_VERSION = 7
 const MAX_BLOBS_PER_BLOCK = 21
+const MAX_SEGMENT_BLOBS = 6
+const BLOB_BYTES = 131_072
+const BLOB_DATA_BYTES = BLOB_BYTES / 32 * 31
+const MAX_SEGMENT_PAYLOAD_BYTES = MAX_SEGMENT_BLOBS * BLOB_DATA_BYTES
+const MAX_RPC_RESPONSE_BYTES = 8 * 1024 * 1024
+const MAX_BEACON_RESPONSE_BYTES = 8 * 1024 * 1024
+const MAX_STATION_LOG_DATA_BYTES = 16 * 1024
+const MAX_LOOKUP_INPUT_CODE_UNITS = 2048
+const MAX_LOOKUP_DECIMAL_DIGITS = 78
+const MAX_RPC_LOGS = 10_000
+const ARCHIVE_MAX_SEGMENTS = 20_000
+const ARCHIVE_MAX_STREAMS = 1_000
+const LIVE_REFRESH_REORG_BLOCKS = 12
+const LIVE_REFRESH_MAX_BLOCKS = 2_000
+const LIVE_RETAINED_SEGMENTS = 2_048
+const MAX_BLOCK_TIME_CACHE_ENTRIES = 4_096
+const MAX_BLOCK_TIME_REQUEST_CONCURRENCY = 8
+// Exact-anchor playback re-reads the last 12 blocks on every bounded cursor
+// advance. History older than that documented reorg window is trusted as the
+// continuity boundary, while only the latest 2,048 segments remain in memory.
+const CACHE_LIMIT_MIN_MB = 16
+const CACHE_LIMIT_MAX_MB = 2_048
+const MEMORY_CACHE_MAX_MB = 64
+const VERIFIED_MEMORY_MAX_BYTES = MEMORY_CACHE_MAX_MB * 1024 * 1024
 const TARGET_BLOBS_PER_BLOCK = 14
 const SLOT_WINDOW = 10
+const MAX_SIDECAR_MEMORY_SLOTS = SLOT_WINDOW + 2
 const DEFAULT_BLOBSPACE_ROWS = []
 const LAYOUT_KEY = 'rfe-static-layout-preset'
 const LAYOUT_SETTINGS_KEY = 'rfe-static-layout-settings-v1'
-const FAVORITES_KEY = 'rfe-static-favorites-v1'
+const FAVORITES_KEY = 'rfe-static-favorites-v2'
 const CLOCK_KEY = 'rfe-static-clock-v1'
 const BLOB_FEE_SAMPLES_KEY = 'rfe-static-blob-fee-samples-v1'
+const BLOB_FEE_MAX_LOADED_SAMPLES = 2_800
 const BLOB_FEE_PREFS_KEY = 'rfe-static-blob-fee-prefs-v1'
+const CONFIG_KEY = 'rfe-static-config-v2'
+const SESSION_ENDPOINT_CONFIG_KEY = 'rfe-static-session-endpoints-v1'
+const LEGACY_CONFIG_KEY = 'rfe-static-config'
+const CACHE_TOTAL_KEY = '__segment-cache-total-v1'
 const BLOB_GAS_PER_BLOB = 131_072n
 const BLOB_FEE_UNITS = {
   eth: 'ETH',
@@ -68,6 +178,7 @@ const BLOB_FEE_HISTORY_WINDOWS = {
 const ARCHIVE_DEFAULT_WINDOW_BLOCKS = 50_000
 const ARCHIVE_SCAN_CHUNK_BLOCKS = 2_000
 const ARCHIVE_MAX_BLOCKS = 250_000
+const SENSITIVE_URL_PARAMS = ['executionRpcs', 'executionRpc', 'beaconApis', 'beaconApi', 'archiveTemplates']
 const PANEL_POSITIONS = {
   left: 'Left rail',
   main: 'Main',
@@ -80,11 +191,25 @@ const PANEL_LABELS = {
   archive: 'Archive/favorites',
   blobFees: 'Blob fee tracker',
 }
+const storageStatus = {
+  localStorage: 'available',
+  indexedDb: 'unknown',
+  localStorageError: '',
+  indexedDbError: '',
+}
+const memoryStores = {
+  segments: new Map(),
+  metadata: new Map(),
+}
+let dbPromise = null
+let cacheAccountingPromise = null
 const INITIAL_URL_STATE = readUrlState()
 const els = {
+  startupShell: document.querySelector('#startup-shell'),
   shell: document.querySelector('#app-shell'),
   form: document.querySelector('#settings'),
   settingsToggle: document.querySelector('#settings-toggle'),
+  settingsRecoveryToggle: document.querySelector('#settings-recovery-toggle'),
   settingsModal: document.querySelector('#settings-modal'),
   settingsClose: document.querySelector('#settings-close'),
   settingsTabs: document.querySelectorAll('[data-settings-tab]'),
@@ -126,6 +251,10 @@ const els = {
   muteToggle: document.querySelector('#mute-toggle'),
   volume: document.querySelector('#volume'),
   playLatest: document.querySelector('#play-latest'),
+  layoutRecovery: document.querySelector('#layout-recovery'),
+  recoveryStatus: document.querySelector('#status-recovery'),
+  statusAnnouncer: document.querySelector('#status-announcer'),
+  alertAnnouncer: document.querySelector('#alert-announcer'),
   stationState: document.querySelector('#station-state'),
   utcClock: document.querySelector('#utc-clock'),
   networkLabel: document.querySelector('#network-label'),
@@ -146,6 +275,7 @@ const els = {
   status: document.querySelector('#status'),
   player: document.querySelector('#player'),
   empty: document.querySelector('#empty-state'),
+  emptyRecovery: document.querySelector('#empty-recovery'),
   knownCount: document.querySelector('#known-count'),
   verifiedCount: document.querySelector('#verified-count'),
   headBlock: document.querySelector('#head-block'),
@@ -157,6 +287,8 @@ const els = {
   beaconHealth: document.querySelector('#beacon-health'),
   railMode: document.querySelector('#rail-mode'),
   blobspaceStatus: document.querySelector('#blobspace-status'),
+  blobspaceWarning: document.querySelector('#blobspace-warning'),
+  blobspaceDetails: document.querySelector('#blobspace-details'),
   slots: document.querySelector('#slots'),
   segmentRailResizer: document.querySelector('#segment-rail-resizer'),
   segments: document.querySelector('#segments'),
@@ -168,6 +300,7 @@ const els = {
   archiveInbox: document.querySelector('#archive-inbox'),
   archivePublisher: document.querySelector('#archive-publisher'),
   archiveStreamFilter: document.querySelector('#archive-stream-filter'),
+  archiveRangeMode: document.querySelector('#archive-range-mode'),
   archiveFromBlock: document.querySelector('#archive-from-block'),
   archiveFromDate: document.querySelector('#archive-from-date'),
   archiveToDate: document.querySelector('#archive-to-date'),
@@ -195,13 +328,28 @@ const moonIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6
 const refreshIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>'
 const volumeOnIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15 9.5a4 4 0 0 1 0 5"></path><path d="M18 6.5a8 8 0 0 1 0 11"></path></svg>'
 const volumeOffIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="m16 10 5 5"></path><path d="m21 10-5 5"></path></svg>'
+const SETTINGS_FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+let settingsFocusReturn = null
+const lastStatusAnnouncement = { polite: '', assertive: '' }
 
 let state = {
-  config: loadConfig(INITIAL_URL_STATE.config),
+  runtimeGeneration: 0,
+  runtimeController: new AbortController(),
+  config: loadConfig(INITIAL_URL_STATE.config, { useSavedNetworkConfig: INITIAL_URL_STATE.localConfig }),
   segments: [],
   verified: new Map(),
   objectUrls: new Map(),
+  deferredObjectUrlKeys: new Set(),
   sidecarMemoryCache: new Map(),
+  sidecarFetchPromises: new Map(),
+  sidecarCacheEpoch: 0,
   activeExecutionRpc: '',
   activeBeaconApi: '',
   endpointHealth: {
@@ -210,13 +358,19 @@ let state = {
   },
   blobspace: { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' },
   metadataUpdatedAt: '',
+  metadataState: 'none',
   currentRecordKey: '',
-  playbackState: 'waiting',
+  playbackMode: 'idle',
+  playbackIntent: 'replay',
+  liveEdgeKey: '',
+  playbackAdvanceToken: 0,
+  playbackContextGeneration: 0,
   segmentNotice: '',
   selectedSegmentQuery: INITIAL_URL_STATE.segment,
   blockTimes: new Map(),
+  blockTimeHashes: new Map(),
   muteTouched: false,
-  streaming: false,
+  followIntent: false,
   loopReplay: false,
   busy: false,
   refreshSerial: 0,
@@ -224,6 +378,7 @@ let state = {
   anchor: null,
   refreshTimer: null,
   blobspaceTimer: null,
+  blobspaceRefreshPromise: null,
   blobFeeTimer: null,
   prefetching: new Set(),
   prefetchPromises: new Map(),
@@ -234,7 +389,11 @@ let state = {
   archive: {
     scanning: false,
     cancel: false,
+    activeController: null,
     mode: 'station',
+    progress: defaultArchiveProgress('station'),
+    inboxDiagnostics: { failedCandidates: 0, incompatibleCandidates: 0, failures: [] },
+    tuneSerial: 0,
     tunedKey: '',
     streams: [],
     segmentsByKey: new Map(),
@@ -249,6 +408,15 @@ function parseLines(value) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))]
+}
+
+function boundedStreamId(value, label = 'Stream ID') {
+  const text = String(value ?? '')
+  if (!text) throw new Error(`${label} must not be empty`)
+  if (new TextEncoder().encode(text).byteLength > IO_MAX_ABI_STRING_BYTES) {
+    throw new Error(`${label} exceeds the viewer ABI string limit of ${IO_MAX_ABI_STRING_BYTES.toLocaleString()} UTF-8 bytes`)
+  }
+  return text
 }
 
 function safeJsonObject(value) {
@@ -271,14 +439,40 @@ function sameList(left, right) {
   return a.length === b.length && a.every((value, index) => value === b[index])
 }
 
+function storageErrorText(error) {
+  return String(error?.message || error || 'Browser storage is unavailable.').slice(0, 240)
+}
+
+function safeStorageGet(key, fallback = '') {
+  try {
+    const value = localStorage.getItem(key)
+    return value == null ? fallback : value
+  } catch (error) {
+    storageStatus.localStorage = 'unavailable'
+    storageStatus.localStorageError = storageErrorText(error)
+    return fallback
+  }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch (error) {
+    storageStatus.localStorage = 'unavailable'
+    storageStatus.localStorageError = storageErrorText(error)
+    return false
+  }
+}
+
 function loadLayoutPreset() {
-  const saved = localStorage.getItem(LAYOUT_KEY)
+  const saved = safeStorageGet(LAYOUT_KEY)
   return ['default', 'player-side', 'player-top', 'player-bottom', 'horizontal-rails', 'archive-side', 'archive-bottom', 'custom'].includes(saved) ? saved : 'default'
 }
 
 function saveLayoutPreset(preset) {
   state.layoutPreset = loadLayoutPresetFromValue(preset)
-  localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+  safeStorageSet(LAYOUT_KEY, state.layoutPreset)
   state.layoutSettings = layoutSettingsForPreset(state.layoutPreset)
   saveLayoutSettings()
   applyLayoutPreset()
@@ -354,18 +548,18 @@ function normalizeLayoutSettings(value) {
 }
 
 function loadLayoutSettings() {
-  const saved = safeJsonObject(localStorage.getItem(LAYOUT_SETTINGS_KEY))
+  const saved = safeJsonObject(safeStorageGet(LAYOUT_SETTINGS_KEY))
   if (Object.keys(saved).length) return normalizeLayoutSettings(saved)
   return layoutSettingsForPreset(loadLayoutPreset())
 }
 
 function saveLayoutSettings() {
   state.layoutSettings = normalizeLayoutSettings(state.layoutSettings)
-  localStorage.setItem(LAYOUT_SETTINGS_KEY, JSON.stringify(state.layoutSettings))
+  safeStorageSet(LAYOUT_SETTINGS_KEY, JSON.stringify(state.layoutSettings))
 }
 
 function loadClockPrefs() {
-  const saved = safeJsonObject(localStorage.getItem(CLOCK_KEY))
+  const saved = safeJsonObject(safeStorageGet(CLOCK_KEY))
   return normalizeClockPrefs(saved)
 }
 
@@ -377,58 +571,12 @@ function normalizeClockPrefs(value) {
 
 function saveClockPrefs() {
   state.clock = normalizeClockPrefs(state.clock)
-  localStorage.setItem(CLOCK_KEY, JSON.stringify(state.clock))
-}
-
-function normalizeFavoriteItem(item) {
-  if (!item || typeof item !== 'object' || Array.isArray(item)) return null
-  const type = ['station', 'channel', 'stream', 'inbox', 'inbox-channel', 'inbox-stream'].includes(item.type) ? item.type : ''
-  const stationAddress = normalizeStationAddressInput(item.stationAddress)
-  const inboxAddress = normalizeStationAddressInput(item.inboxAddress)
-  const publisher = normalizeStationAddressInput(item.publisher || '')
-  const streamId = String(item.streamId || '').trim()
-  const streamIdHash = isBytes32Hex(item.streamIdHash) ? normalizeHex(item.streamIdHash) : ''
-  const firstBlock = Number(item.firstBlock)
-  const latestBlock = Number(item.latestBlock)
-  const hasArchiveRange = Number.isSafeInteger(firstBlock) && firstBlock >= 0
-    && Number.isSafeInteger(latestBlock) && latestBlock >= firstBlock
-  if (!type) return null
-  if (type.startsWith('inbox')) {
-    if (!inboxAddress) return null
-    if (type === 'inbox-channel' && !publisher) return null
-    if (type === 'inbox-stream' && (!publisher || (!streamId && !streamIdHash))) return null
-  } else if (!stationAddress) return null
-  if (type === 'channel' && !publisher) return null
-  if (type === 'stream' && (!publisher || (!streamId && !streamIdHash))) return null
-  const id = favoriteId({ type, stationAddress, inboxAddress, publisher, streamId, streamIdHash })
-  return {
-    id,
-    type,
-    stationAddress,
-    inboxAddress,
-    publisher,
-    streamId,
-    streamIdHash,
-    firstBlock: hasArchiveRange ? firstBlock : null,
-    latestBlock: hasArchiveRange ? latestBlock : null,
-    label: String(item.label || '').trim().slice(0, 80),
-    createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
-  }
-}
-
-function normalizeFavorites(value) {
-  const parsed = Array.isArray(value) ? value : []
-  const byId = new Map()
-  for (const item of parsed) {
-    const favorite = normalizeFavoriteItem(item)
-    if (favorite) byId.set(favorite.id, favorite)
-  }
-  return [...byId.values()]
+  safeStorageSet(CLOCK_KEY, JSON.stringify(state.clock))
 }
 
 function loadFavorites() {
   try {
-    return normalizeFavorites(JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]'))
+    return normalizeFavorites(JSON.parse(safeStorageGet(FAVORITES_KEY, '[]')))
   } catch {
     return []
   }
@@ -436,7 +584,7 @@ function loadFavorites() {
 
 function saveFavorites() {
   state.favorites = normalizeFavorites(state.favorites)
-  localStorage.setItem(FAVORITES_KEY, JSON.stringify(state.favorites))
+  safeStorageSet(FAVORITES_KEY, JSON.stringify(state.favorites))
 }
 
 function normalizeBlobFeeSample(sample) {
@@ -444,15 +592,17 @@ function normalizeBlobFeeSample(sample) {
   const timestamp = Number(sample.timestamp)
   if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return null
   const value = String(sample.baseFeePerBlobGasWei || '')
-  if (!/^\d+$/.test(value)) return null
-  return { timestamp, baseFeePerBlobGasWei: value }
+  if (value.length > 78 || !/^\d+$/.test(value)) return null
+  const quantity = BigInt(value)
+  if (quantity >= 1n << 256n) return null
+  return { timestamp, baseFeePerBlobGasWei: quantity.toString() }
 }
 
 function loadBlobFeeSamples() {
-  let samples = []
+  let samples
   try {
-    const saved = JSON.parse(localStorage.getItem(BLOB_FEE_SAMPLES_KEY) || '[]')
-    samples = Array.isArray(saved) ? saved.map(normalizeBlobFeeSample).filter(Boolean) : []
+    const saved = JSON.parse(safeStorageGet(BLOB_FEE_SAMPLES_KEY, '[]'))
+    samples = Array.isArray(saved) ? saved.slice(-BLOB_FEE_MAX_LOADED_SAMPLES).map(normalizeBlobFeeSample).filter(Boolean) : []
   } catch {
     samples = []
   }
@@ -481,7 +631,7 @@ function pruneBlobFeeSamples(samples) {
 
 function saveBlobFeeSamples() {
   state.blobFees.samples = pruneBlobFeeSamples(state.blobFees.samples)
-  localStorage.setItem(BLOB_FEE_SAMPLES_KEY, JSON.stringify(state.blobFees.samples))
+  safeStorageSet(BLOB_FEE_SAMPLES_KEY, JSON.stringify(state.blobFees.samples))
 }
 
 function normalizeBlobFeePrefs(value) {
@@ -491,46 +641,111 @@ function normalizeBlobFeePrefs(value) {
 }
 
 function loadBlobFeePrefs() {
-  return normalizeBlobFeePrefs(safeJsonObject(localStorage.getItem(BLOB_FEE_PREFS_KEY)))
+  return normalizeBlobFeePrefs(safeJsonObject(safeStorageGet(BLOB_FEE_PREFS_KEY)))
 }
 
 function saveBlobFeePrefs() {
   state.blobFeePrefs = normalizeBlobFeePrefs(state.blobFeePrefs)
-  localStorage.setItem(BLOB_FEE_PREFS_KEY, JSON.stringify(state.blobFeePrefs))
-}
-
-function favoriteId(item) {
-  return [
-    item.type,
-    normalizeHex(item.stationAddress),
-    normalizeHex(item.inboxAddress || ''),
-    normalizeHex(item.publisher || ''),
-    normalizeHex(item.streamIdHash || ''),
-    item.streamId || '',
-  ].join(':')
-}
-
-function isHttpEndpoint(value) {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' || url.protocol === 'http:'
-  } catch {
-    return false
-  }
+  safeStorageSet(BLOB_FEE_PREFS_KEY, JSON.stringify(state.blobFeePrefs))
 }
 
 function validateEndpointList(label, values) {
-  if (!values.length) return [`${label} requires at least one endpoint.`]
-  return values
-    .filter((value) => !isHttpEndpoint(value))
-    .map((value) => `${label} endpoint is not a valid HTTP(S) URL: ${value}`)
+  try {
+    normalizeHttpEndpointList(values, label)
+    return []
+  } catch (error) {
+    return [publicErrorMessage(error)]
+  }
 }
 
-function normalizeStationAddressInput(value) {
-  const address = extractAddress(value)
-  if (address) return address
-  const trimmed = String(value || '').trim()
-  return /^0x[a-fA-F0-9]{40}$/.test(trimmed) ? trimmed.toLowerCase() : ''
+function validateArchiveTemplateList(values) {
+  if (!values.length) return []
+  try {
+    normalizeArchiveTemplateList(values)
+    return []
+  } catch (error) {
+    return [publicErrorMessage(error)]
+  }
+}
+
+function normalizedEndpointListOrEmpty(values, label) {
+  try { return [...normalizeHttpEndpointList(unique(parseLines(values)), label)] } catch { return [] }
+}
+
+function normalizedArchiveTemplatesOrEmpty(values) {
+  if (!parseLines(values).length) return []
+  try { return [...normalizeArchiveTemplateList(unique(parseLines(values)))] } catch { return [] }
+}
+
+function configuredChannelKey(config = state.config) {
+  if (!config?.publisher || !config?.streamId) return ''
+  try {
+    return config.chainId && config.stationAddress
+      ? v1ScopedChannelIdentity(config).key
+      : channelIdentity(config).key
+  } catch {
+    return ''
+  }
+}
+
+function currentLoadedSegment(record) {
+  if (!record?.cacheKey) return null
+  const channelKey = configuredChannelKey()
+  if (!channelKey) return null
+  const segment = state.segments.find((candidate) => candidate.cacheKey === record.cacheKey) || null
+  if (!segment || segment.channelKey !== channelKey || segmentIsQuarantined(segment)) return null
+  try {
+    const scoped = Boolean(record.chainId && record.stationAddress && record.syntheticChannelId)
+    return (scoped ? v1ScopedChannelIdentity(record).key : channelIdentity(record).key) === channelKey
+      && (scoped ? scopedSegmentIdentityKey(record) : segmentIdentityKey(record)) === record.cacheKey
+      && record.sequence === segment.sequence
+      && normalizeHex(record.txHash) === normalizeHex(segment.txHash)
+      ? segment
+      : null
+  } catch {
+    return null
+  }
+}
+
+function assertCurrentLoadedSegment(record) {
+  const segment = currentLoadedSegment(record)
+  if (!segment) throw new Error('Segment does not belong to the currently loaded publisher-scoped channel.')
+  assertPlayableContinuity(segment)
+  return segment
+}
+
+function promoteVerifiedRecord(segment, record) {
+  const loaded = assertCurrentLoadedSegment(segment)
+  const promoted = {
+    ...record,
+    publisher: loaded.publisher,
+    streamIdHash: loaded.streamIdHash,
+    streamId: loaded.streamId,
+    channelKey: loaded.channelKey,
+    sequence: loaded.sequence,
+    txHash: loaded.txHash,
+    payloadSha256: loaded.payloadSha256,
+    codec: loaded.codec,
+    continuity: loaded.continuity,
+    quarantined: false,
+    payloadValidity: 'valid',
+  }
+  state.verified.set(loaded.cacheKey, promoted)
+  enforceVerifiedMemoryLimit([loaded.cacheKey, state.currentRecordKey])
+  loaded.payloadValidity = 'valid'
+  return promoted
+}
+
+function enforceVerifiedMemoryLimit(protectedKeys = []) {
+  const retainedKeys = retainedVerifiedRecordKeys([...state.verified.values()], {
+    maxBytes: VERIFIED_MEMORY_MAX_BYTES,
+    protectedKeys,
+  })
+  for (const cacheKey of state.verified.keys()) {
+    if (retainedKeys.has(cacheKey)) continue
+    state.verified.delete(cacheKey)
+    releaseObjectUrl(cacheKey, { preserveActive: true })
+  }
 }
 
 function parseArchiveStationInput(value) {
@@ -544,74 +759,259 @@ function parseArchiveStationInput(value) {
 
 function normalizeBlobVersionedHashes(value) {
   if (!Array.isArray(value)) return []
-  return value.map(normalizeHex).filter(isBytes32Hex)
+  if (value.length > MAX_SEGMENT_BLOBS) throw new Error(`blobVersionedHashes exceeds ${MAX_SEGMENT_BLOBS} entries`)
+  if (value.some((hash) => !isBytes32Hex(hash))) throw new Error('blobVersionedHashes must contain unique bytes32 hex values')
+  const hashes = value.map(normalizeHex)
+  if (new Set(hashes).size !== hashes.length) {
+    throw new Error('blobVersionedHashes must contain unique bytes32 hex values')
+  }
+  return hashes
 }
 
 function txBlobVersionedHashes(tx) {
   return normalizeBlobVersionedHashes(tx?.blobVersionedHashes || tx?.blob_versioned_hashes || [])
 }
 
+function sanitizedUrlParams(search) {
+  const params = new URLSearchParams(search)
+  let removedSensitive = false
+  for (const name of SENSITIVE_URL_PARAMS) {
+    if (!params.has(name)) continue
+    params.delete(name)
+    removedSensitive = true
+  }
+  return { params, removedSensitive }
+}
+
+function shareableUrlConfig(value) {
+  const config = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  return {
+    ...(config.chainPreset ? { chainPreset: config.chainPreset } : {}),
+    ...(config.streamId != null ? { streamId: config.streamId } : {}),
+    ...(config.streamIdHash != null ? { streamIdHash: config.streamIdHash } : {}),
+    ...(config.publisher != null ? { publisher: config.publisher } : {}),
+    ...(config.stationAddress != null ? { stationAddress: config.stationAddress } : {}),
+    ...(config.fromBlock != null ? { fromBlock: config.fromBlock } : {}),
+    ...(config.cacheLimitMb != null ? { cacheLimitMb: config.cacheLimitMb } : {}),
+  }
+}
+
+function sameCanonicalSegment(left, right) {
+  if (!left || !right) return false
+  return left.cacheKey === right.cacheKey
+    && normalizeHex(left.blockHash) === normalizeHex(right.blockHash)
+    && left.blockNumber === right.blockNumber
+    && left.transactionIndex === right.transactionIndex
+    && left.logIndex === right.logIndex
+    && normalizeHex(left.txHash) === normalizeHex(right.txHash)
+    && left.sequence === right.sequence
+    && left.payloadSha256 === right.payloadSha256
+    && JSON.stringify((left.blobVersionedHashes || []).map(normalizeHex)) === JSON.stringify((right.blobVersionedHashes || []).map(normalizeHex))
+}
+
+function playbackContextSnapshot() {
+  return state.playbackContextGeneration
+}
+
+function requireCurrentPlaybackContext(generation) {
+  if (generation !== state.playbackContextGeneration) {
+    throw requestAbortError('Canonical playback context changed.')
+  }
+}
+
+function invalidateOrphanedActivePlayback(nextSegments) {
+  if (!state.currentRecordKey) return false
+  const previous = state.segments.find((segment) => segment.cacheKey === state.currentRecordKey) || null
+  const replacement = nextSegments.find((segment) => segment.cacheKey === state.currentRecordKey) || null
+  if (sameCanonicalSegment(previous, replacement) && !segmentIsQuarantined(replacement)) return false
+
+  const orphanedKey = state.currentRecordKey
+  state.playbackContextGeneration += 1
+  state.playbackAdvanceToken += 1
+  state.prefetching.clear()
+  state.prefetchPromises.clear()
+  if (els.player) {
+    els.player.pause()
+    els.player.removeAttribute('src')
+    els.player.load()
+  }
+  state.currentRecordKey = ''
+  state.liveEdgeKey = ''
+  state.playbackMode = 'interrupted'
+  releaseObjectUrl(orphanedKey)
+  return true
+}
+
+function safeSessionJsonObject() {
+  try {
+    return safeJsonObject(sessionStorage.getItem(SESSION_ENDPOINT_CONFIG_KEY))
+  } catch {
+    return {}
+  }
+}
+
+function endpointPersistenceSplit(config) {
+  const persistent = { ...config }
+  const session = {}
+  let hasSessionOnly = false
+  for (const field of ['executionRpcs', 'beaconApis', 'archiveTemplates']) {
+    const values = Array.isArray(config?.[field]) ? [...config[field]] : []
+    if (!values.some(endpointRequiresSessionStorage)) continue
+    hasSessionOnly = true
+    session[field] = values
+    persistent[field] = values.filter((value) => !endpointRequiresSessionStorage(value))
+  }
+  return { persistent, session, hasSessionOnly }
+}
+
+function sessionEndpointConfig(preset) {
+  const store = safeSessionJsonObject()
+  const config = store.networks?.[preset]
+  return config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+}
+
+function saveSessionEndpointConfig(preset, config) {
+  try {
+    const store = safeSessionJsonObject()
+    const networks = store.networks && typeof store.networks === 'object' && !Array.isArray(store.networks)
+      ? { ...store.networks }
+      : {}
+    if (Object.keys(config).length) networks[preset] = config
+    else delete networks[preset]
+    sessionStorage.setItem(SESSION_ENDPOINT_CONFIG_KEY, JSON.stringify({ networks }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function configPersistenceNotice(result) {
+  if (!result.persistent) return ' Browser settings are unavailable, so this choice lasts only for this tab.'
+  if (result.hasSessionOnly && result.session) return ' URLs with user information or query parameters are session-only and were not written to persistent storage.'
+  if (result.hasSessionOnly) return ' Sensitive URL persistence is unavailable, so those URLs last only until this page reloads.'
+  return ''
+}
+
 function readUrlState() {
-  const params = new URLSearchParams(window.location.search)
+  const localConfig = window.history.state?.rfeLocalConfig === true
+  const { params, removedSensitive } = sanitizedUrlParams(window.location.search)
+  if (removedSensitive) {
+    const query = params.toString()
+    const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+    window.history.replaceState(localConfig ? { rfeLocalConfig: true } : null, '', cleanUrl)
+  }
   const config = {}
   const chainPreset = params.get('network') || params.get('chainPreset')
   if (CHAIN_PRESETS[chainPreset]) config.chainPreset = chainPreset
   if (params.has('stream')) config.streamId = params.get('stream')
   if (params.has('streamId')) config.streamId = params.get('streamId')
+  if (params.has('streamIdHash')) config.streamIdHash = params.get('streamIdHash')
+  if (params.has('publisher')) config.publisher = params.get('publisher')
   if (params.has('station')) config.stationAddress = params.get('station')
   if (params.has('stationAddress')) config.stationAddress = params.get('stationAddress')
   if (params.has('fromBlock')) config.fromBlock = params.get('fromBlock')
-  if (params.has('executionRpcs')) config.executionRpcs = parseLines(params.get('executionRpcs'))
-  if (params.has('executionRpc')) config.executionRpcs = parseLines(params.get('executionRpc'))
-  if (params.has('beaconApis')) config.beaconApis = parseLines(params.get('beaconApis'))
-  if (params.has('beaconApi')) config.beaconApis = parseLines(params.get('beaconApi'))
-  if (params.has('archiveTemplates')) config.archiveTemplates = parseLines(params.get('archiveTemplates'))
-  if (params.has('cacheLimitMb')) config.cacheLimitMb = Number(params.get('cacheLimitMb'))
-  return { config, segment: params.get('segment') || params.get('tx') || '' }
+  if (params.has('cacheLimitMb')) config.cacheLimitMb = clampCacheLimitMb(params.get('cacheLimitMb'), DEFAULTS.cacheLimitMb, { min: CACHE_LIMIT_MIN_MB, max: CACHE_LIMIT_MAX_MB })
+  return { config, segment: params.get('segment') || params.get('tx') || '', localConfig }
 }
 
 function syncUrlState({ segment = state?.selectedSegmentQuery || '' } = {}) {
   const params = new URLSearchParams(window.location.search)
   params.set('network', state.config.chainPreset)
   params.set('stream', state.config.streamId || '')
+  const streamIdHash = state.config.streamId
+    ? state.config.streamIdHash || canonicalStreamIdHash(state.config.streamId)
+    : ''
+  if (streamIdHash) params.set('streamIdHash', streamIdHash)
+  else params.delete('streamIdHash')
+  if (state.config.publisher) params.set('publisher', state.config.publisher)
+  else params.delete('publisher')
   params.set('station', state.config.stationAddress || '')
   params.set('fromBlock', state.config.fromBlock || '')
-  params.delete('executionRpcs')
-  params.delete('executionRpc')
-  params.delete('beaconApis')
-  params.delete('beaconApi')
-  params.delete('archiveTemplates')
+  for (const name of SENSITIVE_URL_PARAMS) params.delete(name)
   params.set('cacheLimitMb', String(state.config.cacheLimitMb || DEFAULTS.cacheLimitMb))
   if (segment) params.set('segment', segment)
   else params.delete('segment')
   const query = params.toString()
   const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
-  window.history.replaceState(null, '', nextUrl)
+  window.history.replaceState({ rfeLocalConfig: true }, '', nextUrl)
 }
 
-function loadConfig(urlConfig = {}) {
-  const saved = safeJsonObject(localStorage.getItem('rfe-static-config'))
-  const preset = CHAIN_PRESETS[urlConfig.chainPreset] ? urlConfig.chainPreset : CHAIN_PRESETS[saved.chainPreset] ? saved.chainPreset : DEFAULTS.chainPreset
+function loadConfigStore() {
+  const stored = safeJsonObject(safeStorageGet(CONFIG_KEY))
+  const networks = {}
+  if (stored.networks && typeof stored.networks === 'object' && !Array.isArray(stored.networks)) {
+    for (const preset of Object.keys(CHAIN_PRESETS)) {
+      const config = stored.networks[preset]
+      if (config && typeof config === 'object' && !Array.isArray(config)) networks[preset] = config
+    }
+  }
+  if (Object.keys(networks).length) {
+    return {
+      activePreset: CHAIN_PRESETS[stored.activePreset] ? stored.activePreset : DEFAULTS.chainPreset,
+      networks,
+    }
+  }
+  const legacy = safeJsonObject(safeStorageGet(LEGACY_CONFIG_KEY))
+  const legacyPreset = CHAIN_PRESETS[legacy.chainPreset] ? legacy.chainPreset : ''
+  return legacyPreset
+    ? { activePreset: legacyPreset, networks: { [legacyPreset]: legacy } }
+    : { activePreset: DEFAULTS.chainPreset, networks: {} }
+}
+
+function loadConfig(urlConfig = {}, { useSavedNetworkConfig = false } = {}) {
+  const store = loadConfigStore()
+  const shared = shareableUrlConfig(urlConfig)
+  const explicitPreset = CHAIN_PRESETS[shared.chainPreset] ? shared.chainPreset : ''
+  const preset = explicitPreset || (CHAIN_PRESETS[store.activePreset] ? store.activePreset : DEFAULTS.chainPreset)
   const presetDefaults = CHAIN_PRESETS[preset]
-  const merged = { ...saved, ...urlConfig, chainPreset: preset }
-  const stationAddress = normalizeStationAddressInput(merged.stationAddress) || presetDefaults.stationAddress
+  const saved = !explicitPreset || useSavedNetworkConfig
+    ? { ...(store.networks[preset] || {}), ...sessionEndpointConfig(preset) }
+    : {}
+  const merged = { ...saved, ...shared, chainPreset: preset }
+  const sharedStationExplicit = Object.hasOwn(shared, 'stationAddress')
+  const normalizedStationAddress = normalizeStationAddressInput(merged.stationAddress)
+  const stationAddress = sharedStationExplicit ? normalizedStationAddress : normalizedStationAddress || presetDefaults.stationAddress
+  const sharedStreamExplicit = Object.hasOwn(shared, 'streamId')
+  let streamId
+  try {
+    streamId = boundedStreamId(merged.streamId || presetDefaults.streamId || DEFAULTS.streamId)
+  } catch {
+    streamId = sharedStreamExplicit ? '' : boundedStreamId(presetDefaults.streamId || DEFAULTS.streamId)
+  }
+  const streamIdHash = streamId ? canonicalStreamIdHash(streamId) : ''
+  const previousStreamId = String(saved.streamId || presetDefaults.streamId || DEFAULTS.streamId)
+  const previousStationAddress = normalizeStationAddressInput(saved.stationAddress) || presetDefaults.stationAddress
+  const sharedStreamChanged = Object.hasOwn(shared, 'streamId') && String(shared.streamId) !== previousStreamId
+  const sharedStationChanged = sharedStationExplicit && stationAddress !== previousStationAddress
+  const sharedPublisherExplicit = Object.hasOwn(shared, 'publisher')
+  const publisher = normalizeStationAddressInput(!streamId || ((sharedStreamChanged || sharedStationChanged) && !sharedPublisherExplicit) ? '' : merged.publisher || '')
   return {
     ...DEFAULTS,
     ...presetDefaults,
     ...merged,
     chainPreset: preset,
+    chainId: presetDefaults.chainId,
     stationAddress,
-    executionRpcs: Object.hasOwn(merged, 'executionRpcs') || Object.hasOwn(merged, 'executionRpc') ? unique(parseLines(merged.executionRpcs || merged.executionRpc)) : presetDefaults.executionRpcs,
-    beaconApis: Object.hasOwn(merged, 'beaconApis') || Object.hasOwn(merged, 'beaconApi') ? unique(parseLines(merged.beaconApis || merged.beaconApi)) : presetDefaults.beaconApis,
-    archiveTemplates: Object.hasOwn(merged, 'archiveTemplates') ? unique(parseLines(merged.archiveTemplates)) : DEFAULTS.archiveTemplates,
+    streamId,
+    streamIdHash,
+    publisher,
+    executionRpcs: normalizedEndpointListOrEmpty(Object.hasOwn(merged, 'executionRpcs') || Object.hasOwn(merged, 'executionRpc') ? merged.executionRpcs || merged.executionRpc : presetDefaults.executionRpcs, 'Execution RPC'),
+    beaconApis: normalizedEndpointListOrEmpty(Object.hasOwn(merged, 'beaconApis') || Object.hasOwn(merged, 'beaconApi') ? merged.beaconApis || merged.beaconApi : presetDefaults.beaconApis, 'Beacon API'),
+    archiveTemplates: normalizedArchiveTemplatesOrEmpty(Object.hasOwn(merged, 'archiveTemplates') ? merged.archiveTemplates : DEFAULTS.archiveTemplates),
     logWindowBlocks: positiveNumber(merged.logWindowBlocks, DEFAULTS.logWindowBlocks),
-    cacheLimitMb: positiveNumber(merged.cacheLimitMb, DEFAULTS.cacheLimitMb),
+    cacheLimitMb: clampCacheLimitMb(merged.cacheLimitMb, DEFAULTS.cacheLimitMb, { min: CACHE_LIMIT_MIN_MB, max: CACHE_LIMIT_MAX_MB }),
   }
 }
 
 function saveConfig(config) {
-  localStorage.setItem('rfe-static-config', JSON.stringify(config))
+  const preset = CHAIN_PRESETS[config?.chainPreset] ? config.chainPreset : DEFAULTS.chainPreset
+  const split = endpointPersistenceSplit(config)
+  const store = loadConfigStore()
+  const networks = { ...store.networks, [preset]: { ...split.persistent, chainPreset: preset } }
+  const persisted = safeStorageSet(CONFIG_KEY, JSON.stringify({ activePreset: preset, networks }))
+  const sessionPersisted = saveSessionEndpointConfig(preset, split.session)
   syncUrlState()
+  return Object.freeze({ persistent: persisted, session: sessionPersisted, hasSessionOnly: split.hasSessionOnly })
 }
 
 function setTheme(theme) {
@@ -620,40 +1020,29 @@ function setTheme(theme) {
   els.themeToggle.innerHTML = light ? moonIcon : sunIcon
   els.themeToggle.setAttribute('aria-label', light ? 'Switch to dark mode' : 'Switch to light mode')
   els.themeToggle.title = light ? 'Dark mode' : 'Light mode'
-  try {
-    localStorage.setItem('rfe-theme', light ? 'light' : 'dark')
-  } catch {
-  }
+  safeStorageSet('rfe-theme', light ? 'light' : 'dark')
 }
 
 function initTheme() {
-  let saved = ''
-  try {
-    saved = localStorage.getItem('rfe-theme') || ''
-  } catch {
-  }
+  const saved = safeStorageGet('rfe-theme')
   setTheme(saved === 'light' ? 'light' : 'dark')
 }
 
 function segmentRailBounds() {
-  const min = 180
-  const fallbackMax = Math.max(560, Math.floor(window.innerHeight * 0.82))
-  const feedPanel = document.querySelector('.panel-feeds')
+  const defaultMin = 180
+  const feedPanes = document.querySelector('.feed-panes')
   const blobspacePanel = document.querySelector('.blobspace-panel')
   const segmentsPanel = document.querySelector('.segments-panel')
-  if (!feedPanel || !blobspacePanel || !segmentsPanel || feedPanel.hidden) {
-    return { min, max: fallbackMax }
+  if (!feedPanes || !blobspacePanel || !segmentsPanel || feedPanes.hidden) {
+    return calculateSegmentRailBounds({ viewportHeight: window.innerHeight, feedPanesHidden: true, segmentMin: defaultMin })
   }
-  const style = getComputedStyle(feedPanel)
+  const min = Number.parseFloat(getComputedStyle(segmentsPanel).minHeight) || defaultMin
+  const style = getComputedStyle(feedPanes)
+  const paneHeight = feedPanes.getBoundingClientRect().height
   const rowGap = Number.parseFloat(style.rowGap || style.gap || '0') || 0
-  const fixedChildren = [...feedPanel.children].filter((child) => child !== blobspacePanel && child !== segmentsPanel)
-  const fixedHeight = fixedChildren.reduce((sum, child) => sum + child.getBoundingClientRect().height, 0)
   const verticalPadding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
-  const gapTotal = rowGap * Math.max(0, feedPanel.children.length - 1)
-  const blobspaceMin = 112
-  const available = feedPanel.getBoundingClientRect().height - verticalPadding - gapTotal - fixedHeight - blobspaceMin
-  const max = Math.max(min, Math.floor(available))
-  return { min, max }
+  const blobspaceMin = Number.parseFloat(getComputedStyle(blobspacePanel).minHeight) || 112
+  return calculateSegmentRailBounds({ viewportHeight: window.innerHeight, segmentMin: min, paneHeight, rowGap, verticalPadding, blobspaceMin })
 }
 
 function applySegmentRailHeight(height) {
@@ -664,20 +1053,15 @@ function applySegmentRailHeight(height) {
     els.segmentRailResizer.setAttribute('aria-valuemin', String(bounds.min))
     els.segmentRailResizer.setAttribute('aria-valuemax', String(bounds.max))
     els.segmentRailResizer.setAttribute('aria-valuenow', String(next))
+    const scannerHeight = Math.max(bounds.scannerMin || 112, (bounds.paneHeight || 0) - (bounds.gap || 0) - next)
+    els.segmentRailResizer.setAttribute('aria-valuetext', `Stream segments ${next} pixels; blobspace scanner ${Math.round(scannerHeight)} pixels`)
   }
-  try {
-    localStorage.setItem('rfe-segment-rail-height', String(next))
-  } catch {
-  }
+  safeStorageSet('rfe-segment-rail-height', String(next))
   return next
 }
 
 function initSegmentRailResize() {
-  let saved = 280
-  try {
-    saved = Number(localStorage.getItem('rfe-segment-rail-height') || saved)
-  } catch {
-  }
+  let saved = Number(safeStorageGet('rfe-segment-rail-height', '280'))
   applySegmentRailHeight(saved)
   on(els.segmentRailResizer, 'pointerdown', (event) => {
     event.preventDefault()
@@ -686,7 +1070,7 @@ function initSegmentRailResize() {
     const startHeight = panel?.getBoundingClientRect().height || saved
     els.segmentRailResizer.setPointerCapture(event.pointerId)
     const move = (moveEvent) => {
-      applySegmentRailHeight(startHeight + startY - moveEvent.clientY)
+      saved = applySegmentRailHeight(startHeight + startY - moveEvent.clientY)
     }
     const up = (upEvent) => {
       els.segmentRailResizer.releasePointerCapture(upEvent.pointerId)
@@ -699,32 +1083,119 @@ function initSegmentRailResize() {
     els.segmentRailResizer.addEventListener('pointercancel', up)
   })
   on(els.segmentRailResizer, 'keydown', (event) => {
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
     const current = Number.parseInt(getComputedStyle(document.documentElement).getPropertyValue('--segment-rail-height'), 10) || saved
-    applySegmentRailHeight(current + (event.key === 'ArrowUp' ? 24 : -24))
+    const bounds = segmentRailBounds()
+    const next = event.key === 'Home' ? bounds.min
+      : event.key === 'End' ? bounds.max
+        : current + (event.key === 'ArrowUp' ? 24 : -24)
+    saved = applySegmentRailHeight(next)
   })
+  on(window, 'resize', () => { saved = applySegmentRailHeight(saved) })
 }
 
-function setStatus(value) {
+function announceStatus(value, { assertive = false, key = '' } = {}) {
+  const lane = assertive ? 'assertive' : 'polite'
+  const token = `${key}:${value}`
+  if (lastStatusAnnouncement[lane] === token) return false
+  lastStatusAnnouncement[lane] = token
+  const target = assertive ? els.alertAnnouncer : els.statusAnnouncer
+  if (!target) return false
+  target.textContent = value
+  return true
+}
+
+function setStatus(value, { announce = true, assertive = false, announcementKey = '' } = {}) {
   els.status.textContent = value
+  if (els.recoveryStatus) els.recoveryStatus.textContent = value
+  if (announce) announceStatus(value, { assertive, key: announcementKey })
 }
 
-function setArchiveProgress(message, { current = 0n, total = 0n, active = false } = {}) {
-  if (els.archiveProgress) els.archiveProgress.textContent = message
-  if (!els.archiveProgressBar) return
+function markStartupReady() {
+  els.shell?.removeAttribute('inert')
+  els.shell?.removeAttribute('aria-hidden')
+  if (els.startupShell) els.startupShell.hidden = true
+  document.body.dataset.startup = 'ready'
+}
+
+function runtimeSnapshot() {
+  return { generation: state.runtimeGeneration, signal: state.runtimeController.signal }
+}
+
+function runtimeIsCurrent(runtime) {
+  return Boolean(runtime)
+    && runtime.generation === state.runtimeGeneration
+    && runtime.signal === state.runtimeController.signal
+    && !runtime.signal.aborted
+}
+
+function requireCurrentRuntime(runtime) {
+  if (!runtimeIsCurrent(runtime)) throw requestAbortError('Runtime configuration changed.')
+}
+
+function setRuntimeStatus(runtime, value, options = {}) {
+  if (!runtimeIsCurrent(runtime)) return false
+  setStatus(value, options)
+  return true
+}
+
+function runtimeAllowsMutation(runtime) {
+  return !runtime || runtimeIsCurrent(runtime)
+}
+
+function archiveDefaultMessage(mode = 'station') {
+  return mode === 'inbox'
+    ? 'Scan recent blob transactions sent to an inbox and detect compatible RFE1 streams.'
+    : 'Scan a bounded block range to discover prior Station streams.'
+}
+
+function archiveProgressState(message, { current = 0n, total = 0n, active = false, status = active ? 'scanning' : 'idle' } = {}) {
   const totalValue = typeof total === 'bigint' ? total : BigInt(Math.max(0, Number(total) || 0))
   const currentValue = typeof current === 'bigint' ? current : BigInt(Math.max(0, Number(current) || 0))
-  const percent = totalValue > 0n
-    ? Number((currentValue > totalValue ? totalValue : currentValue) * 100n / totalValue)
-    : 0
-  els.archiveProgressBar.value = Math.max(0, Math.min(100, percent))
-  els.archiveProgressBar.classList.toggle('active', Boolean(active))
-  els.archiveProgressBar.setAttribute('aria-valuetext', active ? `${percent}%` : message)
+  return {
+    message: String(message || ''),
+    current: currentValue < 0n ? 0n : currentValue,
+    total: totalValue < 0n ? 0n : totalValue,
+    active: Boolean(active),
+    status,
+  }
 }
 
-function resetArchiveProgress(message) {
-  setArchiveProgress(message, { current: 0n, total: 0n, active: false })
+function defaultArchiveProgress(mode = 'station') {
+  return archiveProgressState(archiveDefaultMessage(mode))
+}
+
+function renderArchiveProgress() {
+  const progress = state.archive.progress || defaultArchiveProgress(state.archive.mode)
+  if (els.archiveProgress) {
+    els.archiveProgress.textContent = progress.message
+    els.archiveProgress.dataset.state = progress.status
+  }
+  if (!els.archiveProgressBar) return
+  const percent = progress.total > 0n
+    ? Number((progress.current > progress.total ? progress.total : progress.current) * 100n / progress.total)
+    : 0
+  els.archiveProgressBar.value = Math.max(0, Math.min(100, percent))
+  els.archiveProgressBar.classList.toggle('active', progress.active)
+  els.archiveProgressBar.setAttribute('aria-valuetext', progress.active ? `${percent}%` : progress.message)
+}
+
+function setArchiveProgress(message, options = {}) {
+  const previousStatus = state.archive.progress?.status || 'idle'
+  state.archive.progress = archiveProgressState(message, options)
+  renderArchiveProgress()
+  const terminalStatus = state.archive.progress.status
+  if (terminalStatus !== previousStatus && ['success', 'cancelled', 'error'].includes(terminalStatus)) {
+    announceStatus(state.archive.progress.message, {
+      assertive: terminalStatus === 'error',
+      key: `archive-${terminalStatus}`,
+    })
+  }
+}
+
+function resetArchiveProgress(message = archiveDefaultMessage(state.archive.mode)) {
+  setArchiveProgress(message, { current: 0n, total: 0n, active: false, status: 'idle' })
 }
 
 function defaultBlobspaceRows() {
@@ -764,16 +1235,10 @@ function renderMuteIcon() {
   els.muteToggle.title = els.player.muted ? 'Unmute' : 'Mute'
 }
 
-function normalizeHex(value) {
-  return String(value || '').toLowerCase()
-}
-
 function extractTxHash(value) {
-  return String(value || '').match(/0x[a-fA-F0-9]{64}/)?.[0]?.toLowerCase() || ''
-}
-
-function extractAddress(value) {
-  return String(value || '').match(/0x[a-fA-F0-9]{40}/)?.[0]?.toLowerCase() || ''
+  const text = String(value || '')
+  if (text.length > MAX_LOOKUP_INPUT_CODE_UNITS) return ''
+  return text.match(/0x[a-fA-F0-9]{64}/)?.[0]?.toLowerCase() || ''
 }
 
 function isExplorerUrl(value) {
@@ -788,12 +1253,13 @@ function isExplorerUrl(value) {
 function parseLookupInput(value) {
   const raw = String(value || '').trim()
   if (!raw) return { kind: 'empty', valid: false, query: '', message: 'Paste a transaction URL, transaction hash, blob hash, block number, or sequence.' }
+  if (raw.length > MAX_LOOKUP_INPUT_CODE_UNITS) return { kind: 'invalid', valid: false, query: '', message: `Lookup input exceeds ${MAX_LOOKUP_INPUT_CODE_UNITS.toLocaleString()} characters.` }
   const txHash = extractTxHash(raw)
   if (isExplorerUrl(raw)) {
     const url = new URL(raw)
     const pathParts = url.pathname.split('/').filter(Boolean)
     if (pathParts[0] === 'tx' && txHash) return { kind: 'tx-url', valid: true, query: txHash, message: `Explorer transaction URL recognized: ${shortHash(txHash)}.` }
-    if (pathParts[0] === 'block' && /^\d+$/.test(pathParts[1] || '')) return { kind: 'block-url', valid: true, query: pathParts[1], message: `Explorer block URL recognized: block ${pathParts[1]}.` }
+    if (pathParts[0] === 'block' && (pathParts[1] || '').length <= MAX_LOOKUP_DECIMAL_DIGITS && /^\d+$/.test(pathParts[1] || '')) return { kind: 'block-url', valid: true, query: pathParts[1], message: `Explorer block URL recognized: block ${pathParts[1]}.` }
     if (txHash) return { kind: 'hash-url', valid: true, query: txHash, message: `Explorer URL contains hash ${shortHash(txHash)}.` }
     return { kind: 'invalid', valid: false, query: raw, message: 'Explorer URL did not contain a supported transaction hash or block number.' }
   }
@@ -803,7 +1269,7 @@ function parseLookupInput(value) {
       ? { kind: 'blob-hash', valid: true, query: normalized, message: `Blob versioned hash recognized: ${shortHash(normalized)}.` }
       : { kind: 'tx-hash', valid: true, query: normalized, message: `Transaction hash recognized: ${shortHash(normalized)}.` }
   }
-  if (/^\d+$/.test(raw)) {
+  if (raw.length <= MAX_LOOKUP_DECIMAL_DIGITS && /^\d+$/.test(raw)) {
     return { kind: 'number', valid: true, query: raw, message: `Number recognized: segment sequence or block ${raw}.` }
   }
   if (txHash) return { kind: 'tx-hash', valid: true, query: txHash, message: `Transaction hash recognized: ${shortHash(txHash)}.` }
@@ -815,50 +1281,6 @@ function updateLookupMessage(parsed = parseLookupInput(els.segmentLookup?.value 
   els.lookupMessage.textContent = parsed.message
   els.lookupMessage.dataset.state = parsed.valid || parsed.kind === 'empty' ? 'ok' : 'error'
   return parsed
-}
-
-function strip0x(value) {
-  return String(value || '').replace(/^0x/i, '')
-}
-
-function isBytes32Hex(value) {
-  return /^0x[0-9a-fA-F]{64}$/.test(String(value || ''))
-}
-
-function isBytes48Hex(value) {
-  return /^0x[0-9a-fA-F]{96}$/.test(String(value || ''))
-}
-
-function isBlobHex(value) {
-  return /^0x(?:[0-9a-fA-F]{2})*$/.test(String(value || ''))
-}
-
-function isByteHex(value) {
-  return /^(?:0x)?(?:[0-9a-fA-F]{2})*$/.test(String(value || ''))
-}
-
-function hexToBytes(value) {
-  if (!isByteHex(value)) throw new Error('Invalid byte hex')
-  const hex = strip0x(value)
-  const bytes = new Uint8Array(hex.length / 2)
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16)
-  }
-  return bytes
-}
-
-function bytesToHex(bytes) {
-  return `0x${[...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`
-}
-
-function concatBytes(chunks, totalLength) {
-  const out = new Uint8Array(totalLength)
-  let offset = 0
-  for (const chunk of chunks) {
-    out.set(chunk, offset)
-    offset += chunk.length
-  }
-  return out
 }
 
 async function sha256Hex(bytes) {
@@ -903,11 +1325,6 @@ function fmtAge(iso) {
   const minutes = Math.round(seconds / 60)
   if (minutes < 60) return `${minutes}m`
   return `${Math.round(minutes / 60)}h`
-}
-
-function fmtTime(timestampMs) {
-  if (!timestampMs) return '-'
-  return new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestampMs))
 }
 
 function fmtLocalTime(timestampMs) {
@@ -1011,7 +1428,8 @@ function fmtUtcMinute(timestampMs) {
 }
 
 function segmentTimeBlock(segment) {
-  const timestampMs = segment?.createdAt ? Date.parse(segment.createdAt) : state.blockTimes.get(Number(segment?.blockNumber))
+  const blockHash = isBytes32Hex(segment?.blockHash) ? normalizeHex(segment.blockHash) : ''
+  const timestampMs = segment?.createdAt ? Date.parse(segment.createdAt) : blockHash ? state.blockTimes.get(blockHash) : null
   return {
     time: fmtUtcMinute(timestampMs),
     block: segment?.blockNumber ? String(segment.blockNumber) : '-',
@@ -1056,73 +1474,18 @@ function publicUrlLabel(value) {
 }
 
 function publicErrorMessage(error) {
-  return String(error?.message || error || 'request failed')
+  const message = String(error?.message || error || 'request failed')
     .replace(/https?:\/\/[^\s"'<>)}\]]+/g, '[redacted endpoint]')
+  return message.length > 500 ? `${message.slice(0, 499)}…` : message
 }
 
-function abiWord(data, wordIndex, label) {
-  if (!Number.isSafeInteger(wordIndex) || wordIndex < 0) throw new Error(`Invalid ${label}: word index must be non-negative`)
-  const word = data.slice(wordIndex * 64, wordIndex * 64 + 64)
-  if (!/^[0-9a-fA-F]{64}$/.test(word)) throw new Error(`Invalid ${label}: missing ABI word ${wordIndex}`)
-  return word
-}
-
-function readWord(data, wordIndex, label = 'ABI data') {
-  return BigInt(`0x${abiWord(data, wordIndex, label)}`)
-}
-
-function abiWordNumber(data, wordIndex, label = 'ABI data') {
-  const value = readWord(data, wordIndex, label)
-  const number = Number(value)
-  if (!Number.isSafeInteger(number)) throw new Error(`Invalid ${label}: value exceeds safe integer range`)
-  return number
-}
-
-function readBytes32(data, wordIndex, label = 'ABI data') {
-  return `0x${abiWord(data, wordIndex, label)}`
-}
-
-function abiOffsetWord(data, wordIndex, label) {
-  const offset = abiWordNumber(data, wordIndex, label)
-  if (offset < 0 || offset % 32 !== 0) {
-    throw new Error(`Invalid ${label}: dynamic offset must be a 32-byte boundary`)
-  }
-  return offset
-}
-
-function readString(data, wordIndex, label = 'ABI string') {
-  const offset = abiOffsetWord(data, wordIndex, label)
-  const length = abiWordNumber(data, offset / 32, label)
-  if (length < 0) throw new Error(`Invalid ${label}: string length is unsafe`)
-  const start = offset * 2 + 64
-  if (start + length * 2 > data.length) throw new Error(`Invalid ${label}: string extends past ABI data`)
-  return new TextDecoder().decode(hexToBytes(data.slice(start, start + length * 2)))
-}
-
-function readBytes32Array(data, wordIndex, label = 'ABI bytes32 array') {
-  const offset = abiOffsetWord(data, wordIndex, label)
-  const length = abiWordNumber(data, offset / 32, label)
-  if (length < 0) throw new Error(`Invalid ${label}: array length is unsafe`)
-  const startWord = offset / 32 + 1
-  return Array.from({ length }, (_, index) => readBytes32(data, startWord + index, label))
-}
-
-function rpcQuantity(value, label) {
-  if (typeof value !== 'string' || !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value)) {
-    throw new Error(`${label} must be a JSON-RPC quantity`)
-  }
-  return BigInt(value)
-}
-
-function rpcQuantityNumber(value, label) {
-  const quantity = rpcQuantity(value, label)
-  const number = Number(quantity)
-  if (!Number.isSafeInteger(number)) throw new Error(`${label} exceeds safe integer range`)
-  return number
+function isAddressHex(value) {
+  return typeof value === 'string' && value.length === 42 && /^0x[0-9a-fA-F]{40}$/.test(value)
 }
 
 function parseBlockInput(value, label) {
   const text = String(value || '').trim()
+  if (text.length > 16) throw new Error(`${label} exceeds safe integer range`)
   if (!/^\d+$/.test(text)) throw new Error(`${label} must be a non-negative block number`)
   const number = Number(text)
   if (!Number.isSafeInteger(number)) throw new Error(`${label} exceeds safe integer range`)
@@ -1172,19 +1535,22 @@ function topicUintNumber(topic, label) {
 function assertSegmentLogShape(log) {
   if (!log || typeof log !== 'object' || Array.isArray(log)) throw new Error('Invalid Station log: expected object')
   if (!Array.isArray(log.topics) || log.topics.length < 4) throw new Error('Invalid Station log: expected four topics')
-  if (normalizeHex(log.topics[0]) !== EVENT_TOPIC) throw new Error('Invalid Station log: unexpected event topic')
+  if (!isBytes32Hex(log.topics[0]) || normalizeHex(log.topics[0]) !== EVENT_TOPIC) throw new Error('Invalid Station log: unexpected event topic')
   for (const [index, topic] of log.topics.slice(1, 4).entries()) {
     if (!isBytes32Hex(topic)) throw new Error(`Invalid Station log: topic ${index + 1} must be bytes32`)
   }
-  if (typeof log.data !== 'string' || !isByteHex(log.data)) throw new Error('Invalid Station log: data must be byte hex')
+  if (typeof log.data !== 'string') throw new Error('Invalid Station log: data must be byte hex')
+  const dataHexLength = log.data.startsWith('0x') ? log.data.length - 2 : log.data.length
+  if (dataHexLength > MAX_STATION_LOG_DATA_BYTES * 2) throw new Error(`Invalid Station log: ABI data exceeds ${MAX_STATION_LOG_DATA_BYTES} bytes`)
+  if (!isByteHex(log.data)) throw new Error('Invalid Station log: data must be byte hex')
   if (!isBytes32Hex(log.transactionHash)) throw new Error('Invalid Station log: transactionHash must be bytes32')
   if (!isBytes32Hex(log.blockHash)) throw new Error('Invalid Station log: blockHash must be bytes32')
 }
 
-function decodeSegmentLog(log) {
+function decodeSegmentLog(log, { chainId, stationAddress } = {}) {
   assertSegmentLogShape(log)
   const data = strip0x(log.data)
-  const segment = {
+  const segment = withChannelIdentity({
     app: 'eth-radio',
     version: 1,
     source: 'station',
@@ -1194,8 +1560,8 @@ function decodeSegmentLog(log) {
     streamId: readString(data, 0, 'Station log streamId'),
     durationMs: abiWordNumber(data, 1, 'Station log durationMs'),
     payloadBytes: abiWordNumber(data, 2, 'Station log payloadBytes'),
-    payloadSha256Hex: readBytes32(data, 3, 'Station log payloadSha256'),
-    payloadSha256: strip0x(readBytes32(data, 3, 'Station log payloadSha256')),
+    payloadSha256Hex: normalizeHex(readBytes32(data, 3, 'Station log payloadSha256')),
+    payloadSha256: strip0x(normalizeHex(readBytes32(data, 3, 'Station log payloadSha256'))),
     codec: readString(data, 4, 'Station log codec'),
     previousSegmentHash: readBytes32(data, 5, 'Station log previousSegmentHash'),
     blobVersionedHashes: readBytes32Array(data, 6, 'Station log blobVersionedHashes').map(normalizeHex),
@@ -1205,105 +1571,116 @@ function decodeSegmentLog(log) {
     blockHash: log.blockHash,
     transactionIndex: rpcQuantityNumber(log.transactionIndex, 'segment transactionIndex'),
     logIndex: rpcQuantityNumber(log.logIndex, 'segment logIndex'),
-  }
+    chainId,
+    stationAddress,
+  })
+  const scopedIdentity = v1ScopedChannelIdentity(segment)
+  segment.channelKey = scopedIdentity.key
+  segment.syntheticChannelId = scopedIdentity.syntheticChannelId
   segment.blobCount = segment.blobVersionedHashes.length
-  segment.cacheKey = `${segment.streamId}:${segment.sequence}:${segment.txHash}`
+  segment.cacheKey = scopedSegmentIdentityKey(segment)
+  segment.payloadValidity = 'unknown'
   return segment
 }
 
 async function withEndpointFallback(kind, endpoints, request) {
-  if (!endpoints.length) {
-    if (kind === 'execution') state.activeExecutionRpc = ''
-    if (kind === 'beacon') state.activeBeaconApi = ''
-    state.endpointHealth[kind] = { state: 'missing', message: `No ${kind} endpoints configured.` }
-    renderHealth()
-    throw new Error(`No ${kind} endpoints configured. Open Connection settings and apply a preset or custom HTTP(S) endpoint.`)
-  }
-  state.endpointHealth[kind] = { state: 'checking', message: `Checking ${endpoints.length} ${kind} endpoint${endpoints.length === 1 ? '' : 's'}...` }
-  renderHealth()
-  const failures = []
-  for (const endpoint of endpoints) {
-    try {
-      const result = await request(endpoint.replace(/\/$/, ''))
+  return runEndpointFallback(kind, endpoints, request, {
+    onActive(endpoint) {
       if (kind === 'execution') state.activeExecutionRpc = endpoint
       if (kind === 'beacon') state.activeBeaconApi = endpoint
-      state.endpointHealth[kind] = { state: 'ok', message: publicUrlLabel(endpoint) }
+    },
+    onHealth(health) {
+      state.endpointHealth[kind] = health
       renderHealth()
-      return result
-    } catch (error) {
-      failures.push(`${publicUrlLabel(endpoint)}: ${publicErrorMessage(error)}`)
-    }
-  }
-  if (kind === 'execution') state.activeExecutionRpc = ''
-  if (kind === 'beacon') state.activeBeaconApi = ''
-  state.endpointHealth[kind] = { state: 'failed', message: failures.join(' | ') }
-  renderHealth()
-  throw new Error(`${kind} endpoints failed: ${failures.join(' | ')}`)
+    },
+    publicEndpointLabel: publicUrlLabel,
+    publicError: publicErrorMessage,
+  })
 }
 
-async function rpc(method, params = []) {
+async function rpc(method, params = [], { signal } = {}) {
   return withEndpointFallback('execution', state.config.executionRpcs, async (endpoint) => {
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTimeout(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomUUID(), method, params }),
-    })
+    }, { signal })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json()
-    if (body.error) throw new Error(body.error.message || 'RPC error')
+    const body = await readBoundedJsonResponse(response, MAX_RPC_RESPONSE_BYTES, `JSON-RPC ${method}`, { signal })
+    if (!body || typeof body !== 'object' || Array.isArray(body) || body.jsonrpc !== '2.0') {
+      throw new Error(`JSON-RPC ${method} returned an invalid response envelope`)
+    }
+    if (body.error) throw new Error(typeof body.error?.message === 'string' ? body.error.message.slice(0, 500) : 'RPC error')
+    if (!Object.hasOwn(body, 'result')) throw new Error(`JSON-RPC ${method} response is missing result`)
     return body.result
   })
 }
 
-async function executionBlock(blockNumber, fullTransactions = false) {
-  const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), fullTransactions])
+async function executionBlock(blockNumber, fullTransactions = false, { signal } = {}) {
+  const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), fullTransactions], { signal })
   if (!block || typeof block !== 'object') throw new Error(`Execution block ${blockNumber} was not found`)
   return block
 }
 
-async function blockTimestampMs(blockNumber) {
-  const block = await executionBlock(blockNumber, false)
+async function blockTimestampMs(blockNumber, { signal } = {}) {
+  const block = await executionBlock(blockNumber, false, { signal })
   return timestampMsFromSeconds(block.timestamp, 'block timestamp')
 }
 
-async function blockAtOrBeforeTimestamp(targetMs, head) {
-  const headMs = await blockTimestampMs(head)
+async function blockAtOrBeforeTimestamp(targetMs, head, { signal } = {}) {
+  const headMs = await blockTimestampMs(head, { signal })
   if (targetMs >= headMs) return head
   const genesisBlock = 0n
   let low = genesisBlock
   let high = head
   while (low < high) {
     const mid = (low + high + 1n) / 2n
-    const midMs = await blockTimestampMs(mid)
+    const midMs = await blockTimestampMs(mid, { signal })
     if (midMs <= targetMs) low = mid
     else high = mid - 1n
   }
   return low
 }
 
-async function archiveDateBlockRange(head) {
-  const fromMs = parseDatetimeLocal(els.archiveFromDate?.value, 'Archive from-date')
-  const toMs = parseDatetimeLocal(els.archiveToDate?.value, 'Archive to-date')
-  if (fromMs == null && toMs == null) return null
+function archiveRangeSelection({ rangeMode = 'date', fromBlock = '', fromDate = '', toDate = '' } = {}) {
+  const mode = String(rangeMode || '').trim()
+  const blockValue = String(fromBlock || '').trim()
+  const fromDateValue = String(fromDate || '').trim()
+  const toDateValue = String(toDate || '').trim()
+  if (mode !== 'block' && mode !== 'date') throw new Error('Choose either From block or Date range before scanning.')
+  if (mode === 'block') {
+    if (fromDateValue || toDateValue) throw new Error('From block cannot be combined with archive date fields. Choose one range mode.')
+    if (!blockValue) throw new Error('Enter a From block for block-range scanning.')
+  } else {
+    if (blockValue) throw new Error('From block cannot be combined with archive date fields. Choose one range mode.')
+    if (!fromDateValue && !toDateValue) throw new Error('Enter at least one archive date for date-range scanning.')
+  }
+  return { mode, fromBlock: blockValue, fromDate: fromDateValue, toDate: toDateValue }
+}
+
+async function archiveDateBlockRange(head, { signal, fromDate = '', toDate = '' } = {}) {
+  const fromMs = parseDatetimeLocal(fromDate, 'Archive from-date')
+  const toMs = parseDatetimeLocal(toDate, 'Archive to-date')
   if (fromMs != null && toMs != null && fromMs > toMs) throw new Error('Archive from-date must be before to-date')
-  const from = fromMs == null ? 0n : await blockAtOrBeforeTimestamp(fromMs, head)
-  const to = toMs == null ? head : await blockAtOrBeforeTimestamp(toMs, head)
+  const from = fromMs == null ? 0n : await blockAtOrBeforeTimestamp(fromMs, head, { signal })
+  const to = toMs == null ? head : await blockAtOrBeforeTimestamp(toMs, head, { signal })
   return { from, to: to > head ? head : to }
 }
 
 function rpcQuantityBigInt(value, label) {
-  if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error(`${label} must be an RPC quantity`)
-  return BigInt(value)
+  return rpcQuantity(value, label)
 }
 
 function blobFeeHistoryValues(response) {
   const fees = Array.isArray(response?.baseFeePerBlobGas) ? response.baseFeePerBlobGas : null
   if (!fees) throw new Error('eth_feeHistory response missing baseFeePerBlobGas')
   const ratios = Array.isArray(response?.blobGasUsedRatio) ? response.blobGasUsedRatio : []
+  if (fees.length > BLOB_FEE_HISTORY_CHUNK_BLOCKS + 1) throw new Error('eth_feeHistory baseFeePerBlobGas exceeds the requested chunk bound')
+  if (ratios.length > BLOB_FEE_HISTORY_CHUNK_BLOCKS) throw new Error('eth_feeHistory blobGasUsedRatio exceeds the requested chunk bound')
   return {
     baseFees: fees.map((value) => rpcQuantityBigInt(value, 'baseFeePerBlobGas')).filter((value) => value > 0n),
     utilization: ratios
-      .map((value) => Number(value))
+      .filter((value) => typeof value === 'number')
       .filter((value) => Number.isFinite(value) && value >= 0 && value <= 1),
     oldestBlock: response.oldestBlock ? rpcQuantityBigInt(response.oldestBlock, 'feeHistory oldestBlock') : null,
   }
@@ -1321,7 +1698,7 @@ async function fetchBlobFeeHistory(blocks) {
   let remaining = blocks
   while (remaining > 0) {
     const chunk = Math.min(remaining, BLOB_FEE_HISTORY_CHUNK_BLOCKS)
-    const response = await rpc('eth_feeHistory', [chunk, newestBlock, []])
+    const response = await rpc('eth_feeHistory', [toBlockHex(chunk), newestBlock, []])
     const parsed = blobFeeHistoryValues(response)
     baseFees.push(...parsed.baseFees)
     utilization.push(...parsed.utilization)
@@ -1399,7 +1776,7 @@ async function refreshBlobFees() {
     state.blobFees.utilization = hourWindow?.utilization ?? state.blobFees.averages.tenMinute?.utilization ?? null
     state.blobFees.message = ''
     state.blobFees.updatedAt = Date.now()
-  } catch (error) {
+  } catch {
     state.blobFees.status = 'Unavailable'
     state.blobFees.message = 'Blob fee data unavailable from this RPC.'
     state.blobFees.updatedAt = Date.now()
@@ -1418,11 +1795,11 @@ function startBlobFeeTracker() {
   state.blobFeeTimer = setInterval(() => void refreshBlobFees(), interval)
 }
 
-async function beacon(pathname) {
+async function beacon(pathname, { signal } = {}) {
   return withEndpointFallback('beacon', state.config.beaconApis, async (endpoint) => {
-    const response = await fetch(`${endpoint}${pathname}`, { headers: { accept: 'application/json' } })
+    const response = await fetchWithTimeout(`${endpoint}${pathname}`, { headers: { accept: 'application/json' } }, { signal })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json()
+    const body = await readBoundedJsonResponse(response, MAX_BEACON_RESPONSE_BYTES, `Beacon ${pathname}`, { signal })
     return beaconData(body, pathname)
   })
 }
@@ -1434,34 +1811,31 @@ function beaconData(response, label) {
   return response.data
 }
 
-function beaconDataArray(data, label) {
+function beaconDataArray(data, label, maxLength = MAX_BLOBS_PER_BLOCK) {
   if (!Array.isArray(data)) throw new Error(`${label} data must be an array`)
+  if (data.length > maxLength) throw new Error(`${label} exceeds ${maxLength} entries`)
   return data
 }
 
 function decimalSafeInteger(value, label) {
-  if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new Error(`${label} must be a decimal string`)
+  if (typeof value !== 'string' || value.length > 16 || !/^\d+$/.test(value)) throw new Error(`${label} must be a bounded decimal string`)
   const number = Number(value)
   if (!Number.isSafeInteger(number)) throw new Error(`${label} exceeds safe integer range`)
   return number
 }
 
-async function beaconGenesisTime() {
-  const genesis = await beacon('/eth/v1/beacon/genesis')
-  const genesisTime = genesis?.genesis_time
-  if (typeof genesisTime !== 'string' || !/^\d+$/.test(genesisTime)) {
-    throw new Error('beacon genesis time must be a decimal string')
-  }
-  return BigInt(genesisTime)
+async function beaconGenesisTime({ signal } = {}) {
+  const genesis = await beacon('/eth/v1/beacon/genesis', { signal })
+  return BigInt(decimalSafeInteger(genesis?.genesis_time, 'beacon genesis time'))
 }
 
 function slotTimestampMs(slot, genesisTime) {
   if (genesisTime == null) return null
-  return timestampMsFromSeconds(genesisTime + BigInt(slot) * 12n, 'beacon slot timestamp')
+  return timestampMsFromSeconds(slotStartTimestamp(BigInt(slot), genesisTime), 'beacon slot timestamp')
 }
 
-async function latestBeaconSlot() {
-  const head = await beacon('/eth/v1/beacon/headers/head')
+async function latestBeaconSlot({ signal } = {}) {
+  const head = await beacon('/eth/v1/beacon/headers/head', { signal })
   return beaconHeadSlot(head)
 }
 
@@ -1474,33 +1848,52 @@ function toBlockHex(block) {
   return `0x${BigInt(block).toString(16)}`
 }
 
-async function fetchLogs() {
+async function fetchLogs({ signal, runtime } = {}) {
   if (!state.config.stationAddress) throw new Error(`Set a Station address for ${state.config.chainPreset}.`)
-  const headHex = await rpc('eth_blockNumber')
-  const head = BigInt(headHex)
+  const headHex = await rpc('eth_blockNumber', [], { signal })
+  if (runtime) requireCurrentRuntime(runtime)
+  const head = rpcQuantity(headHex, 'eth_blockNumber')
   els.headBlock.textContent = head.toString()
   if (state.anchor) {
-    return fetchSegmentLogs(BigInt(state.anchor.blockNumber), head)
-      .then((segments) => segments.filter((segment) => segmentOrder(segment) >= state.anchor.order))
+    const range = incrementalStationRange({
+      anchorBlock: state.anchor.blockNumber,
+      cursorBlock: state.anchor.cursorBlock ?? state.anchor.blockNumber,
+      headBlock: head,
+      overlapBlocks: LIVE_REFRESH_REORG_BLOCKS,
+      maxBlocks: LIVE_REFRESH_MAX_BLOCKS,
+    })
+    if (!range) return { segments: state.segments, cursorBlock: state.anchor.cursorBlock ?? BigInt(state.anchor.blockNumber) }
+    const fresh = await fetchSegmentLogs(range.fromBlock, range.toBlock, { signal })
+    if (runtime) requireCurrentRuntime(runtime)
+    return {
+      segments: reconcileIncrementalStationSegments(state.segments, fresh, {
+        replaceFromBlock: range.fromBlock,
+        anchorOrder: state.anchor.order,
+        maxSegments: LIVE_RETAINED_SEGMENTS,
+      }),
+      cursorBlock: range.nextCursorBlock,
+      caughtUp: range.caughtUp,
+    }
   }
   const windowBlocks = BigInt(Math.max(1, Number(state.config.logWindowBlocks || DEFAULTS.logWindowBlocks)))
   const fromBlock = head > windowBlocks ? head - windowBlocks : 0n
-  if (state.streaming) {
-    const recent = await fetchSegmentLogs(fromBlock, head, { streamId: '' })
-    const latest = recent.reduce((best, segment) => !best || segmentOrder(segment) > segmentOrder(best) ? segment : best, null)
-    if (latest?.streamId && latest.streamId !== state.config.streamId) {
-      tuneToStream({ streamId: latest.streamId, sequence: latest.sequence, txHash: latest.txHash }, { reset: false })
-    }
-    return recent.filter((segment) => segment.streamId === state.config.streamId)
+  return { segments: await fetchSegmentLogs(fromBlock, head, { signal }), cursorBlock: null, caughtUp: true }
+}
+
+async function fetchSegmentLogs(fromBlock, toBlock, { streamId = state.config.streamId, publisher = state.config.publisher, signal } = {}) {
+  const segments = await fetchSegmentLogsForStation(state.config.stationAddress, fromBlock, toBlock, { streamId, publisher, signal })
+  if (!streamId) return segments
+  const selection = selectPublisherScopedChannel(segments, { streamId, publisher })
+  if (selection.status === 'ambiguous') {
+    throw new Error(`Publisher is required for stream "${streamId}" because ${selection.publishers.length} publishers use that stream ID. Choose a publisher-specific favorite or URL.`)
   }
-  return fetchSegmentLogs(fromBlock, head)
+  if (selection.status === 'selected' && !publisher) {
+    throw new Error(`Publisher selection is required before loading stream "${streamId}". Discovery found ${shortHash(selection.publisher)}, but the browser will not trust it automatically. Open an exact Station transaction, choose a publisher-specific archive/favorite, or add an explicit publisher to the URL.`)
+  }
+  return selection.segments
 }
 
-async function fetchSegmentLogs(fromBlock, toBlock, { streamId = state.config.streamId } = {}) {
-  return fetchSegmentLogsForStation(state.config.stationAddress, fromBlock, toBlock, { streamId })
-}
-
-async function fetchSegmentLogsForStation(stationAddress, fromBlock, toBlock, { streamId = '', publisher = '' } = {}) {
+async function fetchSegmentLogsForStation(stationAddress, fromBlock, toBlock, { streamId = '', publisher = '', signal } = {}) {
   const station = normalizeStationAddressInput(stationAddress)
   if (!station) throw new Error('Station must be a 20-byte address before reading logs.')
   const publisherAddress = normalizeStationAddressInput(publisher || '')
@@ -1509,9 +1902,14 @@ async function fetchSegmentLogsForStation(stationAddress, fromBlock, toBlock, { 
     fromBlock: toBlockHex(fromBlock),
     toBlock: toBlockHex(toBlock),
     topics: [EVENT_TOPIC],
-  }])
+  }], { signal })
+  if (!Array.isArray(logs)) throw new Error('eth_getLogs result must be an array')
+  if (logs.length > MAX_RPC_LOGS) throw new Error(`eth_getLogs result exceeds ${MAX_RPC_LOGS} entries`)
   const segments = logs
-    .map(decodeSegmentLog)
+    .map((log) => decodeSegmentLog(log, {
+      chainId: CHAIN_PRESETS[state.config.chainPreset]?.chainId,
+      stationAddress: station,
+    }))
     .filter((segment) => !streamId || segment.streamId === streamId)
     .filter((segment) => !publisherAddress || normalizeHex(segment.publisher) === publisherAddress)
     .sort((a, b) =>
@@ -1519,47 +1917,17 @@ async function fetchSegmentLogsForStation(stationAddress, fromBlock, toBlock, { 
       a.blockNumber - b.blockNumber ||
       a.transactionIndex - b.transactionIndex ||
       a.logIndex - b.logIndex)
-  await hydrateSegmentTimes(segments)
-  return segments
+  await hydrateSegmentTimes(segments, { signal })
+  return annotateStreamContinuity(segments)
 }
 
-function archiveStreamKey(segment) {
-  return `${normalizeHex(segment.publisher)}:${normalizeHex(segment.streamIdHash)}:${segment.streamId}`
-}
-
-function groupOldStreamsFromSegmentPublishedLogs(segments) {
-  const groups = new Map()
-  for (const segment of segments) {
-    const key = archiveStreamKey(segment)
-    const existing = groups.get(key) || {
-      key,
-      publisher: segment.publisher,
-      streamIdHash: normalizeHex(segment.streamIdHash),
-      streamId: segment.streamId,
-      title: segment.streamId || shortHash(segment.streamIdHash),
-      segmentCount: 0,
-      firstSequence: segment.sequence,
-      latestSequence: segment.sequence,
-      firstBlock: segment.blockNumber,
-      latestBlock: segment.blockNumber,
-    }
-    existing.segmentCount += 1
-    existing.firstSequence = Math.min(existing.firstSequence, segment.sequence)
-    existing.latestSequence = Math.max(existing.latestSequence, segment.sequence)
-    existing.firstBlock = Math.min(existing.firstBlock, segment.blockNumber)
-    existing.latestBlock = Math.max(existing.latestBlock, segment.blockNumber)
-    groups.set(key, existing)
-  }
-  return [...groups.values()].sort((a, b) => b.latestBlock - a.latestBlock || a.title.localeCompare(b.title))
-}
-
-async function resolveArchiveStationTarget(value) {
+async function resolveArchiveStationTarget(value, { signal } = {}) {
   const parsed = parseArchiveStationInput(value)
   if (parsed.kind === 'address') return { station: parsed.address, deploymentBlock: null, txHash: '' }
   if (parsed.kind !== 'tx') {
     throw new Error('Station input must be a 20-byte address, deployment transaction hash, or explorer URL.')
   }
-  const receipt = await rpc('eth_getTransactionReceipt', [parsed.txHash])
+  const receipt = await rpc('eth_getTransactionReceipt', [parsed.txHash], { signal })
   if (!receipt) throw new Error(`Deployment transaction ${shortHash(parsed.txHash)} was not found on ${CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset}.`)
   const contractAddress = normalizeStationAddressInput(receipt.contractAddress || '')
   if (!contractAddress) {
@@ -1577,21 +1945,25 @@ function archiveScanErrorMessage(error) {
   return message
 }
 
-async function scanOldStreams({ stationAddress, publisher = '', fromBlock = '' } = {}) {
-  const target = await resolveArchiveStationTarget(stationAddress)
+async function scanOldStreams({ stationAddress, publisher = '', rangeMode = 'date', fromBlock = '', fromDate = '', toDate = '', signal } = {}) {
+  const target = await resolveArchiveStationTarget(stationAddress, { signal })
   const station = target.station
   if (els.archiveStation) els.archiveStation.value = station
   const publisherAddress = publisher ? normalizeStationAddressInput(publisher) : ''
   if (publisher && !publisherAddress) throw new Error('Publisher/channel must be a 20-byte address or explorer address URL.')
-  const head = BigInt(await rpc('eth_blockNumber'))
+  const head = rpcQuantity(await rpc('eth_blockNumber', [], { signal }), 'eth_blockNumber')
   els.headBlock.textContent = head.toString()
-  const dateRange = await archiveDateBlockRange(head)
-  const useBlockInput = Boolean(fromBlock && !dateRange)
+  const range = archiveRangeSelection({ rangeMode, fromBlock, fromDate, toDate })
+  const dateRange = range.mode === 'date'
+    ? await archiveDateBlockRange(head, { signal, fromDate: range.fromDate, toDate: range.toDate })
+    : null
   const deploymentBlock = target.deploymentBlock == null ? null : BigInt(target.deploymentBlock)
-  let from = useBlockInput ? parseBlockInput(fromBlock, 'Archive from-block') : (dateRange?.from ?? deploymentBlock ?? (head > BigInt(ARCHIVE_DEFAULT_WINDOW_BLOCKS) ? head - BigInt(ARCHIVE_DEFAULT_WINDOW_BLOCKS) : 0n))
+  let from = range.mode === 'block'
+    ? parseBlockInput(range.fromBlock, 'Archive from-block')
+    : (dateRange?.from ?? deploymentBlock ?? (head > BigInt(ARCHIVE_DEFAULT_WINDOW_BLOCKS) ? head - BigInt(ARCHIVE_DEFAULT_WINDOW_BLOCKS) : 0n))
   let to = dateRange?.to ?? head
   if (deploymentBlock != null && from < deploymentBlock) from = deploymentBlock
-  if (els.archiveFromBlock) els.archiveFromBlock.value = from.toString()
+  if (els.archiveFromBlock && range.mode === 'block') els.archiveFromBlock.value = from.toString()
   if (from < 0n || from > head) throw new Error(`From block must be between 0 and current head ${head}.`)
   if (to < from || to > head) throw new Error(`Archive date range must resolve between block ${from} and current head ${head}.`)
   if (to - from > BigInt(ARCHIVE_MAX_BLOCKS)) {
@@ -1603,7 +1975,7 @@ async function scanOldStreams({ stationAddress, publisher = '', fromBlock = '' }
   state.archive.segmentsByKey = new Map()
   if (els.archiveScan) els.archiveScan.disabled = true
   renderArchive()
-  const allSegments = []
+  const archiveAccumulator = createArchiveAccumulator({ maxSegments: ARCHIVE_MAX_SEGMENTS, maxStreams: ARCHIVE_MAX_STREAMS })
   const totalBlocks = to - from + 1n
   let scannedBlocks = 0n
   setArchiveProgress(`Scanning blocks ${from.toString()}-${to.toString()}...`, { current: 0n, total: totalBlocks, active: true })
@@ -1617,21 +1989,25 @@ async function scanOldStreams({ stationAddress, publisher = '', fromBlock = '' }
     })
     let chunk
     try {
-      chunk = await fetchSegmentLogsForStation(station, start, end, { publisher: publisherAddress })
+      chunk = await fetchSegmentLogsForStation(station, start, end, { publisher: publisherAddress, signal })
     } catch (error) {
-      throw new Error(`Archive scan failed for blocks ${start.toString()}-${end.toString()}: ${archiveScanErrorMessage(error)}`)
+      if (isAbortError(error)) throw error
+      throw new Error(`Archive scan failed for blocks ${start.toString()}-${end.toString()}: ${archiveScanErrorMessage(error)}`, { cause: error })
     }
-    allSegments.push(...chunk)
-    state.archive.streams = groupOldStreamsFromSegmentPublishedLogs(allSegments)
-    state.archive.segmentsByKey = groupedArchiveSegments(allSegments)
+    appendArchiveSegments(archiveAccumulator, chunk, {
+      narrowingHint: 'Choose a later from-block or add a publisher filter before scanning again.',
+    })
     scannedBlocks = end - from + 1n
     setArchiveProgress(`Scanning blocks ${start.toString()}-${end.toString()} of ${to.toString()}...`, {
       current: scannedBlocks,
       total: totalBlocks,
       active: true,
     })
-    renderArchive()
   }
+  const allSegments = archiveAccumulator.segments
+  state.archive.streams = groupOldStreamsFromSegmentPublishedLogs(allSegments)
+  state.archive.segmentsByKey = groupedArchiveSegments(allSegments)
+  renderArchive()
   state.archive.scanning = false
   if (els.archiveScan) els.archiveScan.disabled = false
   const stopped = state.archive.cancel
@@ -1640,7 +2016,12 @@ async function scanOldStreams({ stationAddress, publisher = '', fromBlock = '' }
     const message = stopped
       ? `Stopped after discovering ${state.archive.streams.length} stream${state.archive.streams.length === 1 ? '' : 's'}.`
       : `Discovered ${state.archive.streams.length} stream${state.archive.streams.length === 1 ? '' : 's'} from ${allSegments.length} segment log${allSegments.length === 1 ? '' : 's'}.`
-    setArchiveProgress(message, { current: stopped ? scannedBlocks : totalBlocks, total: totalBlocks, active: false })
+    setArchiveProgress(message, {
+      current: stopped ? scannedBlocks : totalBlocks,
+      total: totalBlocks,
+      active: false,
+      status: stopped ? 'cancelled' : 'success',
+    })
   }
 }
 
@@ -1652,12 +2033,13 @@ function groupedArchiveSegments(segments) {
     list.push(segment)
     byKey.set(key, list)
   }
-  for (const list of byKey.values()) {
-    list.sort((a, b) =>
+  for (const [key, list] of byKey) {
+    const ordered = list.sort((a, b) =>
       a.sequence - b.sequence ||
       a.blockNumber - b.blockNumber ||
       a.transactionIndex - b.transactionIndex ||
       a.logIndex - b.logIndex)
+    byKey.set(key, annotateStreamContinuity(ordered))
   }
   return byKey
 }
@@ -1709,22 +2091,25 @@ function parseRfe1Envelope(bytes) {
   if (!header || typeof header !== 'object' || Array.isArray(header)) return null
   const payload = bytes.subarray(headerEnd)
   const publisher = normalizeStationAddressInput(header.publisher)
-  const streamId = String(header.streamId || '').trim()
+  const streamId = String(header.streamId ?? '')
+  if (!streamId || new TextEncoder().encode(streamId).byteLength > IO_MAX_ABI_STRING_BYTES) return null
+  const canonicalHash = canonicalStreamIdHash(streamId)
+  if (header.streamIdHash != null && (!isBytes32Hex(header.streamIdHash) || normalizeHex(header.streamIdHash) !== canonicalHash)) return null
   const sequence = Number(header.sequence)
-  const payloadSha256Hex = normalizeHex(header.payloadSha256 || '')
-  const streamIdHash = isBytes32Hex(header.streamIdHash) ? normalizeHex(header.streamIdHash) : ''
-  if (!publisher || !streamId || !Number.isSafeInteger(sequence) || sequence < 0 || !isBytes32Hex(payloadSha256Hex)) return null
+  if (!isBytes32Hex(header.payloadSha256)) return null
+  const payloadSha256Hex = normalizeHex(header.payloadSha256)
+  if (!publisher || !Number.isSafeInteger(sequence) || sequence < 0) return null
   const durationMs = Number(header.durationMs ?? 0)
   const payloadBytes = Number(header.payloadBytes ?? payload.byteLength)
   if (!Number.isSafeInteger(durationMs) || durationMs < 0) return null
   if (!Number.isSafeInteger(payloadBytes) || payloadBytes < 0 || payloadBytes > payload.byteLength) return null
-  const previousSegmentHash = isBytes32Hex(header.previousSegmentHash) ? normalizeHex(header.previousSegmentHash) : `0x${'0'.repeat(64)}`
+  const previousSegmentHash = isBytes32Hex(header.previousSegmentHash) ? normalizeHex(header.previousSegmentHash) : ''
   return {
     header,
     payload: payload.subarray(0, payloadBytes),
     publisher,
     streamId,
-    streamIdHash,
+    streamIdHash: canonicalHash,
     sequence,
     durationMs,
     payloadBytes,
@@ -1735,43 +2120,75 @@ function parseRfe1Envelope(bytes) {
   }
 }
 
-async function blockBlobTransactions(blockNumber, inboxAddress) {
-  const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), true])
+async function blockBlobTransactions(blockNumber, inboxAddress, { signal } = {}) {
+  const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), true], { signal })
   if (!block || typeof block !== 'object' || !Array.isArray(block.transactions)) {
     throw new Error(`block ${blockNumber} response did not include transactions`)
   }
+  if (block.transactions.length > MAX_RPC_LOGS) throw new Error(`block ${blockNumber} exceeds ${MAX_RPC_LOGS} transactions`)
   const inbox = normalizeHex(inboxAddress)
   const blockNumberValue = rpcQuantityNumber(block.number, 'inbox blockNumber')
-  const blockHash = isBytes32Hex(block.hash) ? normalizeHex(block.hash) : ''
+  if (blockNumberValue !== nonNegativeSafeInteger(blockNumber, 'requested inbox blockNumber')) throw new Error(`block ${blockNumber} response returned a different block number`)
+  if (!isBytes32Hex(block.hash)) throw new Error(`block ${blockNumber} response returned an invalid block hash`)
+  const blockHash = normalizeHex(block.hash)
   const createdAt = new Date(timestampMsFromSeconds(block.timestamp, 'inbox block timestamp')).toISOString()
-  return block.transactions
-    .filter((tx) => normalizeHex(tx?.to) === inbox && txBlobVersionedHashes(tx).length)
-    .map((tx) => ({
-      tx,
-      blockNumber: blockNumberValue,
-      blockHash,
-      createdAt,
-      txHash: normalizeHex(tx.hash),
-      transactionIndex: rpcQuantityNumber(tx.transactionIndex, 'inbox transactionIndex'),
-      blobVersionedHashes: txBlobVersionedHashes(tx),
-    }))
+  const candidates = []
+  const seenHashes = new Set()
+  const seenIndices = new Set()
+  for (const tx of block.transactions) {
+    if (!isAddressHex(tx?.to) || normalizeHex(tx.to) !== inbox) continue
+    const blobVersionedHashes = txBlobVersionedHashes(tx)
+    if (!blobVersionedHashes.length) continue
+    if (!isBytes32Hex(tx.hash)) throw new Error(`block ${blockNumber} blob transaction returned an invalid hash`)
+    const txHash = normalizeHex(tx.hash)
+    const transactionIndex = rpcQuantityNumber(tx.transactionIndex, 'inbox transactionIndex')
+    if (seenHashes.has(txHash) || seenIndices.has(transactionIndex)) throw new Error(`block ${blockNumber} returned duplicate blob transaction identity`)
+    seenHashes.add(txHash)
+    seenIndices.add(transactionIndex)
+    candidates.push({ tx, blockNumber: blockNumberValue, blockHash, createdAt, txHash, transactionIndex, blobVersionedHashes })
+  }
+  return candidates
+}
+
+function classifyInboxDiscoveryFailure(error, { stage = 'candidate' } = {}) {
+  if (isAbortError(error)) return { kind: 'abort', message: 'Inbox discovery cancelled.' }
+  return {
+    kind: stage === 'endpoint' ? 'endpoint' : 'candidate',
+    message: archiveScanErrorMessage(error),
+  }
+}
+
+function inboxScanCompletion({ streamCount = 0, segmentCount = 0, failedCandidates = 0, incompatibleCandidates = 0, failures = [] } = {}) {
+  const discovered = `Discovered ${streamCount} inbox stream${streamCount === 1 ? '' : 's'} from ${segmentCount} compatible RFE1 segment${segmentCount === 1 ? '' : 's'}.`
+  if (failedCandidates > 0) {
+    const example = failures[0]?.message ? ` First candidate error: ${failures[0].message}` : ''
+    return {
+      status: 'warning',
+      message: `Partial scan: ${discovered} Skipped ${failedCandidates} candidate${failedCandidates === 1 ? '' : 's'} after parsing or reconstruction failures.${example}`,
+    }
+  }
+  const ignored = incompatibleCandidates > 0
+    ? ` Ignored ${incompatibleCandidates} incompatible candidate${incompatibleCandidates === 1 ? '' : 's'} normally.`
+    : ''
+  return { status: 'success', message: `${discovered}${ignored}` }
 }
 
 async function inboxSegmentFromSidecar({ inboxAddress, txRecord, sidecar, logIndex }) {
+  if (!isBytes32Hex(sidecar?.versionedHash)) return null
   const versionedHash = normalizeHex(sidecar.versionedHash)
-  if (!isBytes32Hex(versionedHash) || !isBlobHex(sidecar.blob)) return null
+  if (!isBlobHex(sidecar.blob)) return null
   const envelopeBytes = await reconstructPayload({ blobVersionedHashes: [versionedHash], payloadBytes: 131072 }, { matches: [sidecar] })
   const envelope = parseRfe1Envelope(envelopeBytes)
   if (!envelope) return null
   const actual = strip0x(await sha256Hex(envelope.payload))
   if (actual !== envelope.payloadSha256) return null
-  const segment = {
+  const segment = withChannelIdentity({
     app: 'eth-radio',
     version: 1,
     source: 'blob-inbox',
     inboxAddress,
     publisher: envelope.publisher,
-    streamIdHash: envelope.streamIdHash || `rfe1:${envelope.publisher}:${envelope.streamId}`,
+    streamIdHash: envelope.streamIdHash || canonicalStreamIdHash(envelope.streamId),
     sequence: envelope.sequence,
     streamId: envelope.streamId,
     durationMs: envelope.durationMs,
@@ -1787,29 +2204,37 @@ async function inboxSegmentFromSidecar({ inboxAddress, txRecord, sidecar, logInd
     blockHash: txRecord.blockHash,
     transactionIndex: txRecord.transactionIndex,
     logIndex,
-    slot: sidecarIndex(sidecar.slot ?? sidecar.index, 'inbox sidecar slot'),
+    slot: nonNegativeSafeInteger(sidecar.slot ?? sidecar.index, 'inbox sidecar slot'),
     createdAt: txRecord.createdAt,
     embeddedPayload: envelope.payload,
+  })
+  if (segment.payloadBytes > MAX_SEGMENT_PAYLOAD_BYTES) {
+    throw new Error(`Invalid Station log payloadBytes: exceeds ${MAX_SEGMENT_PAYLOAD_BYTES} bytes`)
   }
   segment.blobCount = segment.blobVersionedHashes.length
-  segment.cacheKey = `inbox:${normalizeHex(inboxAddress)}:${segment.streamId}:${segment.sequence}:${segment.txHash}:${versionedHash}`
+  segment.cacheKey = JSON.stringify(['inbox', normalizeHex(inboxAddress), segment.publisher, segment.streamIdHash, segment.streamId, String(segment.sequence), segment.txHash, versionedHash])
+  segment.payloadValidity = 'valid'
   return segment
 }
 
-async function scanBlobInboxStreams({ inboxAddress, publisher = '', streamId = '', fromBlock = '' } = {}) {
+async function scanBlobInboxStreams({ inboxAddress, publisher = '', streamId = '', rangeMode = 'date', fromBlock = '', fromDate = '', toDate = '', signal } = {}) {
   const inbox = normalizeStationAddressInput(inboxAddress)
   if (!inbox) throw new Error('Blob inbox must be a 20-byte destination address or explorer address URL.')
   if (els.archiveInbox) els.archiveInbox.value = inbox
   const publisherAddress = publisher ? normalizeStationAddressInput(publisher) : ''
   if (publisher && !publisherAddress) throw new Error('Publisher/channel must be a 20-byte address or explorer address URL.')
-  const head = BigInt(await rpc('eth_blockNumber'))
+  const head = rpcQuantity(await rpc('eth_blockNumber', [], { signal }), 'eth_blockNumber')
   els.headBlock.textContent = head.toString()
-  const dateRange = await archiveDateBlockRange(head)
-  const useBlockInput = Boolean(fromBlock && !dateRange)
+  const range = archiveRangeSelection({ rangeMode, fromBlock, fromDate, toDate })
+  const dateRange = range.mode === 'date'
+    ? await archiveDateBlockRange(head, { signal, fromDate: range.fromDate, toDate: range.toDate })
+    : null
   const recentWindow = Math.min(ARCHIVE_DEFAULT_WINDOW_BLOCKS, 2_000)
-  const from = useBlockInput ? parseBlockInput(fromBlock, 'Inbox from-block') : (dateRange?.from ?? (head > BigInt(recentWindow) ? head - BigInt(recentWindow) : 0n))
+  const from = range.mode === 'block'
+    ? parseBlockInput(range.fromBlock, 'Inbox from-block')
+    : (dateRange?.from ?? (head > BigInt(recentWindow) ? head - BigInt(recentWindow) : 0n))
   const to = dateRange?.to ?? head
-  if (els.archiveFromBlock) els.archiveFromBlock.value = from.toString()
+  if (els.archiveFromBlock && range.mode === 'block') els.archiveFromBlock.value = from.toString()
   if (from < 0n || from > head) throw new Error(`From block must be between 0 and current head ${head}.`)
   if (to < from || to > head) throw new Error(`Inbox date range must resolve between block ${from} and current head ${head}.`)
   if (to - from > BigInt(ARCHIVE_MAX_BLOCKS)) throw new Error(`Blob inbox scans are capped at ${ARCHIVE_MAX_BLOCKS.toLocaleString()} blocks in the browser. Choose a newer from-block.`)
@@ -1817,9 +2242,10 @@ async function scanBlobInboxStreams({ inboxAddress, publisher = '', streamId = '
   state.archive.cancel = false
   state.archive.streams = []
   state.archive.segmentsByKey = new Map()
+  state.archive.inboxDiagnostics = { failedCandidates: 0, incompatibleCandidates: 0, failures: [] }
   if (els.archiveScan) els.archiveScan.disabled = true
   renderArchive()
-  const allSegments = []
+  const archiveAccumulator = createArchiveAccumulator({ maxSegments: ARCHIVE_MAX_SEGMENTS, maxStreams: ARCHIVE_MAX_STREAMS })
   const totalBlocks = to - from + 1n
   let scannedBlocks = 0n
   setArchiveProgress(`Scanning inbox blocks ${from.toString()}-${to.toString()}...`, { current: 0n, total: totalBlocks, active: true })
@@ -1835,39 +2261,52 @@ async function scanBlobInboxStreams({ inboxAddress, publisher = '', streamId = '
       if (state.archive.cancel) break
       let txRecords
       try {
-        txRecords = await blockBlobTransactions(blockNumber, inbox)
+        txRecords = await blockBlobTransactions(blockNumber, inbox, { signal })
       } catch (error) {
-        throw new Error(`Inbox scan failed at block ${blockNumber}: ${archiveScanErrorMessage(error)}`)
+        if (isAbortError(error)) throw error
+        throw new Error(`Inbox scan failed at block ${blockNumber}: ${archiveScanErrorMessage(error)}`, { cause: error })
       }
       for (const txRecord of txRecords) {
         let slot
+        let sidecarRecord
         try {
-          slot = await segmentSlot({ txHash: txRecord.txHash })
-          const sidecarRecord = await sidecarsForSlot(slot)
-          const wanted = new Set(txRecord.blobVersionedHashes.map(normalizeHex))
-          let index = 0
-          for (const sidecar of sidecarRecord.sidecars.filter((candidate) => wanted.has(normalizeHex(candidate.versionedHash)))) {
-            const segment = await inboxSegmentFromSidecar({ inboxAddress: inbox, txRecord: { ...txRecord, slot }, sidecar: { ...sidecar, slot }, logIndex: index })
+          slot = await segmentSlot({ txHash: txRecord.txHash }, { signal })
+          sidecarRecord = await sidecarsForSlot(slot, { signal })
+        } catch (error) {
+          const failure = classifyInboxDiscoveryFailure(error, { stage: 'endpoint' })
+          if (failure.kind === 'abort') throw error
+          throw new Error(`Inbox discovery endpoint failure for ${shortHash(txRecord.txHash)}: ${failure.message}`, { cause: error })
+        }
+        const wanted = new Set(txRecord.blobVersionedHashes.map(normalizeHex))
+        let index = 0
+        for (const sidecar of sidecarRecord.sidecars.filter((candidate) => wanted.has(normalizeHex(candidate.versionedHash)))) {
+          let segment
+          try {
+            segment = await inboxSegmentFromSidecar({ inboxAddress: inbox, txRecord: { ...txRecord, slot }, sidecar: { ...sidecar, slot }, logIndex: index })
             index += 1
-            if (!segment) continue
-            if (publisherAddress && normalizeHex(segment.publisher) !== publisherAddress) continue
-            if (streamId && segment.streamId !== streamId) continue
-            allSegments.push(segment)
-            state.verified.set(segment.cacheKey, {
-              cacheKey: segment.cacheKey,
-              streamId: segment.streamId,
-              sequence: segment.sequence,
-              txHash: segment.txHash,
-              payload: segment.embeddedPayload,
-              payloadSha256: segment.payloadSha256,
-              bytes: segment.embeddedPayload.byteLength,
-              codec: segment.codec,
-              slot,
-              source: 'blob-inbox',
-              verifiedAt: new Date().toISOString(),
-            })
+          } catch (error) {
+            index += 1
+            const failure = classifyInboxDiscoveryFailure(error)
+            if (failure.kind === 'abort') throw error
+            state.archive.inboxDiagnostics.failedCandidates += 1
+            if (state.archive.inboxDiagnostics.failures.length < 3) {
+              state.archive.inboxDiagnostics.failures.push({
+                txHash: txRecord.txHash,
+                versionedHash: normalizeHex(sidecar.versionedHash),
+                message: failure.message,
+              })
+            }
+            continue
           }
-        } catch {
+          if (!segment) {
+            state.archive.inboxDiagnostics.incompatibleCandidates += 1
+            continue
+          }
+          if (publisherAddress && normalizeHex(segment.publisher) !== publisherAddress) continue
+          if (streamId && segment.streamId !== streamId) continue
+          appendArchiveSegments(archiveAccumulator, [segment], {
+            narrowingHint: 'Choose a later from-block or add both publisher and stream filters before scanning again.',
+          })
         }
       }
       scannedBlocks = BigInt(blockNumber) - from + 1n
@@ -1876,27 +2315,54 @@ async function scanBlobInboxStreams({ inboxAddress, publisher = '', streamId = '
         total: totalBlocks,
         active: true,
       })
-      state.archive.streams = groupOldStreamsFromSegmentPublishedLogs(allSegments)
-      state.archive.segmentsByKey = groupedArchiveSegments(allSegments)
-      renderArchive()
     }
   }
+  const allSegments = archiveAccumulator.segments
+  state.archive.streams = groupOldStreamsFromSegmentPublishedLogs(allSegments)
+  state.archive.segmentsByKey = groupedArchiveSegments(allSegments)
+  renderArchive()
   state.archive.scanning = false
   if (els.archiveScan) els.archiveScan.disabled = false
   const stopped = state.archive.cancel
   state.archive.cancel = false
   if (els.archiveProgress) {
+    const completion = inboxScanCompletion({
+      streamCount: state.archive.streams.length,
+      segmentCount: allSegments.length,
+      ...state.archive.inboxDiagnostics,
+    })
     const message = stopped
       ? `Stopped after discovering ${state.archive.streams.length} inbox stream${state.archive.streams.length === 1 ? '' : 's'}.`
-      : `Discovered ${state.archive.streams.length} inbox stream${state.archive.streams.length === 1 ? '' : 's'} from ${allSegments.length} compatible RFE1 segment${allSegments.length === 1 ? '' : 's'}.`
-    setArchiveProgress(message, { current: stopped ? scannedBlocks : totalBlocks, total: totalBlocks, active: false })
+      : completion.message
+    setArchiveProgress(message, {
+      current: stopped ? scannedBlocks : totalBlocks,
+      total: totalBlocks,
+      active: false,
+      status: stopped ? 'cancelled' : completion.status,
+    })
   }
 }
 
-async function tuneArchiveStream(key) {
+function archiveTuneIsCurrent(tuneSerial, runtime = null) {
+  return tuneSerial === state.archive.tuneSerial && (!runtime || runtimeIsCurrent(runtime))
+}
+
+function beginArchiveTuneRequest() {
+  state.playbackContextGeneration += 1
+  return ++state.archive.tuneSerial
+}
+
+async function tuneArchiveStream(key, { tuneSerial = beginArchiveTuneRequest() } = {}) {
   const summary = state.archive.streams.find((stream) => stream.key === key)
   if (!summary) throw new Error('Archive stream is no longer available. Scan again and choose a stream.')
-  const segments = await archiveSegmentsForWatch(key, summary)
+  let segments
+  try {
+    segments = await archiveSegmentsForWatch(key, summary)
+  } catch (error) {
+    if (!archiveTuneIsCurrent(tuneSerial)) return false
+    throw error
+  }
+  if (!archiveTuneIsCurrent(tuneSerial)) return false
   if (!segments.length) throw new Error('Archive stream is no longer available. Scan again and choose a stream.')
   setStatus(`Watching ${state.archive.mode === 'inbox' ? 'blob inbox' : 'Station'} stream "${summary.title}"...`)
   stopStreaming()
@@ -1904,38 +2370,46 @@ async function tuneArchiveStream(key) {
     ...state.config,
     stationAddress: normalizeStationAddressInput(els.archiveStation?.value) || state.config.stationAddress,
     streamId: summary.streamId || state.config.streamId,
+    streamIdHash: summary.streamIdHash || canonicalStreamIdHash(summary.streamId || state.config.streamId),
+    publisher: summary.publisher,
     fromBlock: String(summary.firstBlock),
   }
   saveConfig(state.config)
   resetRuntimeState()
+  const runtime = runtimeSnapshot()
   state.anchor = { blockNumber: summary.firstBlock, order: segmentOrder(segments[0]), txHash: segments[0].txHash }
   state.segments = segments
   state.archive.tunedKey = key
   state.selectedSegmentQuery = segments[0]?.txHash || ''
   state.metadataUpdatedAt = new Date().toISOString()
-  state.playbackState = 'waiting'
+  state.playbackMode = 'idle'
   state.segmentNotice = `Loaded ${segments.length} segment${segments.length === 1 ? '' : 's'} for "${summary.title}". Choose GET or a segment number to verify and play.`
   fillForm()
   syncUrlState()
   render()
   revealTunedStream()
   setStatus(`Loaded "${summary.title}" with ${summary.segmentCount} segment${summary.segmentCount === 1 ? '' : 's'}. Choose GET or a segment number to verify and play.`)
-  await cacheSegmentMetadata(state.segments)
+  await cacheSegmentMetadata(state.segments, runtime)
+  if (!archiveTuneIsCurrent(tuneSerial, runtime)) return false
   for (const segment of state.segments) {
+    if (!archiveTuneIsCurrent(tuneSerial, runtime)) return false
     try {
       if (segment.source === 'blob-inbox' && segment.embeddedPayload instanceof Uint8Array) {
-        const record = await verifySegment(segment)
-        state.verified.set(segment.cacheKey, record)
+        await verifySegment(segment, runtime)
       } else {
-        const cached = await cachedSegment(segment.cacheKey)
-        if (cached) state.verified.set(segment.cacheKey, cached)
+        const cached = await validatedCachedSegment(segment, runtime)
+        if (!archiveTuneIsCurrent(tuneSerial, runtime)) return false
+        if (cached) promoteVerifiedRecord(segment, cached)
       }
     } catch (error) {
+      if (!archiveTuneIsCurrent(tuneSerial, runtime) || isAbortError(error)) return false
       setStatus(`Loaded "${summary.title}", but segment #${segment.sequence} still needs manual verification: ${publicErrorMessage(error)}`)
     }
   }
-  await refreshCacheStats()
-  await refreshBlobspace()
+  await refreshCacheStats(runtime)
+  if (!archiveTuneIsCurrent(tuneSerial, runtime)) return false
+  await refreshBlobspace(runtime)
+  if (!archiveTuneIsCurrent(tuneSerial, runtime)) return false
   render()
   const ready = firstVerifiedRecord()
   if (ready) {
@@ -1949,37 +2423,91 @@ async function tuneArchiveStream(key) {
     render()
     setStatus(`Loaded "${summary.title}" with ${summary.segmentCount} segment${summary.segmentCount === 1 ? '' : 's'}. Choose GET/PLAY in Stream Segments to verify and replay.`)
   }
+  return true
 }
 
 function tuneToStream(stream, { reset = true } = {}) {
-  if (!stream?.streamId || stream.streamId === state.config.streamId) return false
-  state.config = { ...state.config, streamId: stream.streamId }
+  const identity = channelIdentity(stream)
+  const currentKey = JSON.stringify([state.config.publisher || '', state.config.streamIdHash || canonicalStreamIdHash(state.config.streamId), state.config.streamId])
+  if (identity.key === currentKey) return false
+  state.config = {
+    ...state.config,
+    publisher: identity.publisher,
+    streamIdHash: identity.streamIdHash,
+    streamId: identity.streamId,
+  }
   saveConfig(state.config)
   fillForm()
   if (reset) {
     resetRuntimeState()
     render()
   }
-  setStatus(`Watching stream ${stream.streamId}${stream.sequence != null ? ` from segment #${stream.sequence}` : ''}.`)
+  setStatus(`Watching stream ${identity.streamId} from publisher ${shortHash(identity.publisher)}${stream.sequence != null ? ` at segment #${stream.sequence}` : ''}.`)
   return true
 }
 
-async function hydrateSegmentTimes(segments) {
-  const blocks = unique(segments.map((segment) => String(segment.blockNumber)))
-    .filter((blockNumber) => !state.blockTimes.has(Number(blockNumber)))
-  await Promise.all(blocks.map(async (blockNumber) => {
-    try {
-      const block = await rpc('eth_getBlockByNumber', [toBlockHex(blockNumber), false])
-      const timestampMs = timestampMsFromSeconds(block.timestamp, 'block timestamp')
-      state.blockTimes.set(Number(blockNumber), timestampMs)
-      for (const segment of segments) {
-        if (String(segment.blockNumber) === blockNumber) segment.createdAt = new Date(timestampMs).toISOString()
-      }
-    } catch {
+async function runBoundedTasks(items, concurrency, task) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('Task concurrency must be a positive safe integer')
+  for (let offset = 0; offset < items.length; offset += concurrency) {
+    const outcomes = await Promise.allSettled(items.slice(offset, offset + concurrency).map(task))
+    const failure = outcomes.find((outcome) => outcome.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+}
+
+function cacheBlockTimestamp(blockNumber, blockHash, timestampMs) {
+  const normalizedHash = normalizeHex(blockHash)
+  const previousHash = state.blockTimeHashes.get(blockNumber)
+  if (previousHash && previousHash !== normalizedHash) state.blockTimes.delete(previousHash)
+  state.blockTimes.delete(normalizedHash)
+  state.blockTimes.set(normalizedHash, timestampMs)
+  state.blockTimeHashes.set(blockNumber, normalizedHash)
+  while (state.blockTimes.size > MAX_BLOCK_TIME_CACHE_ENTRIES) {
+    const oldestHash = state.blockTimes.keys().next().value
+    state.blockTimes.delete(oldestHash)
+    for (const [number, hash] of state.blockTimeHashes) {
+      if (hash === oldestHash) state.blockTimeHashes.delete(number)
     }
-  }))
+  }
+  return timestampMs
+}
+
+async function hydrateSegmentTimes(segments, { signal } = {}) {
+  const blocks = unique(segments
+    .filter((segment) => isBytes32Hex(segment.blockHash) && Number.isSafeInteger(segment.blockNumber))
+    .map((segment) => `${segment.blockNumber}:${normalizeHex(segment.blockHash)}`))
+  await runBoundedTasks(blocks, MAX_BLOCK_TIME_REQUEST_CONCURRENCY, async (identity) => {
+    const separator = identity.indexOf(':')
+    const blockNumber = Number(identity.slice(0, separator))
+    const blockHash = identity.slice(separator + 1)
+    const cachedTimestamp = state.blockTimes.get(blockHash)
+    if (cachedTimestamp) {
+      cacheBlockTimestamp(blockNumber, blockHash, cachedTimestamp)
+      for (const segment of segments) {
+        if (segment.blockNumber === blockNumber && normalizeHex(segment.blockHash) === blockHash) {
+          segment.createdAt = new Date(cachedTimestamp).toISOString()
+        }
+      }
+      return
+    }
+    try {
+      const block = await rpc('eth_getBlockByHash', [blockHash, false], { signal })
+      if (!block || normalizeHex(block.hash) !== blockHash) throw new Error('Execution block hash did not match the Station event')
+      if (rpcQuantityNumber(block.number, 'block number') !== blockNumber) throw new Error('Execution block number did not match the Station event')
+      const timestampMs = timestampMsFromSeconds(block.timestamp, 'block timestamp')
+      cacheBlockTimestamp(blockNumber, blockHash, timestampMs)
+      for (const segment of segments) {
+        if (segment.blockNumber === blockNumber && normalizeHex(segment.blockHash) === blockHash) {
+          segment.createdAt = new Date(timestampMs).toISOString()
+        }
+      }
+    } catch (error) {
+      if (isAbortError(error)) throw error
+    }
+  })
   for (const segment of segments) {
-    const timestampMs = state.blockTimes.get(Number(segment.blockNumber))
+    const blockHash = isBytes32Hex(segment.blockHash) ? normalizeHex(segment.blockHash) : ''
+    const timestampMs = blockHash ? state.blockTimes.get(blockHash) : null
     if (timestampMs && !segment.createdAt) segment.createdAt = new Date(timestampMs).toISOString()
   }
 }
@@ -1988,9 +2516,11 @@ function receiptStationSegments(receipt) {
   if (!receipt || typeof receipt !== 'object' || !Array.isArray(receipt.logs)) {
     throw new Error('Transaction receipt logs must be an array')
   }
+  if (receipt.logs.length > MAX_RPC_LOGS) throw new Error(`Transaction receipt logs exceed ${MAX_RPC_LOGS} entries`)
   const station = normalizeHex(state.config.stationAddress)
   return receipt.logs
-    .filter((log) => normalizeHex(log.address) === station && normalizeHex(log.topics?.[0]) === EVENT_TOPIC)
+    .filter((log) => isAddressHex(log?.address) && isBytes32Hex(log?.topics?.[0]))
+    .filter((log) => normalizeHex(log.address) === station && normalizeHex(log.topics[0]) === EVENT_TOPIC)
     .map(decodeSegmentLog)
 }
 
@@ -2006,6 +2536,7 @@ async function loadForwardWindowFromTx(txHash) {
   state.segments = []
   state.verified.clear()
   state.metadataUpdatedAt = ''
+  state.metadataState = 'none'
   state.anchor = null
   render()
   setStatus(`Looking up transaction ${shortHash(txHash)}...`)
@@ -2015,22 +2546,25 @@ async function loadForwardWindowFromTx(txHash) {
   const anchorBlock = rpcQuantityNumber(receipt.blockNumber, 'receipt blockNumber')
   const receiptTransactionIndex = rpcQuantityNumber(receipt.transactionIndex, 'receipt transactionIndex')
   const txOrder = BigInt(anchorBlock) * 1_000_000n + BigInt(receiptTransactionIndex) * 1_000n
-  if (anchorSegments[0]?.streamId && anchorSegments[0].streamId !== state.config.streamId) {
-    state.config = { ...state.config, streamId: anchorSegments[0].streamId }
-    saveConfig(state.config)
-    fillForm()
-  }
+  if (anchorSegments[0]) tuneToStream(anchorSegments[0], { reset: false })
   const headHex = await rpc('eth_blockNumber')
-  const head = BigInt(headHex)
+  const head = rpcQuantity(headHex, 'eth_blockNumber')
   els.headBlock.textContent = head.toString()
   setStatus(`Building segment window from block ${anchorBlock} forward...`)
-  const forward = await fetchSegmentLogs(BigInt(anchorBlock), head)
+  const initialRange = incrementalStationRange({
+    anchorBlock,
+    cursorBlock: anchorBlock,
+    headBlock: head,
+    overlapBlocks: LIVE_REFRESH_REORG_BLOCKS,
+    maxBlocks: LIVE_REFRESH_MAX_BLOCKS,
+  })
+  const forward = initialRange ? await fetchSegmentLogs(initialRange.fromBlock, initialRange.toBlock) : []
   const anchor = anchorSegments[0] || forward.find((segment) => segmentOrder(segment) >= txOrder)
   if (!anchor) {
     throw new Error(`No Station segments for ${state.config.streamId} were found at or after ${shortHash(txHash)}.`)
   }
   const anchorOrder = anchorSegments.length ? segmentOrder(anchor) : txOrder
-  state.anchor = { blockNumber: anchorBlock, order: anchorOrder, txHash }
+  state.anchor = { blockNumber: anchorBlock, order: anchorOrder, txHash, cursorBlock: initialRange?.nextCursorBlock ?? BigInt(anchorBlock) }
   state.segments = forward.filter((segment) => segmentOrder(segment) >= anchorOrder)
   if (!state.segments.some((segment) => segment.cacheKey === anchor.cacheKey)) {
     state.segments.unshift(anchor)
@@ -2040,12 +2574,10 @@ async function loadForwardWindowFromTx(txHash) {
     a.blockNumber - b.blockNumber ||
     a.transactionIndex - b.transactionIndex ||
     a.logIndex - b.logIndex)
+  state.segments = annotateStreamContinuity(state.segments)
   await cacheSegmentMetadata(state.segments)
   state.verified.clear()
-  for (const segment of state.segments) {
-    const cached = await cachedSegment(segment.cacheKey)
-    if (cached) state.verified.set(segment.cacheKey, cached)
-  }
+  await hydrateValidatedCachedSegments(state.segments)
   await refreshCacheStats()
   await refreshBlobspace()
   render()
@@ -2060,126 +2592,121 @@ async function loadForwardWindowFromBlock(blockNumber) {
   state.segments = []
   state.verified.clear()
   state.metadataUpdatedAt = ''
+  state.metadataState = 'none'
   state.anchor = null
   render()
   const headHex = await rpc('eth_blockNumber')
-  const head = BigInt(headHex)
+  const head = rpcQuantity(headHex, 'eth_blockNumber')
   els.headBlock.textContent = head.toString()
   if (BigInt(anchorBlock) > head) {
     throw new Error(`Block ${anchorBlock} is ahead of current ${CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset} head ${head}.`)
   }
   setStatus(`Building segment window from block ${anchorBlock} forward...`)
   const anchorOrder = BigInt(anchorBlock) * 1_000_000n
-  state.anchor = { blockNumber: anchorBlock, order: anchorOrder, txHash: '' }
-  state.segments = await fetchSegmentLogs(BigInt(anchorBlock), head)
+  const initialRange = incrementalStationRange({
+    anchorBlock,
+    cursorBlock: anchorBlock,
+    headBlock: head,
+    overlapBlocks: LIVE_REFRESH_REORG_BLOCKS,
+    maxBlocks: LIVE_REFRESH_MAX_BLOCKS,
+  })
+  state.anchor = { blockNumber: anchorBlock, order: anchorOrder, txHash: '', cursorBlock: initialRange?.nextCursorBlock ?? BigInt(anchorBlock) }
+  state.segments = initialRange ? await fetchSegmentLogs(initialRange.fromBlock, initialRange.toBlock) : []
   if (!state.segments.length) {
     throw new Error(`No Station segments for ${state.config.streamId} were found at or after block ${anchorBlock}.`)
   }
   await cacheSegmentMetadata(state.segments)
   state.verified.clear()
-  for (const segment of state.segments) {
-    const cached = await cachedSegment(segment.cacheKey)
-    if (cached) state.verified.set(segment.cacheKey, cached)
-  }
+  await hydrateValidatedCachedSegments(state.segments)
   await refreshCacheStats()
   await refreshBlobspace()
   render()
   return state.segments[0]
 }
 
-async function segmentSlot(segment) {
+async function segmentSlot(segment, { signal } = {}) {
   if (segment.slot) return segment.slot
-  const tx = await rpc('eth_getTransactionByHash', [segment.txHash])
-  const block = await rpc('eth_getBlockByHash', [tx.blockHash, false])
-  const genesis = await beaconGenesisTime()
+  const tx = await rpc('eth_getTransactionByHash', [segment.txHash], { signal })
+  const block = await rpc('eth_getBlockByHash', [tx.blockHash, false], { signal })
+  const genesis = await beaconGenesisTime({ signal })
   const timestamp = rpcQuantity(block.timestamp, 'block timestamp')
   if (timestamp < genesis) throw new Error('block timestamp is before beacon genesis')
-  return bigintSafeInteger((timestamp - genesis) / 12n, 'segment slot')
+  return bigintSafeInteger(executionTimestampSlot(timestamp, genesis), 'segment slot')
 }
 
-function normalizeSidecarRecord(record, expectedSlot) {
-  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
-  let slot
-  let expected
-  try {
-    slot = sidecarIndex(record.slot, 'cached sidecar slot')
-    expected = sidecarIndex(expectedSlot, 'expected sidecar slot')
-  } catch {
-    return null
-  }
-  if (slot !== expected) return null
-  if (!Array.isArray(record.sidecars)) return null
-  const sidecars = []
-  for (const sidecar of record.sidecars) {
-    if (!sidecar || typeof sidecar !== 'object' || Array.isArray(sidecar)) continue
-    let index
-    try {
-      index = sidecarIndex(sidecar.index, 'cached sidecar index')
-    } catch {
-      continue
-    }
-    const versionedHash = sidecar.versionedHash ? normalizeHex(sidecar.versionedHash) : null
-    if (versionedHash !== null && !isBytes32Hex(versionedHash)) continue
-    sidecars.push({
-      index,
-      versionedHash,
-      commitment: typeof sidecar.commitment === 'string' ? sidecar.commitment : null,
-      blob: typeof sidecar.blob === 'string' ? sidecar.blob : null,
-    })
-  }
-  return { ...record, slot, sidecars }
+function nonNegativeSafeInteger(value, label) {
+  const number = Number(value)
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error(`${label} must be a non-negative safe integer`)
+  return number
 }
 
-function sidecarIndex(value, label) {
-  const index = Number(value)
-  if (!Number.isSafeInteger(index) || index < 0) throw new Error(`${label} must be a non-negative safe integer`)
-  return index
-}
-
-async function sidecarsForSlot(slot) {
+async function sidecarsForSlot(slot, { signal } = {}) {
   const cacheKey = slotSidecarsKey(slot)
-  if (state.sidecarMemoryCache.has(cacheKey)) return state.sidecarMemoryCache.get(cacheKey)
-  const cached = await getRecord('sidecars', cacheKey)
-  const cachedRecord = normalizeSidecarRecord(cached, slot)
-  const cachedAtMs = cachedRecord?.fetchedAt ? Date.parse(cachedRecord.fetchedAt) : Number.NaN
-  const cacheAgeMs = Number.isFinite(cachedAtMs) ? Date.now() - cachedAtMs : Number.POSITIVE_INFINITY
-  if (cachedRecord && (cachedRecord.sidecars.length || cacheAgeMs < 30_000)) {
-    state.sidecarMemoryCache.set(cacheKey, cachedRecord)
-    return cachedRecord
+  const cached = state.sidecarMemoryCache.get(cacheKey)
+  if (cached) {
+    state.sidecarMemoryCache.delete(cacheKey)
+    state.sidecarMemoryCache.set(cacheKey, cached)
+    return cached
   }
+  const pending = state.sidecarFetchPromises.get(cacheKey)
+  if (pending) return pending
 
-  const started = performance.now()
-  const rows = beaconDataArray(await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`), 'blob sidecars')
-  const sidecars = await Promise.all(rows.map(async (sidecar) => {
-    const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
-    const versionedHash = await sidecarVersionedHash(sidecar)
-    return {
-      index: sidecarIndex(sidecar.index, 'beacon sidecar index'),
-      versionedHash,
-      commitment,
-      blob: sidecar.blob || null,
+  const generation = state.runtimeGeneration
+  const cacheEpoch = state.sidecarCacheEpoch
+  const fetchPromise = (async () => {
+    const started = performance.now()
+    const rows = beaconDataArray(await beacon(`/eth/v1/beacon/blob_sidecars/${slot}`, { signal }), 'blob sidecars', MAX_BLOBS_PER_BLOCK)
+    if (signal?.aborted || generation !== state.runtimeGeneration || cacheEpoch !== state.sidecarCacheEpoch) {
+      throw requestAbortError('Runtime configuration changed.')
     }
-  }))
-  const record = {
-    cacheKey,
-    chainPreset: state.config.chainPreset,
-    slot: sidecarIndex(slot, 'beacon slot'),
-    sidecars,
-    fetchMs: Math.round(performance.now() - started),
-    fetchedAt: new Date().toISOString(),
+    const seenIndices = new Set()
+    const sidecars = await Promise.all(rows.map(async (sidecar) => {
+      const commitment = sidecar.kzg_commitment || sidecar.kzgCommitment
+      const index = sidecarIndex(sidecar.index, 'beacon sidecar index')
+      if (seenIndices.has(index)) throw new Error(`beacon sidecars contain duplicate index ${index}`)
+      seenIndices.add(index)
+      if (!isBlobHex(sidecar.blob)) throw new Error(`beacon sidecar ${index} blob must be exactly ${BLOB_BYTES} bytes`)
+      const versionedHash = await sidecarVersionedHash(sidecar)
+      return {
+        index,
+        versionedHash,
+        commitment,
+        blob: sidecar.blob,
+      }
+    }))
+    if (signal?.aborted || generation !== state.runtimeGeneration || cacheEpoch !== state.sidecarCacheEpoch) {
+      throw requestAbortError('Runtime configuration changed.')
+    }
+    const record = {
+      cacheKey,
+      chainPreset: state.config.chainPreset,
+      slot: nonNegativeSafeInteger(slot, 'beacon slot'),
+      sidecars,
+      fetchMs: Math.round(performance.now() - started),
+      fetchedAt: new Date().toISOString(),
+    }
+    const normalizedRecord = normalizeSidecarRecord(record, slot)
+    if (!normalizedRecord) throw new Error('Invalid sidecar record from beacon response')
+    state.sidecarMemoryCache.set(cacheKey, normalizedRecord)
+    while (state.sidecarMemoryCache.size > MAX_SIDECAR_MEMORY_SLOTS) {
+      const oldestKey = state.sidecarMemoryCache.keys().next().value
+      state.sidecarMemoryCache.delete(oldestKey)
+    }
+    return normalizedRecord
+  })()
+  state.sidecarFetchPromises.set(cacheKey, fetchPromise)
+  try {
+    return await fetchPromise
+  } finally {
+    if (state.sidecarFetchPromises.get(cacheKey) === fetchPromise) state.sidecarFetchPromises.delete(cacheKey)
   }
-  const normalizedRecord = normalizeSidecarRecord(record, slot)
-  if (!normalizedRecord) throw new Error('Invalid sidecar cache record from beacon response')
-  await putRecord('sidecars', normalizedRecord)
-  state.sidecarMemoryCache.set(cacheKey, normalizedRecord)
-  return normalizedRecord
 }
 
-async function sidecarsForSegment(segment) {
-  const slot = await segmentSlot(segment)
-  const wanted = new Set(segment.blobVersionedHashes.map(normalizeHex))
+async function sidecarsForSegment(segment, { signal } = {}) {
+  const slot = await segmentSlot(segment, { signal })
+  const wanted = new Set(segmentBlobHashes(segment))
   const matches = []
-  const record = await sidecarsForSlot(slot)
+  const record = await sidecarsForSlot(slot, { signal })
   if (!Array.isArray(record.sidecars)) throw new Error('Invalid sidecar cache record: sidecars must be an array')
   for (const sidecar of record.sidecars) {
     if (wanted.has(normalizeHex(sidecar.versionedHash))) matches.push(sidecar)
@@ -2187,58 +2714,22 @@ async function sidecarsForSegment(segment) {
   return { slot, matches }
 }
 
-function validSidecarMatch(match) {
-  return match
-    && typeof match === 'object'
-    && !Array.isArray(match)
-    && isBytes32Hex(match.versionedHash)
-    && isBlobHex(match.blob)
-}
-
-async function reconstructPayload(segment, sidecars) {
-  if (!Array.isArray(sidecars?.matches)) throw new Error('Invalid sidecar response: matches must be an array')
-  const byHash = new Map()
-  for (const [index, match] of sidecars.matches.entries()) {
-    if (!validSidecarMatch(match)) throw new Error(`Invalid sidecar match at index ${index}`)
-    byHash.set(normalizeHex(match.versionedHash), match.blob)
-  }
-  const chunks = []
-  let decodedLength = 0
-  for (const hash of segment.blobVersionedHashes) {
-    const blob = byHash.get(normalizeHex(hash))
-    if (!blob) throw new Error(`Missing sidecar ${shortHash(hash)}`)
-    const bytes = hexToBytes(blob)
-    for (let offset = 0; offset < bytes.length; offset += 32) {
-      const fieldElement = bytes.subarray(offset, offset + 32)
-      if (fieldElement.length === 0) continue
-      if (fieldElement[0] !== 0) throw new Error(`Invalid blob field element at ${offset}`)
-      const data = fieldElement.subarray(1)
-      chunks.push(data)
-      decodedLength += data.length
-    }
-  }
-  return concatBytes(chunks, decodedLength).subarray(0, segment.payloadBytes)
-}
-
-function archiveUrl(template, segment) {
-  return template
-    .replaceAll('{streamId}', encodeURIComponent(segment.streamId))
-    .replaceAll('{sequence}', encodeURIComponent(String(segment.sequence)))
-    .replaceAll('{txHash}', encodeURIComponent(segment.txHash))
-    .replaceAll('{payloadSha256}', encodeURIComponent(segment.payloadSha256))
-}
-
-async function payloadFromArchive(segment) {
+async function payloadFromArchive(segment, { signal } = {}) {
+  const payloadBytes = segmentPayloadLength(segment)
   const failures = []
   for (const template of state.config.archiveTemplates) {
     const url = archiveUrl(template, segment)
     try {
-      const response = await fetch(url)
+      const response = await fetchWithTimeout(url, {}, { signal })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const payload = new Uint8Array(await response.arrayBuffer())
+      const payload = await readBoundedResponseBytes(response, payloadBytes, 'Archive payload', { signal })
+      if (payload.byteLength !== payloadBytes) {
+        throw new Error(`Archive payload length mismatch: expected ${payloadBytes} bytes, received ${payload.byteLength}`)
+      }
       await verifyPayloadHash(segment, payload)
       return { payload, archiveUrl: url }
     } catch (error) {
+      if (isAbortError(error)) throw error
       failures.push(`${publicUrlLabel(url)}: ${publicErrorMessage(error)}`)
     }
   }
@@ -2246,8 +2737,8 @@ async function payloadFromArchive(segment) {
   return null
 }
 
-async function payloadFromBeacon(segment) {
-  const sidecars = await sidecarsForSegment(segment)
+async function payloadFromBeacon(segment, { signal } = {}) {
+  const sidecars = await sidecarsForSegment(segment, { signal })
   const payload = await reconstructPayload(segment, sidecars)
   await verifyPayloadHash(segment, payload)
   return { payload, slot: sidecars.slot }
@@ -2255,129 +2746,544 @@ async function payloadFromBeacon(segment) {
 
 async function verifyPayloadHash(segment, payload) {
   const actual = strip0x(await sha256Hex(payload))
-  if (actual !== segment.payloadSha256) throw new Error(`SHA-256 mismatch for #${segment.sequence}`)
+  if (actual !== segment.payloadSha256) {
+    segment.payloadValidity = 'invalid'
+    throw new Error(`SHA-256 mismatch for #${segment.sequence}`)
+  }
+  segment.payloadValidity = 'valid'
+}
+
+function storageMemoryStore(storeName) {
+  const store = memoryStores[storeName]
+  if (!store) throw new Error(`Unknown browser cache store: ${storeName}`)
+  return store
+}
+
+function memorySegmentLimitBytes() {
+  const configuredMb = clampCacheLimitMb(state.config.cacheLimitMb, DEFAULTS.cacheLimitMb, { min: CACHE_LIMIT_MIN_MB, max: CACHE_LIMIT_MAX_MB })
+  return Math.min(configuredMb, MEMORY_CACHE_MAX_MB) * 1024 * 1024
+}
+
+function putMemoryRecord(storeName, record) {
+  const memory = storageMemoryStore(storeName)
+  memory.set(record.cacheKey, record)
+  if (storeName !== 'segments') return true
+  let total = [...memory.values()].reduce((sum, item) => sum + cachedSegmentByteLength(item), 0)
+  const limit = memorySegmentLimitBytes()
+  const oldest = [...memory.values()].sort((a, b) => String(a.verifiedAt || '').localeCompare(String(b.verifiedAt || '')))
+  for (const item of oldest) {
+    if (total <= limit) break
+    memory.delete(item.cacheKey)
+    total -= cachedSegmentByteLength(item)
+  }
+  return memory.has(record.cacheKey)
+}
+
+function markIndexedDbUnavailable(error) {
+  storageStatus.indexedDb = 'unavailable'
+  storageStatus.indexedDbError = storageErrorText(error)
+  return null
 }
 
 function openDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION)
-    request.onupgradeneeded = () => {
-      const db = request.result
-      if (!db.objectStoreNames.contains('segments')) db.createObjectStore('segments', { keyPath: 'cacheKey' })
-      if (!db.objectStoreNames.contains('metadata')) db.createObjectStore('metadata', { keyPath: 'cacheKey' })
-      if (!db.objectStoreNames.contains('sidecars')) db.createObjectStore('sidecars', { keyPath: 'cacheKey' })
+  if (storageStatus.indexedDb === 'unavailable' || typeof indexedDB === 'undefined') {
+    if (typeof indexedDB === 'undefined') markIndexedDbUnavailable('IndexedDB is not available in this browser.')
+    return Promise.resolve(null)
+  }
+  if (dbPromise) return dbPromise
+  dbPromise = new Promise((resolve) => {
+    let request
+    try {
+      request = indexedDB.open(DB_NAME, DB_VERSION)
+    } catch (error) {
+      resolve(markIndexedDbUnavailable(error))
+      return
     }
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
+    request.onupgradeneeded = (event) => {
+      try {
+        const db = request.result
+        const segmentStore = db.objectStoreNames.contains('segments')
+          ? request.transaction.objectStore('segments')
+          : db.createObjectStore('segments', { keyPath: 'cacheKey' })
+        if (!segmentStore.indexNames.contains('verifiedAt')) segmentStore.createIndex('verifiedAt', 'verifiedAt')
+        if (!db.objectStoreNames.contains('metadata')) db.createObjectStore('metadata', { keyPath: 'cacheKey' })
+        if (event.oldVersion > 0 && event.oldVersion < 7) {
+          segmentStore.clear()
+          request.transaction.objectStore('metadata').clear()
+        }
+        if (db.objectStoreNames.contains('sidecars')) db.deleteObjectStore('sidecars')
+      } catch (error) {
+        markIndexedDbUnavailable(error)
+        try {
+          request.transaction?.abort()
+        } catch {
+          // The request error handler completes the memory-only fallback.
+        }
+      }
+    }
+    request.onsuccess = () => {
+      if (storageStatus.indexedDb === 'unavailable') {
+        request.result.close()
+        resolve(null)
+        return
+      }
+      storageStatus.indexedDb = 'available'
+      resolve(request.result)
+    }
+    request.onerror = () => resolve(markIndexedDbUnavailable(request.error))
+    request.onblocked = () => resolve(markIndexedDbUnavailable('IndexedDB upgrade was blocked.'))
   })
+  return dbPromise
 }
 
 async function getRecord(storeName, cacheKey) {
+  const memory = storageMemoryStore(storeName)
+  const fallback = memory.get(cacheKey) || null
   const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const request = db.transaction(storeName).objectStore(storeName).get(cacheKey)
-    request.onsuccess = () => resolve(request.result || null)
-    request.onerror = () => reject(request.error)
+  if (!db) return fallback
+  return new Promise((resolve) => {
+    let request
+    try {
+      request = db.transaction(storeName).objectStore(storeName).get(cacheKey)
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve(fallback)
+      return
+    }
+    request.onsuccess = () => {
+      const record = request.result || fallback
+      if (record && storeName !== 'segments') memory.set(cacheKey, record)
+      resolve(record || null)
+    }
+    request.onerror = () => {
+      markIndexedDbUnavailable(request.error)
+      resolve(fallback)
+    }
   })
 }
 
 async function putRecord(storeName, record) {
+  const memory = storageMemoryStore(storeName)
   const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const request = db.transaction(storeName, 'readwrite').objectStore(storeName).put(record)
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
+  if (!db) {
+    putMemoryRecord(storeName, record)
+    return false
+  }
+  return new Promise((resolve) => {
+    let request
+    try {
+      request = db.transaction(storeName, 'readwrite').objectStore(storeName).put(record)
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve(false)
+      return
+    }
+    request.onsuccess = () => {
+      if (storeName !== 'segments') memory.set(record.cacheKey, record)
+      resolve(true)
+    }
+    request.onerror = () => {
+      markIndexedDbUnavailable(request.error)
+      putMemoryRecord(storeName, record)
+      resolve(false)
+    }
   })
 }
 
 async function clearStore(storeName) {
+  storageMemoryStore(storeName).clear()
   const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const request = db.transaction(storeName, 'readwrite').objectStore(storeName).clear()
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
+  if (!db) return false
+  return new Promise((resolve) => {
+    let request
+    try {
+      request = db.transaction(storeName, 'readwrite').objectStore(storeName).clear()
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve(false)
+      return
+    }
+    request.onsuccess = () => resolve(true)
+    request.onerror = () => {
+      markIndexedDbUnavailable(request.error)
+      resolve(false)
+    }
   })
 }
 
-function metadataKey() {
-  return `segments:${state.config.chainPreset}:${normalizeHex(state.config.stationAddress)}:${state.config.streamId}`
+function metadataScope(config = state.config) {
+  return metadataScopeForConfig(config)
 }
 
 function slotSidecarsKey(slot) {
   return `slot:${state.config.chainPreset}:${slot}`
 }
 
-async function cacheSegmentMetadata(segments) {
+async function cacheSegmentMetadata(segments, runtime = runtimeSnapshot()) {
+  requireCurrentRuntime(runtime)
+  const scope = metadataScope()
   const record = {
-    cacheKey: metadataKey(),
-    chainPreset: state.config.chainPreset,
-    stationAddress: state.config.stationAddress,
-    streamId: state.config.streamId,
-    segments: segments.map(({ embeddedPayload, ...segment }) => segment),
+    ...scope,
+    segments: segments.map(({ embeddedPayload: _embeddedPayload, ...segment }) => segment),
     updatedAt: new Date().toISOString(),
   }
   await putRecord('metadata', record)
+  requireCurrentRuntime(runtime)
   state.metadataUpdatedAt = record.updatedAt
+  state.metadataState = 'fresh'
 }
 
-async function restoreSegmentMetadata() {
-  const cached = await getRecord('metadata', metadataKey())
-  if (!cached?.segments?.length) return false
+async function restoreSegmentMetadata(runtime = runtimeSnapshot()) {
+  requireCurrentRuntime(runtime)
+  const restoreSerial = state.refreshSerial
+  const scope = metadataScope()
+  const cached = matchingCachedMetadata(await getRecord('metadata', scope.cacheKey), scope)
+  requireCurrentRuntime(runtime)
+  if (!cached) return false
   state.segments = cached.segments
-  state.metadataUpdatedAt = cached.updatedAt || ''
-  for (const segment of state.segments) {
-    const record = await cachedSegment(segment.cacheKey)
-    if (record) state.verified.set(segment.cacheKey, record)
+  const verified = new Map()
+  for (const segment of selectRecentSegmentsWithinByteBudget(cached.segments, VERIFIED_MEMORY_MAX_BYTES)) {
+    try {
+      const record = await validatedCachedSegment(segment, runtime)
+      if (record) verified.set(segment.cacheKey, record)
+    } catch (error) {
+      if (!runtimeIsCurrent(runtime)) throw error
+    }
   }
+  if (!runtimeIsCurrent(runtime)) return false
+  if (restoreSerial !== state.refreshSerial || metadataScope().cacheKey !== scope.cacheKey) return false
+  state.verified = verified
+  state.metadataUpdatedAt = cached.updatedAt || ''
+  state.metadataState = 'cached'
+  state.segmentNotice = `Restored ${state.segments.length} cached segment${state.segments.length === 1 ? '' : 's'} from ${fmtAge(state.metadataUpdatedAt)} ago. Network confirmation is pending.`
   render()
   return true
+}
+
+async function restoreInitialCachedMetadata(runtime = runtimeSnapshot()) {
+  if (!normalizeStationAddressInput(state.config.publisher)
+    || !normalizeStationAddressInput(state.config.stationAddress)
+    || !state.config.streamId) return false
+  try {
+    const restored = await restoreSegmentMetadata(runtime)
+    if (restored) {
+      setRuntimeStatus(runtime, `Restored ${state.segments.length} cached segment${state.segments.length === 1 ? '' : 's'}; refresh to check for newer Station events.`)
+    }
+    return restored
+  } catch (error) {
+    setRuntimeStatus(runtime, `Cached metadata could not be restored: ${publicErrorMessage(error)}`)
+    return false
+  }
 }
 
 async function cachedSegment(cacheKey) {
   return getRecord('segments', cacheKey)
 }
 
-async function allCachedSegments() {
-  const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const request = db.transaction('segments').objectStore('segments').getAll()
+async function validatedCachedSegment(segment, runtime = runtimeSnapshot()) {
+  requireCurrentRuntime(runtime)
+  const loaded = assertCurrentLoadedSegment(segment)
+  const record = await cachedSegment(loaded.cacheKey)
+  requireCurrentRuntime(runtime)
+  if (!record?.payload) return null
+  try {
+    const payloadBytes = segmentPayloadLength(loaded)
+    const payload = await cachedPayloadBytes(record.payload, payloadBytes)
+    if (payload.byteLength !== payloadBytes) throw new Error(`Cached payload length mismatch for #${loaded.sequence}`)
+    await verifyPayloadHash(loaded, payload)
+    requireCurrentRuntime(runtime)
+    return {
+      ...record,
+      cacheKey: loaded.cacheKey,
+      publisher: loaded.publisher,
+      streamIdHash: loaded.streamIdHash,
+      streamId: loaded.streamId,
+      channelKey: loaded.channelKey,
+      sequence: loaded.sequence,
+      txHash: loaded.txHash,
+      payloadSha256: loaded.payloadSha256,
+      codec: loaded.codec,
+      continuity: loaded.continuity,
+      quarantined: false,
+      payloadValidity: 'valid',
+      payload,
+      bytes: payload.byteLength,
+      cacheHit: true,
+    }
+  } catch (error) {
+    requireCurrentRuntime(runtime)
+    await deleteCachedSegment(loaded.cacheKey).catch(() => {})
+    requireCurrentRuntime(runtime)
+    throw error
+  }
+}
+
+async function hydrateValidatedCachedSegments(segments, runtime = runtimeSnapshot()) {
+  requireCurrentRuntime(runtime)
+  for (const segment of selectRecentSegmentsWithinByteBudget(segments, VERIFIED_MEMORY_MAX_BYTES)) {
+    try {
+      const record = await validatedCachedSegment(segment, runtime)
+      if (record) promoteVerifiedRecord(segment, record)
+    } catch (error) {
+      if (!runtimeIsCurrent(runtime)) throw error
+      state.verified.delete(segment.cacheKey)
+    }
+  }
+}
+
+async function ensureCacheAccounting(db) {
+  if (!db) {
+    return [...storageMemoryStore('segments').values()].reduce((sum, record) => sum + cachedSegmentByteLength(record), 0)
+  }
+  if (cacheAccountingPromise) return cacheAccountingPromise
+  cacheAccountingPromise = new Promise((resolve) => {
+    let request
+    try {
+      request = db.transaction('metadata').objectStore('metadata').get(CACHE_TOTAL_KEY)
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve(0)
+      return
+    }
     request.onsuccess = () => {
-      if (!Array.isArray(request.result)) {
-        reject(new Error('Invalid segment cache response: expected an array'))
+      if (Number.isSafeInteger(request.result?.bytes) && request.result.bytes >= 0) {
+        resolve(request.result.bytes)
         return
       }
-      resolve(request.result)
+      let total = 0
+      let cursorRequest
+      try {
+        cursorRequest = db.transaction('segments').objectStore('segments').openCursor()
+      } catch (error) {
+        markIndexedDbUnavailable(error)
+        resolve(0)
+        return
+      }
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result
+        if (cursor) {
+          try {
+            total += cachedSegmentByteLength(cursor.value)
+          } catch (error) {
+            markIndexedDbUnavailable(error)
+            resolve(0)
+            return
+          }
+          cursor.continue()
+          return
+        }
+        putRecord('metadata', { cacheKey: CACHE_TOTAL_KEY, bytes: total, updatedAt: new Date().toISOString() })
+          .finally(() => resolve(total))
+      }
+      cursorRequest.onerror = () => {
+        markIndexedDbUnavailable(cursorRequest.error)
+        resolve(0)
+      }
     }
-    request.onerror = () => reject(request.error)
+    request.onerror = () => {
+      markIndexedDbUnavailable(request.error)
+      resolve(0)
+    }
+  }).finally(() => {
+    cacheAccountingPromise = null
+  })
+  return cacheAccountingPromise
+}
+
+async function cacheTotalBytes() {
+  const db = await openDb()
+  return ensureCacheAccounting(db)
+}
+
+async function allCachedSegments() {
+  const memory = storageMemoryStore('segments')
+  const db = await openDb()
+  if (!db) return [...memory.values()]
+  return new Promise((resolve) => {
+    const records = []
+    let request
+    try {
+      request = db.transaction('segments').objectStore('segments').openCursor()
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve([...memory.values()])
+      return
+    }
+    request.onsuccess = () => {
+      const cursor = request.result
+      if (cursor) {
+        const { payload: _payload, ...metadata } = cursor.value
+        records.push(metadata)
+        cursor.continue()
+        return
+      }
+      resolve(records)
+    }
+    request.onerror = () => {
+      markIndexedDbUnavailable(request.error)
+      resolve([...memory.values()])
+    }
   })
 }
 
-async function putCachedSegment(record) {
-  await putRecord('segments', record)
-  await enforceCacheLimit()
+async function putPersistentSegment(record) {
+  const db = await openDb()
+  if (!db) {
+    putMemoryRecord('segments', record)
+    return false
+  }
+  await ensureCacheAccounting(db)
+  return new Promise((resolve) => {
+    let transaction
+    let oldRequest
+    let totalRequest
+    let oldReady = false
+    let totalReady = false
+    const write = () => {
+      if (!oldReady || !totalReady) return
+      try {
+        const oldBytes = oldRequest.result ? cachedSegmentByteLength(oldRequest.result) : 0
+        const currentTotal = Number.isSafeInteger(totalRequest.result?.bytes) ? totalRequest.result.bytes : 0
+        const nextTotal = currentTotal - oldBytes + cachedSegmentByteLength(record)
+        transaction.objectStore('segments').put(record)
+        transaction.objectStore('metadata').put({ cacheKey: CACHE_TOTAL_KEY, bytes: nextTotal, updatedAt: new Date().toISOString() })
+      } catch (error) {
+        markIndexedDbUnavailable(error)
+        try { transaction.abort() } catch { /* already complete */ }
+      }
+    }
+    try {
+      transaction = db.transaction(['segments', 'metadata'], 'readwrite')
+      oldRequest = transaction.objectStore('segments').get(record.cacheKey)
+      totalRequest = transaction.objectStore('metadata').get(CACHE_TOTAL_KEY)
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      putMemoryRecord('segments', record)
+      resolve(false)
+      return
+    }
+    oldRequest.onsuccess = () => { oldReady = true; write() }
+    totalRequest.onsuccess = () => { totalReady = true; write() }
+    transaction.oncomplete = () => resolve(true)
+    transaction.onabort = transaction.onerror = () => {
+      markIndexedDbUnavailable(transaction.error || 'IndexedDB segment write failed')
+      putMemoryRecord('segments', record)
+      resolve(false)
+    }
+  })
+}
+
+async function putCachedSegment(record, runtime = null) {
+  if (runtime) requireCurrentRuntime(runtime)
+  const storedRecord = {
+    ...record,
+    runtimeGeneration: runtime?.generation ?? state.runtimeGeneration,
+    runtimeWriteToken: crypto.randomUUID(),
+  }
+  await putPersistentSegment(storedRecord)
+  if (runtime && !runtimeIsCurrent(runtime)) {
+    await deleteCachedSegmentIfCurrent(storedRecord)
+    requireCurrentRuntime(runtime)
+  }
+  try {
+    await enforceCacheLimit(runtime)
+  } catch (error) {
+    if (runtime && !runtimeIsCurrent(runtime)) await deleteCachedSegmentIfCurrent(storedRecord)
+    throw error
+  }
+  if (runtime) requireCurrentRuntime(runtime)
+  return storedRecord
 }
 
 async function deleteCachedSegment(cacheKey) {
+  const deleted = await deletePersistentSegment(cacheKey)
+  if (deleted) releaseObjectUrl(cacheKey, { preserveActive: true })
+  return deleted
+}
+
+async function deletePersistentSegment(cacheKey, expected = null, { signal } = {}) {
+  if (signal?.aborted) return false
+  const memory = storageMemoryStore('segments')
   const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const request = db.transaction('segments', 'readwrite').objectStore('segments').delete(cacheKey)
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
+  if (!db) {
+    const existing = memory.get(cacheKey)
+    if (!existing || (expected && !sameCachedSegmentWrite(existing, expected))) return false
+    memory.delete(cacheKey)
+    return true
+  }
+  await ensureCacheAccounting(db)
+  if (signal?.aborted) return false
+  return new Promise((resolve) => {
+    let transaction
+    let recordRequest
+    let totalRequest
+    let recordReady = false
+    let totalReady = false
+    let deleted = false
+    const abortTransaction = () => {
+      try { transaction?.abort() } catch { /* already complete */ }
+    }
+    const remove = () => {
+      if (!recordReady || !totalReady || signal?.aborted) return
+      const current = recordRequest.result
+      if (!current || (expected && !sameCachedSegmentWrite(current, expected))) return
+      const currentTotal = Number.isSafeInteger(totalRequest.result?.bytes) ? totalRequest.result.bytes : 0
+      const nextTotal = Math.max(0, currentTotal - cachedSegmentByteLength(current))
+      transaction.objectStore('segments').delete(cacheKey)
+      transaction.objectStore('metadata').put({ cacheKey: CACHE_TOTAL_KEY, bytes: nextTotal, updatedAt: new Date().toISOString() })
+      deleted = true
+    }
+    try {
+      transaction = db.transaction(['segments', 'metadata'], 'readwrite')
+      recordRequest = transaction.objectStore('segments').get(cacheKey)
+      totalRequest = transaction.objectStore('metadata').get(CACHE_TOTAL_KEY)
+      signal?.addEventListener('abort', abortTransaction, { once: true })
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve(false)
+      return
+    }
+    recordRequest.onsuccess = () => { recordReady = true; remove() }
+    totalRequest.onsuccess = () => { totalReady = true; remove() }
+    transaction.oncomplete = () => {
+      signal?.removeEventListener('abort', abortTransaction)
+      if (deleted && (!expected || sameCachedSegmentWrite(memory.get(cacheKey), expected))) memory.delete(cacheKey)
+      resolve(deleted)
+    }
+    transaction.onabort = () => { signal?.removeEventListener('abort', abortTransaction); resolve(false) }
+    transaction.onerror = () => markIndexedDbUnavailable(transaction.error)
   })
+}
+
+function sameCachedSegmentWrite(left, right) {
+  if (!left || !right || left.cacheKey !== right.cacheKey) return false
+  if (left.runtimeWriteToken || right.runtimeWriteToken) return left.runtimeWriteToken === right.runtimeWriteToken
+  return left.verifiedAt === right.verifiedAt
+    && left.payloadSha256 === right.payloadSha256
+    && cachedSegmentByteLength(left) === cachedSegmentByteLength(right)
+}
+
+async function deleteCachedSegmentIfCurrent(record, { signal } = {}) {
+  const deleted = await deletePersistentSegment(record.cacheKey, record, { signal })
+  if (deleted) releaseObjectUrl(record.cacheKey, { preserveActive: true })
+  return deleted
 }
 
 async function clearCache() {
   await clearStore('segments')
   await clearStore('metadata')
-  await clearStore('sidecars')
   state.verified.clear()
   state.segments = []
   state.segmentNotice = ''
+  state.blockTimes.clear()
+  state.blockTimeHashes.clear()
   state.metadataUpdatedAt = ''
+  state.metadataState = 'none'
   state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
   state.sidecarMemoryCache.clear()
-  for (const url of state.objectUrls.values()) URL.revokeObjectURL(url)
-  state.objectUrls.clear()
+  state.sidecarFetchPromises.clear()
+  state.sidecarCacheEpoch += 1
+  for (const cacheKey of [...state.objectUrls.keys()]) releaseObjectUrl(cacheKey, { preserveActive: true })
   await refreshCacheStats()
   render()
 }
@@ -2391,67 +3297,194 @@ function cachedSegmentByteLength(record) {
   throw new Error(`Invalid cached segment byte length for ${record?.cacheKey || 'unknown segment'}`)
 }
 
-async function enforceCacheLimit() {
-  const limitBytes = Number(state.config.cacheLimitMb || DEFAULTS.cacheLimitMb) * 1024 * 1024
-  const records = await allCachedSegments()
-  let total = records.reduce((sum, record) => sum + cachedSegmentByteLength(record), 0)
-  if (total <= limitBytes) return
-  const oldest = records.sort((a, b) => String(a.verifiedAt).localeCompare(String(b.verifiedAt)))
-  for (const record of oldest) {
-    if (total <= limitBytes) break
-    await deleteCachedSegment(record.cacheKey)
-    state.verified.delete(record.cacheKey)
-    total -= cachedSegmentByteLength(record)
-  }
-}
-
-async function refreshCacheStats() {
-  const records = await allCachedSegments()
-  const total = records.reduce((sum, record) => sum + cachedSegmentByteLength(record), 0)
-  els.cacheSize.textContent = fmtBytes(total)
-  if (navigator.storage?.estimate) {
-    const estimate = await navigator.storage.estimate()
-    if (estimate.usage && estimate.quota) {
-      els.cacheSize.textContent = `${fmtBytes(total)} / ${fmtBytes(estimate.quota)}`
+async function enforceCacheLimit(runtime = null) {
+  if (runtime) requireCurrentRuntime(runtime)
+  const configuredMb = clampCacheLimitMb(state.config.cacheLimitMb, DEFAULTS.cacheLimitMb, { min: CACHE_LIMIT_MIN_MB, max: CACHE_LIMIT_MAX_MB })
+  const limitBytes = configuredMb * 1024 * 1024
+  const db = await openDb()
+  if (runtime) requireCurrentRuntime(runtime)
+  if (!db) {
+    const memory = storageMemoryStore('segments')
+    let total = [...memory.values()].reduce((sum, record) => sum + cachedSegmentByteLength(record), 0)
+    for (const record of [...memory.values()].sort((a, b) => String(a.verifiedAt || '').localeCompare(String(b.verifiedAt || '')))) {
+      if (total <= Math.min(limitBytes, memorySegmentLimitBytes())) break
+      if (record.cacheKey === state.currentRecordKey) continue
+      memory.delete(record.cacheKey)
+      state.verified.delete(record.cacheKey)
+      releaseObjectUrl(record.cacheKey, { preserveActive: true })
+      total -= cachedSegmentByteLength(record)
     }
+    return
+  }
+  const total = await ensureCacheAccounting(db)
+  if (runtime) requireCurrentRuntime(runtime)
+  if (total <= limitBytes) return
+  const evictedKeys = await new Promise((resolve) => {
+    let transaction
+    let totalRequest
+    const keys = []
+    const abortTransaction = () => {
+      try { transaction?.abort() } catch { /* already complete */ }
+    }
+    try {
+      transaction = db.transaction(['segments', 'metadata'], 'readwrite')
+      totalRequest = transaction.objectStore('metadata').get(CACHE_TOTAL_KEY)
+      runtime?.signal?.addEventListener('abort', abortTransaction, { once: true })
+    } catch (error) {
+      markIndexedDbUnavailable(error)
+      resolve([])
+      return
+    }
+    totalRequest.onsuccess = () => {
+      let currentTotal = Number.isSafeInteger(totalRequest.result?.bytes) ? totalRequest.result.bytes : total
+      const request = transaction.objectStore('segments').index('verifiedAt').openCursor()
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor || currentTotal <= limitBytes) {
+          transaction.objectStore('metadata').put({ cacheKey: CACHE_TOTAL_KEY, bytes: Math.max(0, currentTotal), updatedAt: new Date().toISOString() })
+          return
+        }
+        const record = cursor.value
+        if (record.cacheKey === state.currentRecordKey) {
+          cursor.continue()
+          return
+        }
+        try {
+          currentTotal -= cachedSegmentByteLength(record)
+        } catch (error) {
+          markIndexedDbUnavailable(error)
+          abortTransaction()
+          return
+        }
+        keys.push(record.cacheKey)
+        cursor.delete()
+        cursor.continue()
+      }
+      request.onerror = () => abortTransaction()
+    }
+    transaction.oncomplete = () => { runtime?.signal?.removeEventListener('abort', abortTransaction); resolve(keys) }
+    transaction.onabort = () => { runtime?.signal?.removeEventListener('abort', abortTransaction); resolve([]) }
+    transaction.onerror = () => markIndexedDbUnavailable(transaction.error)
+  })
+  if (runtime) requireCurrentRuntime(runtime)
+  for (const cacheKey of evictedKeys) {
+    state.verified.delete(cacheKey)
+    storageMemoryStore('segments').delete(cacheKey)
+    releaseObjectUrl(cacheKey, { preserveActive: true })
   }
 }
 
-async function cachedPayloadBytes(payload) {
-  if (payload instanceof Uint8Array) return payload
-  if (payload instanceof ArrayBuffer) return new Uint8Array(payload)
-  if (ArrayBuffer.isView(payload)) return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength)
-  if (payload instanceof Blob) return new Uint8Array(await payload.arrayBuffer())
+async function refreshCacheStats(runtime = null) {
+  try {
+    const total = await cacheTotalBytes()
+    if (!runtimeAllowsMutation(runtime)) return false
+    const memoryOnly = storageStatus.indexedDb === 'unavailable'
+    els.cacheSize.textContent = `${fmtBytes(total)}${memoryOnly ? ' · memory only' : ''}`
+    els.cacheSize.title = memoryOnly
+      ? 'Persistent media cache is unavailable. Verified payloads remain usable only until this tab closes.'
+      : 'Verified payloads are stored in this browser.'
+    if (!memoryOnly && navigator.storage?.estimate) {
+      try {
+        const estimate = await navigator.storage.estimate()
+        if (!runtimeAllowsMutation(runtime)) return false
+        if (estimate.usage && estimate.quota) {
+          els.cacheSize.textContent = `${fmtBytes(total)} / ${fmtBytes(estimate.quota)}`
+        }
+      } catch (error) {
+        if (!runtimeAllowsMutation(runtime)) return false
+        els.cacheSize.title = `Storage quota could not be read: ${storageErrorText(error)}`
+      }
+    }
+    return true
+  } catch (error) {
+    if (!runtimeAllowsMutation(runtime)) return false
+    markIndexedDbUnavailable(error)
+    els.cacheSize.textContent = 'memory only'
+    els.cacheSize.title = 'Persistent media cache is unavailable. Network viewing remains available.'
+    return false
+  }
+}
+
+function storageLimitationMessage(status = storageStatus) {
+  const settingsUnavailable = status.localStorage === 'unavailable'
+  const cacheUnavailable = status.indexedDb === 'unavailable'
+  if (settingsUnavailable && cacheUnavailable) {
+    return 'Browser storage is unavailable. Settings and verified media will last only for this tab; network viewing remains available.'
+  }
+  if (settingsUnavailable) return 'Saved settings are unavailable. Current settings work for this tab, and network viewing remains available.'
+  if (cacheUnavailable) return 'Persistent media cache is unavailable. Verified media will last only for this tab; network viewing remains available.'
+  return ''
+}
+
+async function initializeCachedState() {
+  const runtime = runtimeSnapshot()
+  try {
+    await restoreInitialCachedMetadata(runtime)
+    requireCurrentRuntime(runtime)
+    await refreshCacheStats(runtime)
+    requireCurrentRuntime(runtime)
+  } catch (error) {
+    if (!runtimeIsCurrent(runtime)) return
+    markIndexedDbUnavailable(error)
+    await refreshCacheStats(runtime)
+  }
+  const limitation = storageLimitationMessage()
+  if (limitation) setRuntimeStatus(runtime, limitation)
+}
+
+async function cachedPayloadBytes(payload, maxBytes = MAX_SEGMENT_PAYLOAD_BYTES) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_SEGMENT_PAYLOAD_BYTES) {
+    throw new Error('Invalid cached payload byte limit')
+  }
+  if (payload instanceof Uint8Array) {
+    if (payload.byteLength > maxBytes) throw new Error(`Cached payload exceeds ${maxBytes} bytes`)
+    return payload
+  }
+  if (payload instanceof ArrayBuffer) {
+    if (payload.byteLength > maxBytes) throw new Error(`Cached payload exceeds ${maxBytes} bytes`)
+    return new Uint8Array(payload)
+  }
+  if (ArrayBuffer.isView(payload)) {
+    if (payload.byteLength > maxBytes) throw new Error(`Cached payload exceeds ${maxBytes} bytes`)
+    return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength)
+  }
+  if (payload instanceof Blob) {
+    if (payload.size > maxBytes) throw new Error(`Cached payload exceeds ${maxBytes} bytes`)
+    return new Uint8Array(await payload.arrayBuffer())
+  }
   throw new Error('Cached payload is not byte data')
 }
 
-async function verifySegment(segment) {
-  state.playbackState = 'buffering'
-  const cached = await cachedSegment(segment.cacheKey)
-  if (cached?.payload) {
-    try {
-      const payload = await cachedPayloadBytes(cached.payload)
-      await verifyPayloadHash(segment, payload)
-      const verified = {
-        ...cached,
-        payload,
-        bytes: payload.byteLength,
-        cacheHit: true,
-      }
-      state.verified.set(segment.cacheKey, verified)
-      return verified
-    } catch (error) {
-      await deleteCachedSegment(segment.cacheKey).catch(() => {})
-      state.verified.delete(segment.cacheKey)
-      setStatus(`Discarded cached segment #${segment.sequence}: ${publicErrorMessage(error)}`)
-    }
+async function verifySegment(segment, runtime = runtimeSnapshot(), playbackContext = playbackContextSnapshot()) {
+  requireCurrentRuntime(runtime)
+  requireCurrentPlaybackContext(playbackContext)
+  assertPlayableContinuity(segment)
+  assertCurrentLoadedSegment(segment)
+  try {
+    const cached = await validatedCachedSegment(segment, runtime)
+    requireCurrentRuntime(runtime)
+    requireCurrentPlaybackContext(playbackContext)
+    if (cached) return promoteVerifiedRecord(segment, cached)
+  } catch (error) {
+    requireCurrentRuntime(runtime)
+    requireCurrentPlaybackContext(playbackContext)
+    state.verified.delete(segment.cacheKey)
+    setRuntimeStatus(runtime, `Discarded cached segment #${segment.sequence}: ${publicErrorMessage(error)}`)
   }
 
   if (segment.source === 'blob-inbox' && segment.embeddedPayload instanceof Uint8Array) {
     await verifyPayloadHash(segment, segment.embeddedPayload)
+    requireCurrentRuntime(runtime)
+    requireCurrentPlaybackContext(playbackContext)
     const record = {
       cacheKey: segment.cacheKey,
+      publisher: segment.publisher,
+      streamIdHash: segment.streamIdHash,
       streamId: segment.streamId,
+      channelKey: segment.channelKey,
+      continuity: segment.continuity,
+      quarantined: false,
+      payloadValidity: 'valid',
       sequence: segment.sequence,
       txHash: segment.txHash,
       payload: segment.embeddedPayload,
@@ -2460,28 +3493,35 @@ async function verifySegment(segment) {
       codec: segment.codec,
       slot: segment.slot || null,
       source: 'blob-inbox',
-      archiveUrl: null,
       verifiedAt: new Date().toISOString(),
     }
-    await putCachedSegment(record)
-    state.verified.set(segment.cacheKey, record)
-    await refreshCacheStats()
-    return record
+    const storedRecord = await putCachedSegment(record, runtime)
+    requireCurrentRuntime(runtime)
+    requireCurrentPlaybackContext(playbackContext)
+    const promotedRecord = promoteVerifiedRecord(segment, storedRecord)
+    await refreshCacheStats(runtime)
+    requireCurrentRuntime(runtime)
+    requireCurrentPlaybackContext(playbackContext)
+    return promotedRecord
   }
 
   let source = 'beacon'
   let result
   try {
-    result = await payloadFromBeacon(segment)
+    result = await payloadFromBeacon(segment, { signal: runtime.signal })
+    requireCurrentPlaybackContext(playbackContext)
   } catch (beaconError) {
+    requireCurrentRuntime(runtime)
     if (state.config.archiveTemplates.length) {
-      setStatus(`Blob sidecars are unavailable for segment #${segment.sequence}; trying verified archive fallback.`)
+      setRuntimeStatus(runtime, `Blob sidecars are unavailable for segment #${segment.sequence}; trying verified archive fallback.`)
     } else {
-      setStatus(`Blob sidecars are unavailable for segment #${segment.sequence}. A verified browser cache entry can still play if available.`)
+      setRuntimeStatus(runtime, `Blob sidecars are unavailable for segment #${segment.sequence}. A verified browser cache entry can still play if available.`)
     }
-    const archive = await payloadFromArchive(segment)
+    const archive = await payloadFromArchive(segment, { signal: runtime.signal })
+    requireCurrentRuntime(runtime)
+    requireCurrentPlaybackContext(playbackContext)
     if (!archive) {
-      throw new Error(`Blob sidecars are unavailable for segment #${segment.sequence}, and no archive fallback returned a payload that can be verified: ${publicErrorMessage(beaconError)}`)
+      throw new Error(`Blob sidecars are unavailable for segment #${segment.sequence}, and no archive fallback returned a payload that can be verified: ${publicErrorMessage(beaconError)}`, { cause: beaconError })
     }
     result = archive
     source = 'archive'
@@ -2489,7 +3529,13 @@ async function verifySegment(segment) {
 
   const record = {
     cacheKey: segment.cacheKey,
+    publisher: segment.publisher,
+    streamIdHash: segment.streamIdHash,
     streamId: segment.streamId,
+    channelKey: segment.channelKey,
+    continuity: segment.continuity,
+    quarantined: false,
+    payloadValidity: 'valid',
     sequence: segment.sequence,
     txHash: segment.txHash,
     payload: result.payload,
@@ -2498,13 +3544,17 @@ async function verifySegment(segment) {
     codec: segment.codec,
     slot: result.slot || null,
     source,
-    archiveUrl: result.archiveUrl || null,
+    archiveSourceOrigin: result.archiveUrl ? publicUrlLabel(result.archiveUrl) : null,
     verifiedAt: new Date().toISOString(),
   }
-  await putCachedSegment(record)
-  state.verified.set(segment.cacheKey, record)
-  await refreshCacheStats()
-  return record
+  const storedRecord = await putCachedSegment(record, runtime)
+  requireCurrentRuntime(runtime)
+  requireCurrentPlaybackContext(playbackContext)
+  const promotedRecord = promoteVerifiedRecord(segment, storedRecord)
+  await refreshCacheStats(runtime)
+  requireCurrentRuntime(runtime)
+  requireCurrentPlaybackContext(playbackContext)
+  return promotedRecord
 }
 
 function objectUrl(record) {
@@ -2512,6 +3562,31 @@ function objectUrl(record) {
   const url = URL.createObjectURL(new Blob([record.payload], { type: 'video/webm' }))
   state.objectUrls.set(record.cacheKey, url)
   return url
+}
+
+function releaseObjectUrl(cacheKey, { preserveActive = false } = {}) {
+  const url = state.objectUrls.get(cacheKey)
+  if (!url) return false
+  if (preserveActive && cacheKey === state.currentRecordKey && els.player?.currentSrc) {
+    state.deferredObjectUrlKeys.add(cacheKey)
+    return false
+  }
+  URL.revokeObjectURL(url)
+  state.objectUrls.delete(cacheKey)
+  state.deferredObjectUrlKeys.delete(cacheKey)
+  return true
+}
+
+function revokeDeferredObjectUrls(nextActiveKey = '') {
+  for (const cacheKey of [...state.deferredObjectUrlKeys]) {
+    if (cacheKey !== nextActiveKey) releaseObjectUrl(cacheKey)
+  }
+}
+
+function revokeAllObjectUrls() {
+  for (const url of state.objectUrls.values()) URL.revokeObjectURL(url)
+  state.objectUrls.clear()
+  state.deferredObjectUrlKeys.clear()
 }
 
 function prepareAudioForPlayback({ userRequested = false } = {}) {
@@ -2525,68 +3600,133 @@ function prepareAudioForPlayback({ userRequested = false } = {}) {
   renderMuteIcon()
 }
 
-function playRecord(record, options = {}) {
+function mediaErrorPresentation(error) {
+  const code = Number(error?.code)
+  const reasons = {
+    1: 'playback was aborted locally',
+    2: 'the browser reported a media network error',
+    3: 'the browser could not decode the verified media',
+    4: 'the browser does not support this media profile',
+  }
+  return {
+    code: Number.isInteger(code) && Object.hasOwn(reasons, code) ? `MEDIA_${code}` : 'MEDIA_UNKNOWN',
+    message: `Local playback failed: ${reasons[code] || 'the browser reported an unknown media error'}. Station programming has not been reclassified as fallback.`,
+  }
+}
+
+function playRecord(record, options = {}, runtime = runtimeSnapshot()) {
+  if (!runtimeIsCurrent(runtime)) return false
+  assertCurrentLoadedSegment(record)
+  revokeDeferredObjectUrls(record.cacheKey)
+  const playbackToken = ++state.playbackAdvanceToken
   state.currentRecordKey = record.cacheKey
-  state.playbackState = 'playing'
+  const playbackIntent = options.playbackIntent === 'follow' && state.followIntent ? 'follow' : 'replay'
+  state.playbackIntent = playbackIntent
+  state.playbackMode = classifyPlaybackMode({ playbackIntent, followIntent: state.followIntent, liveEdgeKey: state.liveEdgeKey, currentRecordKey: record.cacheKey })
   state.selectedSegmentQuery = record.txHash || String(record.sequence)
   syncUrlState()
   els.player.src = objectUrl(record)
   prepareAudioForPlayback(options)
   els.empty.classList.add('hidden')
-  els.stationState.textContent = 'LIVE'
   void els.player.play().catch((error) => {
-    state.playbackState = 'interrupted'
-    if (options.userRequested) setStatus(`Playback blocked: ${publicErrorMessage(error)}`)
+    if (!runtimeIsCurrent(runtime) || playbackToken !== state.playbackAdvanceToken) return
+    state.playbackMode = 'interrupted'
+    const prefix = options.userRequested ? 'Playback blocked' : 'Automatic playback did not start'
+    setStatus(`${prefix}: ${publicErrorMessage(error)}. Use the segment play control to retry.`, { assertive: true, announcementKey: options.userRequested ? 'playback-blocked' : 'autoplay-blocked' })
     render()
   })
   warmNextSegment(record)
+  return true
 }
 
 function latestVerifiedRecord() {
-  return [...state.verified.values()].sort((a, b) => a.sequence - b.sequence).at(-1)
+  return [...state.verified.values()].filter(currentLoadedSegment).sort((a, b) => a.sequence - b.sequence).at(-1)
 }
 
 function firstVerifiedRecord() {
-  return [...state.verified.values()].sort((a, b) => a.sequence - b.sequence)[0] || null
+  return [...state.verified.values()].filter(currentLoadedSegment).sort((a, b) => a.sequence - b.sequence)[0] || null
 }
 
 function nextVerifiedRecord(currentRecord) {
   return [...state.verified.values()]
-    .filter((record) => record.sequence > currentRecord.sequence)
+    .filter((record) => currentLoadedSegment(record) && record.sequence > currentRecord.sequence)
     .sort((a, b) => a.sequence - b.sequence)[0] || null
 }
 
+function orderedLoadedSegments(segments = state.segments) {
+  const channelKey = configuredChannelKey()
+  return [...segments].filter((segment) => segment.channelKey === channelKey && !segmentIsQuarantined(segment)).sort((a, b) =>
+    a.sequence - b.sequence
+    || a.blockNumber - b.blockNumber
+    || a.transactionIndex - b.transactionIndex
+    || a.logIndex - b.logIndex)
+}
+
 function nextSegmentAfter(record) {
-  const index = state.segments.findIndex((segment) => segment.cacheKey === record?.cacheKey)
-  return index >= 0 ? state.segments[index + 1] || null : null
+  const segments = orderedLoadedSegments()
+  const index = segments.findIndex((segment) => segment.cacheKey === record?.cacheKey)
+  return index >= 0 ? segments[index + 1] || null : null
+}
+
+function playbackAdvanceIsCurrent(advanceToken, currentKey, { requireLoop = false, replayOnly = false } = {}) {
+  return advanceToken === state.playbackAdvanceToken
+    && currentKey === state.currentRecordKey
+    && (!requireLoop || state.loopReplay)
+    && (!replayOnly || !state.followIntent)
+}
+
+function beginUserPlaybackRequest() {
+  return ++state.playbackAdvanceToken
+}
+
+function userPlaybackRequestIsCurrent(requestToken) {
+  return requestToken === state.playbackAdvanceToken
+}
+
+async function advanceLoadedPlayback(segment, { advanceToken, currentKey, requireLoop = false } = {}) {
+  const record = state.verified.get(segment.cacheKey) || await prefetchSegment(segment)
+  if (!playbackAdvanceIsCurrent(advanceToken, currentKey, { requireLoop, replayOnly: true })) return null
+  if (!record) throw new Error(`Unable to buffer segment #${segment.sequence}.`)
+  playRecord(record)
+  render()
+  return record
 }
 
 function currentRecord() {
-  return state.currentRecordKey ? state.verified.get(state.currentRecordKey) || null : null
+  const record = state.currentRecordKey ? state.verified.get(state.currentRecordKey) || null : null
+  return record && currentLoadedSegment(record) ? record : null
 }
 
-async function prefetchSegment(segment) {
-  if (!segment) return null
-  if (state.verified.has(segment.cacheKey)) return state.verified.get(segment.cacheKey)
+async function prefetchSegment(segment, runtime = runtimeSnapshot()) {
+  if (!segment || !runtimeIsCurrent(runtime)) return null
+  if (!currentLoadedSegment(segment)) return null
+  const verified = state.verified.get(segment.cacheKey)
+  if (verified && currentLoadedSegment(verified)) return verified
+  if (verified) state.verified.delete(segment.cacheKey)
   if (state.prefetchPromises.has(segment.cacheKey)) return state.prefetchPromises.get(segment.cacheKey)
   state.prefetching.add(segment.cacheKey)
-  const promise = verifySegment(segment)
+  const playbackContext = playbackContextSnapshot()
+  const promise = verifySegment(segment, runtime, playbackContext)
     .then((record) => {
+      requireCurrentRuntime(runtime)
+      requireCurrentPlaybackContext(playbackContext)
       objectUrl(record)
       render()
       return record
     })
     .catch(() => null)
     .finally(() => {
-      state.prefetching.delete(segment.cacheKey)
-      state.prefetchPromises.delete(segment.cacheKey)
+      if (runtimeIsCurrent(runtime) && state.prefetchPromises.get(segment.cacheKey) === promise) {
+        state.prefetching.delete(segment.cacheKey)
+        state.prefetchPromises.delete(segment.cacheKey)
+      }
     })
   state.prefetchPromises.set(segment.cacheKey, promise)
   return promise
 }
 
 function prefetchWindow() {
-  const recent = [...state.segments].slice(-5)
+  const recent = state.segments.filter((segment) => !segmentIsQuarantined(segment)).slice(-5)
   for (const segment of recent) void prefetchSegment(segment)
 }
 
@@ -2607,6 +3747,8 @@ function streamBlobMap() {
   for (const segment of state.segments) {
     for (const hash of segment.blobVersionedHashes) {
       byHash.set(normalizeHex(hash), {
+        publisher: segment.publisher,
+        streamIdHash: segment.streamIdHash,
         streamId: segment.streamId,
         sequence: segment.sequence,
         txHash: segment.txHash,
@@ -2616,15 +3758,18 @@ function streamBlobMap() {
   return byHash
 }
 
-async function refreshBlobspace() {
+async function refreshBlobspaceOnce(runtime = runtimeSnapshot()) {
+  requireCurrentRuntime(runtime)
   const known = streamBlobMap()
   try {
-    const [headSlot, genesisTime] = await Promise.all([latestBeaconSlot(), beaconGenesisTime()])
+    const [headSlot, genesisTime] = await Promise.all([latestBeaconSlot({ signal: runtime.signal }), beaconGenesisTime({ signal: runtime.signal })])
+    requireCurrentRuntime(runtime)
     els.headSlot.textContent = String(headSlot)
     const slots = Array.from({ length: SLOT_WINDOW }, (_, index) => headSlot - index).filter((slot) => slot >= 0)
     const rows = await Promise.all(slots.map(async (slot) => {
       try {
-        const record = await sidecarsForSlot(slot)
+        const record = await sidecarsForSlot(slot, { signal: runtime.signal })
+        requireCurrentRuntime(runtime)
         const blobs = record.sidecars.map((sidecar) => {
           const stream = known.get(normalizeHex(sidecar.versionedHash)) || null
           return {
@@ -2644,6 +3789,7 @@ async function refreshBlobspace() {
           error: '',
         }
       } catch (error) {
+        if (isAbortError(error) || !runtimeIsCurrent(runtime)) throw error
         return {
           slot,
           timestampMs: slotTimestampMs(slot, genesisTime),
@@ -2655,8 +3801,10 @@ async function refreshBlobspace() {
         }
       }
     }))
+    requireCurrentRuntime(runtime)
     state.blobspace = { mode: 'live', rows, warning: '' }
   } catch (error) {
+    if (!runtimeIsCurrent(runtime)) return
     state.blobspace = {
       mode: 'cached',
       rows: cachedBlobspaceRows(known),
@@ -2665,12 +3813,31 @@ async function refreshBlobspace() {
   }
 }
 
+function refreshBlobspace(runtime = runtimeSnapshot()) {
+  return singleFlight(state, 'blobspaceRefreshPromise', () => refreshBlobspaceOnce(runtime))
+}
+
 async function refreshBlobspaceRail() {
+  const runtime = runtimeSnapshot()
   try {
-    await refreshBlobspace()
+    await refreshBlobspace(runtime)
   } finally {
-    render()
+    if (runtimeIsCurrent(runtime)) renderBlobspace()
   }
+}
+
+function dynamicFocusKey(element = document.activeElement) {
+  const control = element?.closest?.('[data-focus-key]')
+  return control?.dataset?.focusKey || ''
+}
+
+function restoreDynamicFocus(focusKey) {
+  if (!focusKey) return false
+  const target = [...document.querySelectorAll('[data-focus-key]')]
+    .find((element) => element.dataset.focusKey === focusKey)
+  if (!target || target === document.activeElement) return Boolean(target)
+  target.focus({ preventScroll: true })
+  return true
 }
 
 function cachedBlobspaceRows(known) {
@@ -2679,7 +3846,7 @@ function cachedBlobspaceRows(known) {
     if (record.slot == null) continue
     let slot
     try {
-      slot = sidecarIndex(record.slot, 'cached segment slot')
+      slot = nonNegativeSafeInteger(record.slot, 'cached segment slot')
     } catch {
       continue
     }
@@ -2711,15 +3878,18 @@ function cachedBlobspaceRows(known) {
 }
 
 function renderBlobspace() {
+  const focusKey = dynamicFocusKey()
   const blobspace = state.blobspace || { rows: [], mode: 'warming' }
   els.railMode.textContent = 'Live beacon sidecars from /eth/v1/beacon/blob_sidecars/{slot}.'
   const preset = CHAIN_PRESETS[state.config.chainPreset] || CHAIN_PRESETS[DEFAULTS.chainPreset]
   const latestSlot = els.headSlot.textContent || '-'
   const warning = blobspace.warning || 'none'
   const explorerBase = preset.explorerTxBase.replace(/\/tx\/$/, '')
-  els.blobspaceStatus.innerHTML = [
+  const warningText = warning === 'none' ? 'No endpoint warnings.' : `Warning: ${warning}`
+  if (els.blobspaceWarning.textContent !== warningText) els.blobspaceWarning.textContent = warningText
+  els.blobspaceWarning.title = warningText
+  els.blobspaceDetails.innerHTML = [
     ['Latest slot', latestSlot],
-    ['Warning', warning],
     ['Preset', preset.label],
     ['Explorer', explorerBase],
     ['Station metadata', state.metadataUpdatedAt ? `${fmtAge(state.metadataUpdatedAt)} old` : 'none'],
@@ -2738,16 +3908,17 @@ function renderBlobspace() {
         : blob?.versionedHash || 'empty'
       if (!blob) return `<span class="blob-cell" title="${escapeHtml(label)}"></span>`
       const href = blob.isStreamBlob ? explorerTxUrl(blob.stream.txHash) : slotUrl
-      return `<a class="blob-cell ${kind}" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></a>`
+      return `<a class="blob-cell ${kind}" data-focus-key="blob:${escapeHtml(row.slot)}:${index}" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></a>`
     }).join('')
     const streamCount = Number(row.streamBlobCount || 0)
     const firstStreamBlob = blobs.find((blob) => blob.isStreamBlob)
+    const slotJumpLabel = firstStreamBlob ? slotJumpAccessibleName(row.slot, firstStreamBlob.stream.sequence) : ''
     return `
       <section class="slot">
         <div class="slot-top">
-          <a class="slot-link" href="${escapeHtml(slotUrl)}" target="_blank" rel="noopener noreferrer">Slot ${escapeHtml(row.slot)}</a>
+          <a class="slot-link" data-focus-key="slot:${escapeHtml(row.slot)}" href="${escapeHtml(slotUrl)}" target="_blank" rel="noopener noreferrer">Slot ${escapeHtml(row.slot)}</a>
           <span>${Number(row.blobCount || blobs.length)} / ${max} blobs${streamCount ? ` - ${streamCount} stream` : ''}</span>
-          ${firstStreamBlob ? `<button class="slot-jump" type="button" data-slot-jump-tx="${escapeHtml(firstStreamBlob.stream.txHash)}" data-slot-jump-sequence="${escapeHtml(firstStreamBlob.stream.sequence)}">JUMP</button>` : ''}
+          ${firstStreamBlob ? `<button class="slot-jump" type="button" data-focus-key="slot-jump:${escapeHtml(row.slot)}" data-slot-jump-tx="${escapeHtml(firstStreamBlob.stream.txHash)}" data-slot-jump-sequence="${escapeHtml(firstStreamBlob.stream.sequence)}" aria-label="${escapeHtml(slotJumpLabel)}">JUMP</button>` : ''}
         </div>
         <div class="slot-meta"><span><strong>Local</strong> ${escapeHtml(row.localTime || fmtLocalTime(row.timestampMs))}</span><span>${row.error ? 'endpoint miss' : ''}</span></div>
         <div class="blob-grid">${cells}</div>
@@ -2755,6 +3926,7 @@ function renderBlobspace() {
       </section>
     `
   }).join('') || '<p class="muted">No blob sidecar rows available yet.</p>'
+  restoreDynamicFocus(focusKey)
 }
 
 function renderHealth() {
@@ -2878,7 +4050,7 @@ function renderEndpointSetup() {
   els.endpointPresets.innerHTML = Object.entries(CHAIN_PRESETS).map(([key, preset]) => {
     const selected = key === state.config.chainPreset && mode === 'preset'
     return `
-      <button class="endpoint-preset ${selected ? 'active' : ''}" type="button" data-endpoint-preset="${escapeHtml(key)}" aria-pressed="${selected ? 'true' : 'false'}">
+      <button class="endpoint-preset ${selected ? 'active' : ''}" type="button" data-focus-key="endpoint-preset:${escapeHtml(key)}" data-endpoint-preset="${escapeHtml(key)}" aria-pressed="${selected ? 'true' : 'false'}">
         <strong>${escapeHtml(preset.label)}</strong>
         <span>${escapeHtml(preset.executionRpcs.length)} execution / ${escapeHtml(preset.beaconApis.length)} beacon</span>
       </button>
@@ -2886,25 +4058,40 @@ function renderEndpointSetup() {
   }).join('')
 }
 
-function playbackStateLabel() {
-  const labels = {
-    waiting: 'waiting for next slot',
-    buffering: 'buffering',
-    playing: 'playing',
-    lagging: 'lagging',
-    interrupted: 'interrupted',
-    replayEnded: 'replay ended',
-  }
-  return labels[state.playbackState] || 'waiting for next slot'
-}
-
-function renderEmptyState({ activeRecord, latestSegment, health, tunedSummary }) {
+function renderEmptyState({ activeRecord, health, tunedSummary }) {
   if (!els.empty) return
   els.empty.classList.toggle('hidden', Boolean(activeRecord))
   if (activeRecord) return
   const title = els.empty.querySelector('strong')
   const detail = els.empty.querySelector('span')
   if (!title || !detail) return
+  const recoveryStates = {
+    'endpoint-blocked': {
+      title: 'Connection setup needed',
+      detail: 'The station cannot be checked with the current network endpoints. Review Connections, then refresh the signal.',
+      action: 'Open connection settings',
+    },
+    'station-missing': {
+      title: 'Choose a station',
+      detail: 'No Station contract is configured for this network. Add one in Connections to tune a broadcast.',
+      action: 'Choose a station',
+    },
+    'sidecar-blocked': {
+      title: 'Media endpoint unavailable',
+      detail: 'Segment announcements were found, but the beacon media endpoint is unavailable. Review Connections and try again.',
+      action: 'Review media connection',
+    },
+  }
+  const recovery = recoveryStates[health]
+  if (els.emptyRecovery) {
+    els.emptyRecovery.hidden = !recovery
+    els.emptyRecovery.textContent = recovery?.action || 'Open connection settings'
+  }
+  if (recovery) {
+    title.textContent = recovery.title
+    detail.textContent = recovery.detail
+    return
+  }
   if (state.segments.length) {
     title.textContent = tunedSummary ? `Ready to watch ${tunedSummary.title}` : 'Stream segments loaded'
     detail.textContent = `${state.segments.length} segment${state.segments.length === 1 ? '' : 's'} loaded. Choose GET or a segment number in Stream Segments to verify and play.`
@@ -2923,13 +4110,15 @@ function streamHealthSummary(latestSegment) {
   if (activeRecord?.source === 'archive') return 'archive-backed'
   if (state.endpointHealth.beacon.state === 'failed' && state.segments.length && !state.verified.size) return 'sidecar-blocked'
   if (state.endpointHealth.beacon.state === 'failed') return 'endpoint-blocked'
-  if (!state.segments.length) return state.streaming ? 'waiting for next slot' : 'no metadata'
+  if (!state.segments.length) return state.followIntent ? 'waiting for next slot' : 'no metadata'
   if (!state.verified.size) return 'metadata only'
   const latestAgeSeconds = latestSegment?.createdAt ? Math.round((Date.now() - Date.parse(latestSegment.createdAt)) / 1000) : 0
   if (latestAgeSeconds > 120) return 'stale'
-  if (state.playbackState === 'buffering') return 'buffering'
-  if (state.streaming && latestSegment && !state.verified.has(latestSegment.cacheKey)) return 'lagging'
-  return state.streaming ? 'live' : 'replay/cache'
+  if (state.playbackMode === 'buffering' || state.playbackMode === 'replay-buffering') return 'buffering'
+  if (state.followIntent && latestSegment && !state.verified.has(latestSegment.cacheKey)) return 'lagging'
+  if (state.playbackMode === 'live') return 'live'
+  if (state.playbackMode === 'catching-up') return 'catching up'
+  return activeRecord ? 'replay/cache' : state.followIntent ? 'waiting for next slot' : 'idle'
 }
 
 function playbackSourceLabel(record) {
@@ -2963,6 +4152,7 @@ function applyLayoutPreset() {
     element.style.order = String(config.order)
     element.dataset.panelPosition = config.position
   }
+  if (els.layoutRecovery) els.layoutRecovery.hidden = settings.player.visible
   renderLayoutControls()
   if ((preset === 'archive-side' || preset === 'archive-bottom') && els.archiveDetails) {
     els.archiveDetails.open = true
@@ -2990,7 +4180,9 @@ function renderLayoutControls() {
   }
   if (els.layoutPresets) {
     for (const button of els.layoutPresets.querySelectorAll('[data-layout-preset]')) {
-      button.classList.toggle('active', button.dataset.layoutPreset === state.layoutPreset)
+      const active = button.dataset.layoutPreset === state.layoutPreset
+      button.classList.toggle('active', active)
+      button.setAttribute('aria-pressed', active ? 'true' : 'false')
     }
   }
   if (els.layoutBottomSpan) els.layoutBottomSpan.value = settings.bottomSpan
@@ -3007,48 +4199,111 @@ function renderClockControls() {
 
 function openSettings(tab = 'appearance') {
   if (!els.settingsModal) return
+  const wasClosed = els.settingsModal.hidden
+  if (wasClosed) settingsFocusReturn = document.activeElement
   els.settingsModal.hidden = false
   document.body.classList.add('settings-open')
   showSettingsTab(tab)
+  const selectedTab = [...els.settingsTabs].find((button) => button.dataset.settingsTab === tab)
+  const dialog = els.settingsModal.querySelector('[role="dialog"]')
+  const initialFocus = selectedTab || settingsFocusableElements()[0] || dialog
+  initialFocus?.focus()
+  els.shell?.setAttribute('aria-hidden', 'true')
+  if (els.shell) els.shell.inert = true
 }
 
 function closeSettings() {
-  if (!els.settingsModal) return
+  if (!els.settingsModal || els.settingsModal.hidden) return
   els.settingsModal.hidden = true
   document.body.classList.remove('settings-open')
+  els.shell?.removeAttribute('aria-hidden')
+  if (els.shell) els.shell.inert = false
+  const focusReturn = settingsFocusReturn
+  settingsFocusReturn = null
+  const focusTarget = focusReturn?.isConnected && !focusReturn.closest('[hidden]')
+    ? focusReturn
+    : (!els.panelZones.player?.hidden ? els.settingsToggle : els.settingsRecoveryToggle)
+  if (focusTarget?.isConnected && typeof focusTarget.focus === 'function') focusTarget.focus()
+}
+
+function settingsFocusableElements() {
+  if (!els.settingsModal || els.settingsModal.hidden) return []
+  return [...els.settingsModal.querySelectorAll(SETTINGS_FOCUSABLE_SELECTOR)]
+    .filter((element) => element.getClientRects().length > 0)
+}
+
+function trapSettingsFocus(event) {
+  if (event.key !== 'Tab' || !els.settingsModal || els.settingsModal.hidden) return
+  const focusable = settingsFocusableElements()
+  const dialog = els.settingsModal.querySelector('[role="dialog"]')
+  if (!focusable.length) {
+    event.preventDefault()
+    dialog?.focus()
+    return
+  }
+  const first = focusable[0]
+  const last = focusable.at(-1)
+  const active = document.activeElement
+  if (event.shiftKey && (active === first || !els.settingsModal.contains(active))) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (active === last || !els.settingsModal.contains(active))) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 function showSettingsTab(tab) {
-  for (const button of els.settingsTabs) {
-    const active = button.dataset.settingsTab === tab
+  const tabs = [...els.settingsTabs]
+  const selected = tabs.find((button) => button.dataset.settingsTab === tab) || tabs[0]
+  if (!selected) return
+  const selectedTab = selected.dataset.settingsTab
+  for (const button of tabs) {
+    const active = button === selected
     button.classList.toggle('active', active)
     button.setAttribute('aria-selected', active ? 'true' : 'false')
+    button.tabIndex = active ? 0 : -1
   }
   for (const panel of els.settingsPanels) {
-    panel.hidden = panel.dataset.settingsPanel !== tab
+    panel.hidden = panel.dataset.settingsPanel !== selectedTab
   }
 }
 
+function moveSettingsTabFocus(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  const tabs = [...els.settingsTabs]
+  const currentIndex = tabs.indexOf(event.currentTarget)
+  if (currentIndex < 0 || tabs.length === 0) return
+  event.preventDefault()
+  const nextIndex = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? tabs.length - 1
+      : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+  showSettingsTab(tabs[nextIndex].dataset.settingsTab)
+  tabs[nextIndex].focus()
+}
+
 function currentStreamFavorite() {
-  const latestSegment = [...state.segments].sort((a, b) => b.sequence - a.sequence)[0]
   return normalizeFavoriteItem({
     type: 'stream',
+    chainId: state.config.chainId,
     stationAddress: state.config.stationAddress,
-    publisher: latestSegment?.publisher || '',
+    publisher: state.config.publisher || '',
     streamId: state.config.streamId,
-    streamIdHash: latestSegment?.streamIdHash || '',
+    streamIdHash: state.config.streamIdHash || canonicalStreamIdHash(state.config.streamId),
     label: state.config.streamId,
   })
 }
 
 function currentChannelFavorite() {
-  const latestSegment = [...state.segments].sort((a, b) => b.sequence - a.sequence)[0]
-  if (!latestSegment?.publisher) return null
+  if (!state.config.publisher) return null
   return normalizeFavoriteItem({
     type: 'channel',
+    chainId: state.config.chainId,
     stationAddress: state.config.stationAddress,
-    publisher: latestSegment.publisher,
-    label: shortHash(latestSegment.publisher),
+    publisher: state.config.publisher,
+    label: shortHash(state.config.publisher),
   })
 }
 
@@ -3077,23 +4332,31 @@ function favoriteLabel(item) {
   return item.streamId || shortHash(item.streamIdHash)
 }
 
+function favoriteChainLabel(item) {
+  return Object.values(CHAIN_PRESETS).find((preset) => preset.chainId === item.chainId)?.label || `Chain ${item.chainId}`
+}
+
 function renderFavorites() {
   if (!els.favoritesList) return
   if (!state.favorites.length) {
     els.favoritesList.innerHTML = '<div class="empty-row">No local favorites saved yet</div>'
     return
   }
-  els.favoritesList.innerHTML = state.favorites.map((item) => `
-    <section class="favorite-row" data-favorite-id="${escapeHtml(item.id)}">
+  els.favoritesList.innerHTML = state.favorites.map((item) => {
+    const label = favoriteLabel(item)
+    const chainLabel = favoriteChainLabel(item)
+    const accessibleName = favoriteAccessibleName(item, label)
+    return `
+    <section class="favorite-row" data-favorite-id="${escapeHtml(item.id)}" aria-label="Favorite: ${escapeHtml(accessibleName)}">
       <div>
-        <strong>${escapeHtml(favoriteLabel(item))}</strong>
-        <span>${escapeHtml(item.type)} · ${escapeHtml(shortHash(item.stationAddress || item.inboxAddress))}${item.publisher ? ` · ${escapeHtml(shortHash(item.publisher))}` : ''}</span>
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(chainLabel)} · ${escapeHtml(item.type)} · ${escapeHtml(shortHash(item.stationAddress || item.inboxAddress))}${item.publisher ? ` · ${escapeHtml(shortHash(item.publisher))}` : ''}</span>
       </div>
-      <button type="button" data-favorite-action="tune">Watch</button>
-      <button type="button" data-favorite-action="rename">Rename</button>
-      <button type="button" data-favorite-action="remove">Remove</button>
+      <button type="button" data-focus-key="favorite:${escapeHtml(item.id)}:tune" data-favorite-action="tune" aria-label="Watch ${escapeHtml(accessibleName)}">Watch</button>
+      <button type="button" data-focus-key="favorite:${escapeHtml(item.id)}:rename" data-favorite-action="rename" aria-label="Rename ${escapeHtml(accessibleName)}">Rename</button>
+      <button type="button" data-focus-key="favorite:${escapeHtml(item.id)}:remove" data-favorite-action="remove" aria-label="Remove ${escapeHtml(accessibleName)}">Remove</button>
     </section>
-  `).join('')
+  `}).join('')
 }
 
 function renderArchive() {
@@ -3106,15 +4369,16 @@ function renderArchive() {
   }
   els.archiveResults.innerHTML = state.archive.streams.map((stream) => {
     const tuned = state.archive.tunedKey === stream.key
+    const accessibleName = archiveStreamAccessibleName(stream)
     return `
-    <section class="archive-stream ${tuned ? 'active' : ''}" data-archive-key="${escapeHtml(stream.key)}">
+    <section class="archive-stream ${tuned ? 'active' : ''}" data-archive-key="${escapeHtml(stream.key)}" aria-label="Archived stream: ${escapeHtml(accessibleName)}">
       <div>
         <strong>${escapeHtml(stream.title)}${tuned ? ' · watching' : ''}</strong>
         <span>${state.archive.mode === 'inbox' ? 'inbox stream' : 'station stream'} · publisher ${escapeHtml(shortHash(stream.publisher))}</span>
         <span>segments ${escapeHtml(stream.segmentCount)} · seq ${escapeHtml(stream.firstSequence)}-${escapeHtml(stream.latestSequence)} · blocks ${escapeHtml(stream.firstBlock)}-${escapeHtml(stream.latestBlock)}</span>
       </div>
-      <button type="button" data-archive-action="tune">${tuned ? 'View segments' : 'Watch'}</button>
-      <button type="button" data-archive-action="save">Save</button>
+      <button type="button" data-focus-key="archive:${escapeHtml(stream.key)}:tune" data-archive-action="tune" aria-label="${tuned ? 'View segments for' : 'Watch'} ${escapeHtml(accessibleName)}">${tuned ? 'View segments' : 'Watch'}</button>
+      <button type="button" data-focus-key="archive:${escapeHtml(stream.key)}:save" data-archive-action="save" aria-label="Save ${escapeHtml(accessibleName)}">Save</button>
     </section>
   `}).join('')
 }
@@ -3124,21 +4388,24 @@ function renderArchiveMode() {
     const active = button.dataset.archiveMode === state.archive.mode
     button.classList.toggle('active', active)
     button.setAttribute('aria-pressed', active ? 'true' : 'false')
+    button.disabled = Boolean(state.archive.activeController)
   }
   for (const field of els.archiveModeFields) {
     field.hidden = field.dataset.archiveField !== state.archive.mode
   }
-  if (els.archiveFromDate && els.archiveToDate && !els.archiveFromDate.value && !els.archiveToDate.value) {
+  const rangeMode = els.archiveRangeMode?.value === 'block' ? 'block' : 'date'
+  if (els.archiveFromBlock) els.archiveFromBlock.disabled = rangeMode !== 'block'
+  if (els.archiveFromDate) els.archiveFromDate.disabled = rangeMode !== 'date'
+  if (els.archiveToDate) els.archiveToDate.disabled = rangeMode !== 'date'
+  if (rangeMode === 'date' && els.archiveFromDate && els.archiveToDate && !els.archiveFromDate.value && !els.archiveToDate.value) {
     const now = new Date()
     const hours = state.archive.mode === 'inbox' ? 2 : 24
     els.archiveToDate.value = datetimeLocalValue(now)
     els.archiveFromDate.value = datetimeLocalValue(new Date(now.getTime() - hours * 60 * 60 * 1000))
   }
-  if (els.archiveProgress && !state.archive.scanning) {
-    resetArchiveProgress(state.archive.mode === 'inbox'
-      ? 'Scan recent blob transactions sent to an inbox and detect compatible RFE1 streams.'
-      : 'Scan a bounded block range to discover prior Station streams.')
-  }
+  renderArchiveProgress()
+  if (els.archiveScan) els.archiveScan.disabled = state.archive.scanning || Boolean(state.archive.activeController)
+  if (els.archiveStop) els.archiveStop.disabled = !state.archive.scanning && !state.archive.activeController
 }
 
 function tunedArchiveSummary() {
@@ -3147,7 +4414,7 @@ function tunedArchiveSummary() {
     : null
 }
 
-async function watchStationFavorite(item) {
+async function watchStationFavorite(item, tuneSerial = beginArchiveTuneRequest()) {
   const summary = {
     key: archiveStreamKey({
       publisher: item.publisher,
@@ -3171,34 +4438,65 @@ async function watchStationFavorite(item) {
   }
   if (els.archiveStation) els.archiveStation.value = item.stationAddress
   if (els.archivePublisher) els.archivePublisher.value = item.publisher || ''
-  const segments = await archiveSegmentsForWatch(summary.key, summary)
+  let segments
+  try {
+    segments = await archiveSegmentsForWatch(summary.key, summary)
+  } catch (error) {
+    if (!archiveTuneIsCurrent(tuneSerial)) return false
+    throw error
+  }
+  if (!archiveTuneIsCurrent(tuneSerial)) return false
   summary.segmentCount = segments.length
   summary.firstSequence = Math.min(...segments.map((segment) => segment.sequence))
   summary.latestSequence = Math.max(...segments.map((segment) => segment.sequence))
   summary.firstBlock = Math.min(...segments.map((segment) => segment.blockNumber))
   summary.latestBlock = Math.max(...segments.map((segment) => segment.blockNumber))
-  await tuneArchiveStream(summary.key)
+  return tuneArchiveStream(summary.key, { tuneSerial })
+}
+
+function resetFavoriteArchiveState(mode) {
+  state.archive.mode = mode
+  state.archive.streams = []
+  state.archive.segmentsByKey = new Map()
+  state.archive.tunedKey = ''
+  resetArchiveProgress(archiveDefaultMessage(mode))
 }
 
 function tuneFavorite(item) {
   if (!item) return
+  const presetKey = Object.keys(CHAIN_PRESETS).find((key) => CHAIN_PRESETS[key].chainId === item.chainId)
+  if (!presetKey) {
+    setStatus(`Favorite uses unsupported chain ID ${item.chainId}.`)
+    return
+  }
+  const tuneSerial = beginArchiveTuneRequest()
   if (item.type.startsWith('inbox')) {
-    state.archive.mode = 'inbox'
+    if (state.config.chainPreset !== presetKey) {
+      state.config = loadConfig({ chainPreset: presetKey }, { useSavedNetworkConfig: true })
+      saveConfig(state.config)
+      resetRuntimeState()
+      fillForm()
+    }
+    resetFavoriteArchiveState('inbox')
     if (els.archiveInbox) els.archiveInbox.value = item.inboxAddress
     if (els.archivePublisher) els.archivePublisher.value = item.publisher || ''
     if (els.archiveStreamFilter) els.archiveStreamFilter.value = item.streamId || ''
-    renderArchiveMode()
+    render()
     setStatus(`${favoriteLabel(item)} selected. Scan the saved blob inbox to find recent compatible segments.`)
     return
   }
+  const favoriteConfig = loadConfig({ chainPreset: presetKey }, { useSavedNetworkConfig: true })
   state.config = {
-    ...state.config,
+    ...favoriteConfig,
     stationAddress: item.stationAddress,
-    streamId: item.streamId || state.config.streamId,
+    streamId: item.streamId || favoriteConfig.streamId,
+    streamIdHash: item.streamId ? canonicalStreamIdHash(item.streamId) : favoriteConfig.streamIdHash,
+    publisher: item.publisher || '',
   }
   saveConfig(state.config)
   resetRuntimeState()
   fillForm()
+  resetFavoriteArchiveState('station')
   if (els.archiveStation) els.archiveStation.value = item.stationAddress
   if (els.archivePublisher) els.archivePublisher.value = item.publisher || ''
   render()
@@ -3206,7 +4504,8 @@ function tuneFavorite(item) {
     if (item.firstBlock != null && item.latestBlock != null) {
       state.segmentNotice = `Loading saved stream "${favoriteLabel(item)}" from blocks ${item.firstBlock}-${item.latestBlock}...`
       render()
-      void watchStationFavorite(item).catch((error) => {
+      void watchStationFavorite(item, tuneSerial).catch((error) => {
+        if (!archiveTuneIsCurrent(tuneSerial) || isAbortError(error)) return
         const message = publicErrorMessage(error)
         state.segmentNotice = message
         setStatus(message)
@@ -3220,41 +4519,85 @@ function tuneFavorite(item) {
   }
 }
 
+function renderPlayLatest(latestPlayable = latestVerifiedRecord()) {
+  if (!els.playLatest) return
+  els.playLatest.disabled = !latestPlayable
+  els.playLatest.title = latestPlayable ? `Play verified segment #${latestPlayable.sequence}` : 'No verified segment is ready to play'
+}
+
 function render() {
+  const focusKey = dynamicFocusKey()
   const activeRecord = currentRecord()
   const latestSegment = [...state.segments].sort((a, b) => a.sequence - b.sequence).at(-1) || null
   const tunedSummary = tunedArchiveSummary()
   els.knownCount.textContent = String(state.segments.length)
   els.verifiedCount.textContent = String(state.verified.size)
-  els.metadataAge.textContent = fmtAge(state.metadataUpdatedAt)
+  const metadataAge = fmtAge(state.metadataUpdatedAt)
+  els.metadataAge.textContent = state.metadataState === 'cached'
+    ? `cached · ${metadataAge}`
+    : state.metadataState === 'stale'
+      ? `stale · ${metadataAge}`
+      : metadataAge
+  els.metadataAge.title = state.metadataState === 'cached'
+    ? 'Restored from matching browser cache; network confirmation is pending.'
+    : state.metadataState === 'stale'
+      ? 'Previously loaded metadata is retained because the latest network refresh failed.'
+      : 'Age of the latest Station metadata.'
   const health = streamHealthSummary(latestSegment)
   els.streamHealth.textContent = health
-  els.streamHealth.title = `Playback: ${playbackStateLabel()}`
-  els.streamToggle.textContent = state.streaming ? 'LIVE' : 'LIVE'
-  els.streamToggle.classList.toggle('active', state.streaming)
+  els.streamHealth.title = `Playback: ${playbackModeLabel(state.playbackMode)}`
+  renderPlayLatest()
+  els.streamToggle.textContent = state.playbackMode === 'live' ? 'LIVE' : state.followIntent ? 'FOLLOWING' : 'FOLLOW LIVE'
+  els.streamToggle.classList.toggle('active', state.playbackMode === 'live')
+  els.streamToggle.dataset.following = state.followIntent ? 'true' : 'false'
+  els.streamToggle.setAttribute('aria-pressed', state.followIntent ? 'true' : 'false')
+  els.streamToggle.setAttribute('aria-label', state.followIntent ? `Stop following live stream; ${playbackModeLabel(state.playbackMode)}` : 'Start following live stream')
+  els.streamToggle.title = state.followIntent ? `Stop following live stream (${playbackModeLabel(state.playbackMode)})` : 'Start following live stream'
   const currentFavorite = currentStreamFavorite()
   const streamSaved = currentFavorite ? state.favorites.some((item) => item.id === currentFavorite.id) : false
   if (els.favoriteStream) {
     els.favoriteStream.textContent = streamSaved ? '★' : '☆'
     els.favoriteStream.setAttribute('aria-pressed', streamSaved ? 'true' : 'false')
-    els.favoriteStream.title = streamSaved ? 'Current stream saved' : 'Save current stream'
+    const favoriteLabel = streamSaved ? 'Remove current stream from favorites' : 'Save current stream'
+    els.favoriteStream.setAttribute('aria-label', favoriteLabel)
+    els.favoriteStream.title = favoriteLabel
   }
-  els.loopToggle?.classList.toggle('active', state.loopReplay)
-  const stationOnline = Boolean(activeRecord)
-  const stationLoaded = !stationOnline && Boolean(latestSegment)
-  els.stationState.textContent = stationOnline ? 'LIVE' : stationLoaded ? 'LOADED' : 'OFFLINE'
-  document.querySelector('.status-badge')?.classList.toggle('online', stationOnline)
+  if (els.loopToggle) {
+    els.player.loop = false
+    els.loopToggle.textContent = state.loopReplay ? 'LOOP ON' : 'LOOP OFF'
+    els.loopToggle.classList.toggle('active', state.loopReplay)
+    els.loopToggle.setAttribute('aria-pressed', state.loopReplay ? 'true' : 'false')
+    els.loopToggle.setAttribute('aria-label', state.loopReplay ? 'Stop looping loaded segments' : 'Loop loaded segments')
+    els.loopToggle.title = state.loopReplay ? 'Stop looping loaded segments' : 'Loop loaded segments'
+  }
+  const stationLive = state.playbackMode === 'live' && Boolean(activeRecord)
+  const stationLoaded = Boolean(activeRecord || latestSegment)
+  const stationLabels = {
+    live: 'LIVE',
+    replay: 'REPLAY',
+    'replay-buffering': 'BUFFER',
+    'catching-up': 'CATCH UP',
+    buffering: 'BUFFER',
+    waiting: 'WAITING',
+    paused: 'PAUSED',
+    interrupted: 'INTERRUPTED',
+    ended: 'ENDED',
+  }
+  els.stationState.textContent = stationLabels[state.playbackMode] || (stationLoaded ? 'LOADED' : 'OFFLINE')
+  document.querySelector('.status-badge')?.classList.toggle('online', stationLive)
   els.networkLabel.textContent = CHAIN_PRESETS[state.config.chainPreset]?.label || state.config.chainPreset
   const stationUrl = stationExplorerUrl()
   if (stationUrl) {
     els.stationExplorer.href = stationUrl
     els.stationExplorer.textContent = 'Station'
     els.stationExplorer.removeAttribute('aria-disabled')
+    els.stationExplorer.removeAttribute('tabindex')
     els.stationExplorer.title = state.config.stationAddress
   } else {
-    els.stationExplorer.href = '#'
+    els.stationExplorer.removeAttribute('href')
     els.stationExplorer.textContent = 'No Station'
     els.stationExplorer.setAttribute('aria-disabled', 'true')
+    els.stationExplorer.setAttribute('tabindex', '-1')
     els.stationExplorer.title = 'Set a Station address to open it in the block explorer.'
   }
   for (const button of els.chainButtons) {
@@ -3262,7 +4605,7 @@ function render() {
     button.classList.toggle('active', active)
     button.setAttribute('aria-pressed', active ? 'true' : 'false')
   }
-  els.nowTitle.textContent = activeRecord ? `${playbackStateLabel()} segment #${activeRecord.sequence}` : playbackStateLabel()
+  els.nowTitle.textContent = activeRecord ? `${playbackModeLabel(state.playbackMode)} segment #${activeRecord.sequence}` : playbackModeLabel(state.playbackMode)
   els.nowDetail.textContent = activeRecord
     ? `Stream health: ${health}. Payload source: ${playbackSourceLabel(activeRecord)}.`
     : latestSegment
@@ -3285,93 +4628,142 @@ function render() {
       ? `Stream Segments · ${tunedSummary.title}`
       : `Stream Segments${state.config.streamId ? ` · ${state.config.streamId}` : ''}`
   }
-  const segmentNotice = state.segmentNotice
-    ? `<div class="segment-notice">${escapeHtml(state.segmentNotice)}</div>`
-    : ''
   const segmentRows = state.segments.map((segment) => {
     const record = state.verified.get(segment.cacheKey)
     const queued = state.prefetching.has(segment.cacheKey)
     const timeBlock = segmentTimeBlock(segment)
     const txLabel = middleEllipsis(segment.txHash, 8, 6)
     const active = activeRecord?.cacheKey === segment.cacheKey
+    const continuity = segmentContinuityPresentation(segment)
+    const quarantined = continuity.quarantined
+    const segmentAction = continuity.action || (active ? 'NOW' : record ? 'PLAY' : queued ? '...' : 'GET')
+    const segmentActionLabel = segmentActionAccessibleName({
+      sequence: segment.sequence,
+      quarantined,
+      active,
+      cached: Boolean(record),
+      queued,
+    })
     return `
-      <section class="segment-row ${record ? 'verified' : ''} ${active ? 'active' : ''}" data-segment-key="${escapeHtml(segment.cacheKey)}">
-        <button class="segment-jump" type="button" data-jump-key="${escapeHtml(segment.cacheKey)}">#${escapeHtml(segment.sequence)}</button>
-        <span class="segment-time"><time>${escapeHtml(timeBlock.time)}</time><small>${escapeHtml(timeBlock.block)}</small></span>
-        <a class="tx-link" href="${escapeHtml(explorerTxUrl(segment.txHash))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(segment.txHash)}">${escapeHtml(txLabel)}</a>
-        <span>${escapeHtml(segment.blobCount)}</span>
-        <button type="button" data-key="${escapeHtml(segment.cacheKey)}">${active ? 'NOW' : record ? 'PLAY' : queued ? '...' : 'GET'}</button>
+      <section class="segment-row ${record ? 'verified' : ''} ${active ? 'active' : ''} ${quarantined ? 'quarantined' : ''}" role="row" data-segment-key="${escapeHtml(segment.cacheKey)}" title="${escapeHtml(continuity.label)}">
+        <span class="segment-cell" role="cell"><button class="segment-jump" type="button" data-focus-key="segment:${escapeHtml(segment.cacheKey)}:jump" data-jump-key="${escapeHtml(segment.cacheKey)}" aria-label="Jump to segment #${escapeHtml(segment.sequence)}" ${quarantined ? 'disabled aria-disabled="true"' : ''}>#${escapeHtml(segment.sequence)}</button></span>
+        <span class="segment-cell segment-time" role="cell"><time>${escapeHtml(timeBlock.time)}</time><small>${escapeHtml(timeBlock.block)}</small></span>
+        <span class="segment-cell" role="cell"><a class="tx-link" data-focus-key="segment:${escapeHtml(segment.cacheKey)}:transaction" href="${escapeHtml(explorerTxUrl(segment.txHash))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(segment.txHash)}">${escapeHtml(txLabel)}</a></span>
+        <span class="segment-cell" role="cell">${escapeHtml(segment.blobCount)}${continuity.suffix}</span>
+        <span class="segment-cell" role="cell"><button type="button" data-focus-key="segment:${escapeHtml(segment.cacheKey)}:play" data-key="${escapeHtml(segment.cacheKey)}" aria-label="${escapeHtml(segmentActionLabel)}" ${quarantined ? 'disabled aria-disabled="true"' : ''}>${segmentAction}</button></span>
       </section>
     `
   }).join('')
-  els.segments.innerHTML = segmentNotice + (segmentRows || '<div class="empty-row">No stream segments yet</div>')
+  const noticeRow = state.segmentNotice
+    ? `<div role="row"><div class="segment-notice" role="cell" aria-colspan="5">${escapeHtml(state.segmentNotice)}</div></div>`
+    : ''
+  const emptyRow = '<div role="row"><div class="empty-row" role="cell" aria-colspan="5">No stream segments yet</div></div>'
+  els.segments.innerHTML = noticeRow + (segmentRows || emptyRow)
+  restoreDynamicFocus(focusKey)
 }
 
 async function refresh() {
   if (state.busy) return
+  const runtime = runtimeSnapshot()
   state.busy = true
   const serial = ++state.refreshSerial
   const spinToken = ++state.refreshSpinToken
   const spinStartedAt = performance.now()
   els.refresh.disabled = true
   els.refresh.classList.add('is-spinning')
-  if (!state.anchor) {
-    state.segments = []
-    state.verified.clear()
-    state.segmentNotice = ''
-    state.metadataUpdatedAt = ''
+  if (!state.anchor && !state.segments.length) {
     state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
     render()
+  } else if (state.segments.length) {
+    state.segmentNotice = state.metadataState === 'cached'
+      ? 'Showing cached metadata while checking the execution RPC for a fresh Station view.'
+      : 'Keeping the current segment list visible while checking for fresh Station events.'
+    render()
   }
-  setStatus('Reading Station events from execution RPC...')
+  setRuntimeStatus(runtime, 'Reading Station events from execution RPC...', { announce: false })
   try {
-    const segments = await fetchLogs()
-    if (serial !== state.refreshSerial) return
-    state.segments = segments
-    await cacheSegmentMetadata(state.segments)
+    const refreshed = await fetchLogs({ signal: runtime.signal, runtime })
+    if (!runtimeIsCurrent(runtime) || serial !== state.refreshSerial) return
+    const activePlaybackInvalidated = invalidateOrphanedActivePlayback(refreshed.segments)
+    state.segments = refreshed.segments
+    if (state.anchor && refreshed.cursorBlock != null) state.anchor.cursorBlock = refreshed.cursorBlock
+    state.verified.clear()
+    await cacheSegmentMetadata(state.segments, runtime)
+    requireCurrentRuntime(runtime)
     if (!state.activeBeaconApi) {
-      await beacon('/eth/v1/beacon/genesis').catch(() => null)
+      await beacon('/eth/v1/beacon/genesis', { signal: runtime.signal }).catch((error) => {
+        if (isAbortError(error)) throw error
+        return null
+      })
+      requireCurrentRuntime(runtime)
     }
-    for (const segment of state.segments) {
-      const cached = await cachedSegment(segment.cacheKey)
-      if (cached) state.verified.set(segment.cacheKey, cached)
+    await hydrateValidatedCachedSegments(state.segments, runtime)
+    await refreshCacheStats(runtime)
+    requireCurrentRuntime(runtime)
+    await refreshBlobspace(runtime)
+    requireCurrentRuntime(runtime)
+    if (state.followIntent) {
+      state.liveEdgeKey = orderedLoadedSegments().at(-1)?.cacheKey || ''
+      if (state.playbackMode === 'live' && state.currentRecordKey !== state.liveEdgeKey) state.playbackMode = 'catching-up'
     }
-    await refreshCacheStats()
-    await refreshBlobspace()
+    state.segmentNotice = activePlaybackInvalidated
+      ? 'Canonical Station history changed while this segment was active. Orphaned playback was stopped; choose a current verified segment to resume.'
+      : ''
     render()
     prefetchWindow()
-    if (state.segments.length && !state.verified.size) {
-      setStatus(`Station metadata is available for ${state.segments.length} segment${state.segments.length === 1 ? '' : 's'}; payload verification is pending sidecars, archive fallback, or browser cache.`)
+    if (activePlaybackInvalidated) {
+      setRuntimeStatus(runtime, 'Canonical Station history changed. Orphaned playback was stopped before current metadata was rendered.', { announcementKey: 'canonical-history-changed' })
+    } else if (state.segments.length && !state.verified.size) {
+      setRuntimeStatus(runtime, `Station metadata is available for ${state.segments.length} segment${state.segments.length === 1 ? '' : 's'}; payload verification is pending sidecars, archive fallback, or browser cache.`, { announce: false })
     } else {
-      setStatus(`Loaded ${state.segments.length} Station events, ${state.verified.size} verified locally.`)
+      setRuntimeStatus(runtime, `Loaded ${state.segments.length} Station events, ${state.verified.size} verified locally.`, { announce: false })
     }
   } catch (error) {
-    setStatus(publicErrorMessage(error))
+    if (!runtimeIsCurrent(runtime)) return
+    if (state.segments.length) {
+      if (state.metadataState === 'fresh') state.metadataState = 'stale'
+      state.segmentNotice = state.metadataState === 'cached'
+        ? `Cached metadata remains available. Network refresh failed: ${publicErrorMessage(error)}`
+        : `Previously loaded metadata remains available but may be stale: ${publicErrorMessage(error)}`
+      render()
+    }
+    setRuntimeStatus(runtime, publicErrorMessage(error))
   } finally {
-    state.busy = false
-    els.refresh.disabled = false
-    const remainingSpinMs = Math.max(0, 550 - (performance.now() - spinStartedAt))
-    setTimeout(() => {
-      if (state.refreshSpinToken === spinToken) els.refresh.classList.remove('is-spinning')
-    }, remainingSpinMs)
+    if (runtimeIsCurrent(runtime)) {
+      state.busy = false
+      els.refresh.disabled = false
+      const remainingSpinMs = Math.max(0, 550 - (performance.now() - spinStartedAt))
+      setTimeout(() => {
+        if (runtimeIsCurrent(runtime) && state.refreshSpinToken === spinToken) els.refresh.classList.remove('is-spinning')
+      }, remainingSpinMs)
+    }
   }
 }
 
 function startStreaming() {
-  state.streaming = true
-  state.playbackState = 'waiting'
+  const runtime = runtimeSnapshot()
+  state.playbackAdvanceToken += 1
+  state.followIntent = true
+  state.playbackMode = state.currentRecordKey ? (els.player?.paused ? 'paused' : 'replay') : 'waiting'
   render()
   void refresh().then(() => {
+    if (!runtimeIsCurrent(runtime)) return
     const record = latestVerifiedRecord()
-    if (record && !els.player.currentSrc) playRecord(record, { userRequested: true })
+    const latest = orderedLoadedSegments().at(-1) || null
+    state.liveEdgeKey = latest?.cacheKey || ''
+    if (record && !els.player.currentSrc) playRecord(record, { userRequested: true, playbackIntent: 'follow' }, runtime)
+    else render()
   })
   clearInterval(state.refreshTimer)
   state.refreshTimer = setInterval(() => void refresh(), 15000)
 }
 
 function stopStreaming() {
-  state.streaming = false
-  if (!state.currentRecordKey) state.playbackState = 'waiting'
+  state.playbackAdvanceToken += 1
+  state.followIntent = false
+  state.liveEdgeKey = ''
+  if (!state.currentRecordKey) state.playbackMode = 'idle'
+  else if (['live', 'catching-up', 'waiting', 'buffering'].includes(state.playbackMode)) state.playbackMode = els.player?.paused ? 'paused' : 'replay'
   clearInterval(state.refreshTimer)
   state.refreshTimer = null
   render()
@@ -3403,20 +4795,36 @@ function presetConfig(presetKey) {
     ...state.config,
     ...preset,
     chainPreset: presetKey,
+    streamIdHash: canonicalStreamIdHash(preset.streamId),
     executionRpcs: [...preset.executionRpcs],
     beaconApis: [...preset.beaconApis],
   }
 }
 
 function resetRuntimeState() {
+  state.runtimeController.abort(requestAbortError('Runtime configuration changed.'))
+  state.archive.activeController?.abort(requestAbortError('Runtime configuration changed.'))
+  state.archive.activeController = null
+  state.archive.scanning = false
+  state.runtimeGeneration += 1
+  state.runtimeController = new AbortController()
   state.refreshSerial += 1
   state.refreshSpinToken += 1
+  state.playbackAdvanceToken += 1
+  state.playbackContextGeneration += 1
   state.busy = false
+  state.blobspaceRefreshPromise = null
   state.anchor = null
   state.segments = []
   state.verified.clear()
+  state.prefetching.clear()
+  state.prefetchPromises.clear()
   state.segmentNotice = ''
+  state.blockTimes.clear()
+  state.blockTimeHashes.clear()
   state.sidecarMemoryCache.clear()
+  state.sidecarFetchPromises.clear()
+  state.sidecarCacheEpoch += 1
   state.activeExecutionRpc = ''
   state.activeBeaconApi = ''
   state.endpointHealth = {
@@ -3424,6 +4832,21 @@ function resetRuntimeState() {
     beacon: { state: state.config.beaconApis.length ? 'idle' : 'missing', message: '' },
   }
   state.metadataUpdatedAt = ''
+  state.metadataState = 'none'
+  state.currentRecordKey = ''
+  state.playbackMode = 'idle'
+  state.playbackIntent = 'replay'
+  state.liveEdgeKey = ''
+  state.followIntent = false
+  clearInterval(state.refreshTimer)
+  state.refreshTimer = null
+  state.selectedSegmentQuery = ''
+  if (els.player) {
+    els.player.pause()
+    els.player.removeAttribute('src')
+    els.player.load()
+  }
+  revokeAllObjectUrls()
   state.blobspace = { mode: 'sample', rows: defaultBlobspaceRows(), warning: '' }
   state.blobFees = { ...loadBlobFeeSamples(), samples: state.blobFees.samples }
   els.refresh.disabled = false
@@ -3435,11 +4858,14 @@ function resetRuntimeState() {
 function applyPreset(presetKey, { refreshAfter = false } = {}) {
   if (!CHAIN_PRESETS[presetKey]) return
   state.config = presetConfig(presetKey)
-  saveConfig(state.config)
+  const persistence = saveConfig(state.config)
   resetRuntimeState()
   fillForm()
   render()
-  if (els.endpointApplyStatus) els.endpointApplyStatus.textContent = `${CHAIN_PRESETS[presetKey].label} preset endpoints applied.`
+  if (els.endpointApplyStatus) {
+    els.endpointApplyStatus.textContent = `${CHAIN_PRESETS[presetKey].label} preset endpoints applied.${configPersistenceNotice(persistence)}`
+    announceStatus(els.endpointApplyStatus.textContent, { key: 'endpoint-preset-applied' })
+  }
   if (refreshAfter) void refresh()
 }
 
@@ -3447,58 +4873,102 @@ function formConfig() {
   const selectedPreset = CHAIN_PRESETS[els.chainPreset.value] || CHAIN_PRESETS[DEFAULTS.chainPreset]
   const executionRpcs = unique(parseLines(els.executionRpcs.value))
   const beaconApis = unique(parseLines(els.beaconApis.value))
+  const archiveTemplates = unique(parseLines(els.archiveTemplates.value))
   const endpointErrors = [
     ...validateEndpointList('Execution RPC', executionRpcs),
     ...validateEndpointList('Beacon API', beaconApis),
+    ...validateArchiveTemplateList(archiveTemplates),
   ]
   if (endpointErrors.length) throw new Error(endpointErrors[0])
   const stationAddress = normalizeStationAddressInput(els.stationAddress.value)
   if (els.stationAddress.value.trim() && !stationAddress) {
     throw new Error('Station must be a 20-byte address or a block explorer address URL.')
   }
+  const enteredStreamId = els.streamId.value
+  const streamId = boundedStreamId(enteredStreamId === state.config.streamId
+    ? state.config.streamId
+    : enteredStreamId.trim() || selectedPreset.streamId)
+  const stationChanged = stationAddress !== normalizeStationAddressInput(state.config.stationAddress)
   return {
     ...state.config,
     chainPreset: els.chainPreset.value,
-    streamId: els.streamId.value.trim() || selectedPreset.streamId,
+    streamId,
+    streamIdHash: canonicalStreamIdHash(streamId),
+    publisher: streamId === state.config.streamId && !stationChanged ? state.config.publisher : '',
     stationAddress: stationAddress || selectedPreset.stationAddress,
     fromBlock: els.fromBlock.value.trim() || selectedPreset.fromBlock,
-    executionRpcs,
-    beaconApis,
-    archiveTemplates: unique(parseLines(els.archiveTemplates.value)),
-    cacheLimitMb: positiveNumber(els.cacheLimit.value, DEFAULTS.cacheLimitMb),
+    executionRpcs: [...normalizeHttpEndpointList(executionRpcs, 'Execution RPC')],
+    beaconApis: [...normalizeHttpEndpointList(beaconApis, 'Beacon API')],
+    archiveTemplates: archiveTemplates.length ? [...normalizeArchiveTemplateList(archiveTemplates)] : [],
+    cacheLimitMb: clampCacheLimitMb(els.cacheLimit.value, DEFAULTS.cacheLimitMb, { min: CACHE_LIMIT_MIN_MB, max: CACHE_LIMIT_MAX_MB }),
   }
 }
 
 function applyCustomConfig() {
   state.config = formConfig()
-  saveConfig(state.config)
+  const persistence = saveConfig(state.config)
   resetRuntimeState()
   fillForm()
   render()
   const mode = endpointMode()
   if (els.endpointApplyStatus) {
-    els.endpointApplyStatus.textContent = mode === 'preset'
+    const applied = mode === 'preset'
       ? 'Preset endpoint values applied from the custom form.'
       : 'Custom browser endpoint configuration applied.'
+    els.endpointApplyStatus.textContent = `${applied}${configPersistenceNotice(persistence)}`
+    announceStatus(els.endpointApplyStatus.textContent, { key: 'endpoint-config-applied' })
   }
   void refresh()
 }
 
+function exportableCacheRecord(input) {
+  const {
+    payload: _payload,
+    archiveUrl,
+    runtimeWriteToken: _runtimeWriteToken,
+    ...record
+  } = input || {}
+  return {
+    ...record,
+    ...(archiveUrl ? { archiveSourceOrigin: publicUrlLabel(archiveUrl) } : {}),
+  }
+}
+
+function cacheIndexDocument(records, config, exportedAt = new Date().toISOString()) {
+  const scope = metadataScopeForConfig(config)
+  const scopedRecords = records.filter((record) =>
+    String(record?.chainId || '') === scope.chainId
+    && normalizeHex(record?.stationAddress) === scope.stationAddress
+    && normalizeHex(record?.publisher) === scope.publisher
+    && normalizeHex(record?.streamIdHash) === scope.streamIdHash
+    && String(record?.streamId || '') === scope.streamId
+    && normalizeHex(record?.syntheticChannelId) === scope.syntheticChannelId)
+  return {
+    schema: 'rfe-cache-index@2',
+    app: 'eth-radio',
+    exportedAt,
+    chainPreset: scope.chainPreset,
+    chainId: scope.chainId,
+    stationAddress: scope.stationAddress,
+    publisher: scope.publisher,
+    streamIdHash: scope.streamIdHash,
+    streamId: scope.streamId,
+    syntheticChannelId: scope.syntheticChannelId,
+    records: scopedRecords.map(exportableCacheRecord),
+  }
+}
+
 function exportIndex() {
   allCachedSegments().then((records) => {
-    const index = {
-      app: 'eth-radio',
-      exportedAt: new Date().toISOString(),
-      streamId: state.config.streamId,
-      records: records.map(({ payload, ...record }) => record),
-    }
+    const index = cacheIndexDocument(records, state.config)
     const url = URL.createObjectURL(new Blob([`${JSON.stringify(index, null, 2)}\n`], { type: 'application/json' }))
     const link = document.createElement('a')
     link.href = url
     link.download = `rfe-cache-index-${state.config.streamId}.json`
     link.click()
     URL.revokeObjectURL(url)
-  })
+    if (storageStatus.indexedDb === 'unavailable') setStatus('Exported the in-memory cache index. Persistent browser cache is unavailable.')
+  }).catch((error) => setStatus(`Cache index could not be exported: ${publicErrorMessage(error)}`))
 }
 
 on(els.form, 'submit', (event) => {
@@ -3546,12 +5016,13 @@ for (const button of els.chainButtons) {
 
 on(els.refresh, 'click', () => void refresh())
 on(els.streamToggle, 'click', () => {
-  if (state.streaming) stopStreaming()
+  if (state.followIntent) stopStreaming()
   else startStreaming()
 })
 on(els.loopToggle, 'click', () => {
   state.loopReplay = !state.loopReplay
-  els.player.loop = state.loopReplay
+  state.playbackAdvanceToken += 1
+  els.player.loop = false
   render()
 })
 on(els.muteToggle, 'click', () => {
@@ -3589,6 +5060,7 @@ on(els.watchSegment, 'click', async () => {
     setStatus(parsed.message)
     return
   }
+  const playbackRequestToken = beginUserPlaybackRequest()
   const rawQuery = parsed.query
   const txHash = parsed.kind === 'tx-url' || parsed.kind === 'tx-hash' || parsed.kind === 'hash-url' ? extractTxHash(rawQuery) : ''
   const query = normalizeHex(rawQuery)
@@ -3601,16 +5073,20 @@ on(els.watchSegment, 'click', async () => {
       segment = await loadForwardWindowFromTx(txHash)
       const record = state.verified.get(segment.cacheKey)
       if (record) {
+        if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
         playRecord(record, { userRequested: true })
         setStatus(`Playing cached segment #${segment.sequence} from ${shortHash(txHash)}.`)
       } else {
         setStatus(`Loaded ${state.segments.length} segments from ${shortHash(txHash)} forward. Verifying segment #${segment.sequence}...`)
         void verifySegment(segment)
           .then((verified) => {
+            if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
             playRecord(verified, { userRequested: true })
             setStatus(`Playing verified segment #${segment.sequence}.`)
           })
-          .catch((error) => setStatus(publicErrorMessage(error)))
+          .catch((error) => {
+            if (userPlaybackRequestIsCurrent(playbackRequestToken)) setStatus(publicErrorMessage(error))
+          })
           .finally(render)
       }
       return
@@ -3633,11 +5109,17 @@ on(els.watchSegment, 'click', async () => {
       }
     }
     const record = state.verified.get(segment.cacheKey)
-    if (record) playRecord(record, { userRequested: true })
-    else await verifySegment(segment).then((verified) => playRecord(verified, { userRequested: true }))
+    if (!record) {
+      const verified = await verifySegment(segment)
+      if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
+      playRecord(verified, { userRequested: true })
+    } else {
+      if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
+      playRecord(record, { userRequested: true })
+    }
     setStatus(`Playing verified segment #${segment.sequence}.`)
   } catch (error) {
-    setStatus(publicErrorMessage(error))
+    if (userPlaybackRequestIsCurrent(playbackRequestToken)) setStatus(publicErrorMessage(error))
   } finally {
     els.watchSegment.disabled = false
     render()
@@ -3653,7 +5135,8 @@ on(els.slots, 'click', async (event) => {
     setStatus(`Blob metadata points to ${shortHash(txHash)}, but the segment is not loaded.`)
     return
   }
-  tuneToStream({ streamId: segment.streamId, sequence: segment.sequence, txHash: segment.txHash }, { reset: false })
+  const playbackRequestToken = beginUserPlaybackRequest()
+  tuneToStream(segment, { reset: false })
   state.selectedSegmentQuery = txHash
   if (els.segmentLookup) els.segmentLookup.value = txHash
   updateLookupMessage()
@@ -3661,29 +5144,44 @@ on(els.slots, 'click', async (event) => {
   setStatus(`Verifying segment #${segment.sequence} from ${cell.dataset.slotJumpTx ? 'slot jump' : 'clicked blob'}...`)
   try {
     const record = state.verified.get(segment.cacheKey) || await verifySegment(segment)
+    if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
     render()
     playRecord(record, { userRequested: true })
     setStatus(`Playing verified segment #${segment.sequence}.`)
   } catch (error) {
-    setStatus(publicErrorMessage(error))
+    if (userPlaybackRequestIsCurrent(playbackRequestToken)) setStatus(publicErrorMessage(error))
   }
 })
 on(els.exportIndex, 'click', exportIndex)
-on(els.clearCache, 'click', () => void clearCache().then(() => setStatus('Browser cache cleared.')))
+on(els.clearCache, 'click', () => void clearCache()
+  .then(() => setStatus(storageStatus.indexedDb === 'unavailable' ? 'In-memory cache cleared. Persistent browser cache is unavailable.' : 'Browser cache cleared.'))
+  .catch((error) => setStatus(`Cache could not be cleared: ${publicErrorMessage(error)}`)))
 on(els.themeToggle, 'click', () => {
   setTheme(document.body.classList.contains('light') ? 'dark' : 'light')
 })
 on(els.settingsToggle, 'click', () => openSettings('appearance'))
+on(els.settingsRecoveryToggle, 'click', () => openSettings('layout'))
+on(els.emptyRecovery, 'click', () => openSettings('connections'))
 on(els.settingsClose, 'click', closeSettings)
 on(els.settingsModal, 'click', (event) => {
   if (event.target.closest('[data-settings-close]')) closeSettings()
 })
 on(document, 'keydown', (event) => {
-  if (event.key === 'Escape' && els.settingsModal && !els.settingsModal.hidden) closeSettings()
+  if (els.settingsModal?.hidden) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeSettings()
+    return
+  }
+  trapSettingsFocus(event)
 })
 on(document, 'visibilitychange', () => startBlobFeeTracker())
 for (const button of els.settingsTabs) {
-  on(button, 'click', () => showSettingsTab(button.dataset.settingsTab))
+  on(button, 'click', () => {
+    showSettingsTab(button.dataset.settingsTab)
+    button.focus()
+  })
+  on(button, 'keydown', moveSettingsTabFocus)
 }
 on(els.layoutPresets, 'click', (event) => {
   const button = event.target.closest('[data-layout-preset]')
@@ -3710,7 +5208,7 @@ for (const select of els.panelPosition) {
     const panel = select.dataset.panelPosition
     state.layoutSettings[panel] = { ...state.layoutSettings[panel], position: select.value }
     state.layoutPreset = 'custom'
-    localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+    safeStorageSet(LAYOUT_KEY, state.layoutPreset)
     saveLayoutSettings()
     applyLayoutPreset()
     setStatus(`${PANEL_LABELS[panel]} moved to ${PANEL_POSITIONS[select.value]}.`)
@@ -3721,7 +5219,7 @@ for (const select of els.panelOrder) {
     const panel = select.dataset.panelOrder
     state.layoutSettings[panel] = { ...state.layoutSettings[panel], order: Number(select.value) }
     state.layoutPreset = 'custom'
-    localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+    safeStorageSet(LAYOUT_KEY, state.layoutPreset)
     saveLayoutSettings()
     applyLayoutPreset()
     setStatus(`${PANEL_LABELS[panel]} order set to ${select.value}.`)
@@ -3730,7 +5228,7 @@ for (const select of els.panelOrder) {
 on(els.layoutBottomSpan, 'change', () => {
   state.layoutSettings = { ...state.layoutSettings, bottomSpan: els.layoutBottomSpan.value }
   state.layoutPreset = 'custom'
-  localStorage.setItem(LAYOUT_KEY, state.layoutPreset)
+  safeStorageSet(LAYOUT_KEY, state.layoutPreset)
   saveLayoutSettings()
   applyLayoutPreset()
   setStatus(els.layoutBottomSpan.value === 'full'
@@ -3761,7 +5259,17 @@ on(els.blobFeeWindow, 'change', () => {
 })
 on(els.favoriteStream, 'click', () => {
   try {
-    const favorite = upsertFavorite(currentStreamFavorite())
+    const current = currentStreamFavorite()
+    if (!current) throw new Error('Nothing valid to save yet.')
+    const existing = state.favorites.find((item) => item.id === current.id)
+    if (existing) {
+      state.favorites = state.favorites.filter((item) => item.id !== current.id)
+      saveFavorites()
+      render()
+      setStatus(`Removed stream favorite: ${favoriteLabel(existing)}.`)
+      return
+    }
+    const favorite = upsertFavorite(current)
     setStatus(`Saved stream favorite: ${favoriteLabel(favorite)}.`)
     render()
   } catch (error) {
@@ -3772,11 +5280,12 @@ on(els.favoriteStation, 'click', () => {
   try {
     const favorite = upsertFavorite({
       type: 'station',
+      chainId: state.config.chainId,
       stationAddress: state.config.stationAddress,
       label: `Station ${shortHash(state.config.stationAddress)}`,
     })
     setStatus(`Saved Station favorite: ${favoriteLabel(favorite)}.`)
-  } catch (error) {
+  } catch {
     setStatus('Set a Station address before saving it.')
   }
 })
@@ -3784,7 +5293,7 @@ on(els.favoriteChannel, 'click', () => {
   try {
     const favorite = upsertFavorite(currentChannelFavorite())
     setStatus(`Saved channel favorite: ${favoriteLabel(favorite)}.`)
-  } catch (error) {
+  } catch {
     setStatus('Load stream metadata before saving a publisher/channel favorite.')
   }
 })
@@ -3793,36 +5302,89 @@ for (const button of els.archiveModeButtons) {
     state.archive.mode = button.dataset.archiveMode || 'station'
     state.archive.streams = []
     state.archive.segmentsByKey = new Map()
+    resetArchiveProgress(archiveDefaultMessage(state.archive.mode))
     renderArchive()
   })
 }
+on(els.archiveRangeMode, 'change', () => {
+  const rangeMode = els.archiveRangeMode.value === 'block' ? 'block' : 'date'
+  if (rangeMode === 'block') {
+    els.archiveFromDate.value = ''
+    els.archiveToDate.value = ''
+  } else {
+    els.archiveFromBlock.value = ''
+  }
+  resetArchiveProgress(`Using ${rangeMode === 'block' ? 'an explicit From block' : 'an explicit date range'} for the next scan.`)
+  renderArchiveMode()
+})
+on(els.archiveScanForm, 'input', () => {
+  if (state.archive.progress?.status === 'error') resetArchiveProgress()
+})
 on(els.archiveScanForm, 'submit', (event) => {
   event.preventDefault()
+  state.archive.activeController?.abort()
+  const controller = new AbortController()
+  state.archive.activeController = controller
+  state.archive.cancel = false
+  resetArchiveProgress()
+  renderArchiveMode()
   const scan = state.archive.mode === 'inbox'
     ? scanBlobInboxStreams({
       inboxAddress: els.archiveInbox.value,
       publisher: els.archivePublisher.value,
       streamId: els.archiveStreamFilter.value.trim(),
+      rangeMode: els.archiveRangeMode.value,
       fromBlock: els.archiveFromBlock.value.trim(),
+      fromDate: els.archiveFromDate.value,
+      toDate: els.archiveToDate.value,
+      signal: controller.signal,
     })
     : scanOldStreams({
       stationAddress: els.archiveStation.value,
       publisher: els.archivePublisher.value,
+      rangeMode: els.archiveRangeMode.value,
       fromBlock: els.archiveFromBlock.value.trim(),
+      fromDate: els.archiveFromDate.value,
+      toDate: els.archiveToDate.value,
+      signal: controller.signal,
     })
   void scan.catch((error) => {
+    const cancelled = state.archive.cancel || isAbortError(error)
     state.archive.scanning = false
-    if (els.archiveScan) els.archiveScan.disabled = false
-    resetArchiveProgress(archiveScanErrorMessage(error))
+    const progress = state.archive.progress || defaultArchiveProgress(state.archive.mode)
+    if (cancelled) {
+      setArchiveProgress('Archive scan stopped.', {
+        current: progress.current,
+        total: progress.total,
+        active: false,
+        status: 'cancelled',
+      })
+    } else {
+      setArchiveProgress(archiveScanErrorMessage(error), {
+        current: progress.current,
+        total: progress.total,
+        active: false,
+        status: 'error',
+      })
+    }
+    state.archive.cancel = false
     renderArchive()
+  }).finally(() => {
+    if (state.archive.activeController === controller) state.archive.activeController = null
+    if (els.archiveScan) els.archiveScan.disabled = false
+    renderArchiveMode()
   })
 })
 on(els.archiveStop, 'click', () => {
+  if (!state.archive.activeController) return
   state.archive.cancel = true
-  setArchiveProgress('Stopping after the current chunk...', {
-    current: BigInt(Math.round(Number(els.archiveProgressBar?.value || 0))),
-    total: 100n,
+  state.archive.activeController.abort()
+  const progress = state.archive.progress || defaultArchiveProgress(state.archive.mode)
+  setArchiveProgress('Stopping archive scan...', {
+    current: progress.current,
+    total: progress.total,
     active: true,
+    status: 'stopping',
   })
 })
 on(els.archiveResults, 'click', (event) => {
@@ -3836,6 +5398,7 @@ on(els.archiveResults, 'click', (event) => {
       const favorite = upsertFavorite(state.archive.mode === 'inbox'
         ? {
           type: 'inbox-stream',
+          chainId: state.config.chainId,
           inboxAddress: els.archiveInbox.value,
           publisher: stream.publisher,
           streamId: stream.streamId,
@@ -3846,6 +5409,7 @@ on(els.archiveResults, 'click', (event) => {
         }
         : {
           type: 'stream',
+          chainId: state.config.chainId,
           stationAddress: els.archiveStation.value || state.config.stationAddress,
           publisher: stream.publisher,
           streamId: stream.streamId,
@@ -3871,6 +5435,7 @@ on(els.archiveResults, 'click', (event) => {
   setStatus(`Watching "${stream.title}"...`)
   void tuneArchiveStream(row.dataset.archiveKey)
     .catch((error) => {
+      if (isAbortError(error)) return
       const message = publicErrorMessage(error)
       state.segmentNotice = message
       setStatus(message)
@@ -3906,87 +5471,107 @@ on(els.favoritesList, 'click', (event) => {
   }
   tuneFavorite(favorite)
 })
+function mediaEventMatchesCurrentRecord() {
+  if (!state.currentRecordKey || !els.player) return false
+  const expectedUrl = state.objectUrls.get(state.currentRecordKey) || ''
+  const activeUrl = els.player.currentSrc || els.player.src || ''
+  return Boolean(expectedUrl && activeUrl === expectedUrl)
+}
+
+on(els.player, 'waiting', () => {
+  if (!mediaEventMatchesCurrentRecord() || els.player.ended) return
+  state.playbackMode = state.playbackIntent === 'follow' ? 'buffering' : 'replay-buffering'
+  render()
+})
+on(els.player, 'playing', () => {
+  if (!mediaEventMatchesCurrentRecord()) return
+  state.playbackMode = classifyPlaybackMode(state)
+  render()
+})
+on(els.player, 'pause', () => {
+  if (!mediaEventMatchesCurrentRecord() || els.player.ended) return
+  state.playbackMode = 'paused'
+  render()
+})
+on(els.player, 'error', () => {
+  if (!mediaEventMatchesCurrentRecord() || !els.player.error) return
+  state.playbackMode = 'interrupted'
+  render()
+  const failure = mediaErrorPresentation(els.player.error)
+  setStatus(failure.message, { assertive: true, announcementKey: failure.code })
+})
 on(els.player, 'ended', () => {
+  if (!mediaEventMatchesCurrentRecord() || !els.player.ended) return
   const current = currentRecord()
-  if (!state.streaming) {
+  if (!state.followIntent) {
+    const advanceToken = state.playbackAdvanceToken
+    const currentKey = state.currentRecordKey
     const nextSegment = nextSegmentAfter(current)
     if (nextSegment) {
-      const ready = state.verified.get(nextSegment.cacheKey)
-      if (ready) {
-        playRecord(ready)
-        render()
-        setStatus(`Playing verified segment #${nextSegment.sequence}.`)
-        return
-      }
-      setStatus(`Buffering next segment #${nextSegment.sequence}...`)
-      void prefetchSegment(nextSegment)
+      setStatus(`Buffering next segment #${nextSegment.sequence}...`, { announce: false })
+      void advanceLoadedPlayback(nextSegment, { advanceToken, currentKey })
         .then((record) => {
-          if (!record) throw new Error(`Unable to buffer segment #${nextSegment.sequence}.`)
-          playRecord(record)
-          render()
-          setStatus(`Playing verified segment #${nextSegment.sequence}.`)
+          if (record) setStatus(`Playing verified segment #${nextSegment.sequence}.`, { announce: false })
         })
-        .catch((error) => setStatus(publicErrorMessage(error)))
+        .catch((error) => {
+          if (playbackAdvanceIsCurrent(advanceToken, currentKey, { replayOnly: true })) setStatus(publicErrorMessage(error))
+        })
       return
     }
     if (state.loopReplay && state.segments.length) {
-      const first = state.segments[0]
-      const ready = state.verified.get(first.cacheKey)
-      if (ready) {
-        playRecord(ready)
-        render()
-        setStatus(`Playing verified segment #${first.sequence}.`)
-        return
-      }
-      setStatus(`Looping back to segment #${first.sequence}...`)
-      void prefetchSegment(first)
+      const first = orderedLoadedSegments()[0]
+      setStatus(`Looping back to segment #${first.sequence}...`, { announce: false })
+      void advanceLoadedPlayback(first, { advanceToken, currentKey, requireLoop: true })
         .then((record) => {
-          if (!record) throw new Error(`Unable to buffer segment #${first.sequence}.`)
-          playRecord(record)
-          render()
-          setStatus(`Playing verified segment #${first.sequence}.`)
+          if (record) setStatus(`Playing verified segment #${first.sequence}.`, { announce: false })
         })
-        .catch((error) => setStatus(publicErrorMessage(error)))
+        .catch((error) => {
+          if (playbackAdvanceIsCurrent(advanceToken, currentKey, { requireLoop: true, replayOnly: true })) setStatus(publicErrorMessage(error))
+        })
       return
     }
-    state.playbackState = 'replayEnded'
+    state.playbackMode = 'ended'
     render()
     setStatus('Replay reached the end of the loaded segment window.')
     return
   }
-  if (!state.streaming) return
+  if (!state.followIntent) return
   const next = current ? nextVerifiedRecord(current) : null
   if (next) {
-    playRecord(next)
+    playRecord(next, { playbackIntent: 'follow' })
     return
   }
-  state.playbackState = 'waiting'
+  state.playbackMode = 'waiting'
   render()
+  const advanceToken = state.playbackAdvanceToken
+  const currentKey = state.currentRecordKey
   void refresh().then(() => {
+    if (!state.followIntent || !playbackAdvanceIsCurrent(advanceToken, currentKey)) return
     const refreshedCurrent = currentRecord()
     const refreshedNext = refreshedCurrent ? nextVerifiedRecord(refreshedCurrent) : latestVerifiedRecord()
     if (refreshedNext) {
-      playRecord(refreshedNext)
+      playRecord(refreshedNext, { playbackIntent: 'follow' })
       return
     }
     const newestSegment = state.segments.at(-1)
     if (newestSegment && !state.verified.has(newestSegment.cacheKey)) {
-      state.playbackState = 'buffering'
+      state.playbackMode = 'buffering'
       render()
-      setStatus(`Waiting at live edge. Verifying newest segment #${newestSegment.sequence}...`)
+      setStatus(`Waiting at live edge. Verifying newest segment #${newestSegment.sequence}...`, { announce: false })
       void prefetchSegment(newestSegment).then((record) => {
-        if (record) playRecord(record)
+        if (!state.followIntent || !playbackAdvanceIsCurrent(advanceToken, currentKey)) return
+        if (record) playRecord(record, { playbackIntent: 'follow' })
         else {
-          state.playbackState = 'waiting'
+          state.playbackMode = 'waiting'
           render()
-          setStatus('Waiting for the next verified live segment.')
+          setStatus('Waiting for the next verified live segment.', { announce: false })
         }
       })
       return
     }
-    state.playbackState = 'waiting'
+    state.playbackMode = 'waiting'
     render()
-    setStatus('Waiting for the next Station slot at the live edge.')
+    setStatus('Waiting for the next Station slot at the live edge.', { announce: false })
   })
 })
 on(els.segments, 'click', async (event) => {
@@ -3994,6 +5579,7 @@ on(els.segments, 'click', async (event) => {
   if (jumpButton) {
     const segment = state.segments.find((candidate) => candidate.cacheKey === jumpButton.dataset.jumpKey)
     if (!segment) return
+    const playbackRequestToken = beginUserPlaybackRequest()
     state.selectedSegmentQuery = segment.txHash
     if (els.segmentLookup) els.segmentLookup.value = segment.txHash
     updateLookupMessage()
@@ -4002,11 +5588,12 @@ on(els.segments, 'click', async (event) => {
     setStatus(`Jumping to segment #${segment.sequence}...`)
     try {
       const record = state.verified.get(segment.cacheKey) || await verifySegment(segment)
+      if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
       render()
       playRecord(record, { userRequested: true })
       setStatus(`Playing verified segment #${segment.sequence}.`)
     } catch (error) {
-      setStatus(publicErrorMessage(error))
+      if (userPlaybackRequestIsCurrent(playbackRequestToken)) setStatus(publicErrorMessage(error))
     } finally {
       jumpButton.disabled = false
     }
@@ -4016,15 +5603,17 @@ on(els.segments, 'click', async (event) => {
   if (!button) return
   const segment = state.segments.find((candidate) => candidate.cacheKey === button.dataset.key)
   if (!segment) return
+  const playbackRequestToken = beginUserPlaybackRequest()
   button.disabled = true
   setStatus(`Verifying segment #${segment.sequence}...`)
   try {
     const record = await verifySegment(segment)
+    if (!userPlaybackRequestIsCurrent(playbackRequestToken)) return
     render()
     playRecord(record, { userRequested: true })
     setStatus(`Playing verified segment #${segment.sequence}.`)
   } catch (error) {
-    setStatus(publicErrorMessage(error))
+    if (userPlaybackRequestIsCurrent(playbackRequestToken)) setStatus(publicErrorMessage(error))
   } finally {
     button.disabled = false
   }
@@ -4046,10 +5635,11 @@ if (els.refresh) els.refresh.innerHTML = refreshIcon
 renderMuteIcon()
 updateVolumeFill()
 render()
-void refreshCacheStats()
+void initializeCachedState()
 startBlobspaceRail()
 if (els.player && els.volume) {
   els.player.volume = Number(els.volume.value)
   renderMuteIcon()
   updateVolumeFill()
 }
+markStartupReady()

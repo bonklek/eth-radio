@@ -8,6 +8,14 @@ export function chainFromEnv() {
   return { chainName, chain: chains[chainName] }
 }
 
+export function chainEndpointsFromEnv(chainName) {
+  const prefix = String(chainName || '').toUpperCase()
+  return {
+    executionRpcUrl: process.env[`${prefix}_ETH_RPC_URL`] || process.env.ETH_RPC_URL || '',
+    beaconRpcUrl: process.env[`${prefix}_BEACON_RPC_URL`] || process.env.BEACON_RPC_URL || '',
+  }
+}
+
 export function requireSupportedChain(chain) {
   if (!chain) {
     console.error(`Unsupported CHAIN. Choose one of: ${chainNames}`)

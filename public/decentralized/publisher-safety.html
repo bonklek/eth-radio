@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'" />
+  <title>Publisher safety · Radio Free Ethereum</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell docs-shell" data-layout="default">
+    <section class="main-column panel-zone panel-player" aria-labelledby="publisher-title">
+      <header class="topbar">
+        <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
+        <div class="brand"><span class="brand-kicker"><i></i> PUBLISHER GUIDE / EXPERIMENTAL</span><h1 id="publisher-title">Publish safely</h1><p>Prepare bounded local media publication without treating a prototype workflow as a production broadcast service.</p></div>
+        <div class="header-badges"><span class="status-badge"><i></i> EXPERIMENTAL</span></div>
+      </header>
+      <nav class="nowbar" aria-label="Documentation navigation"><a class="codebase-link" href="./docs.html">Documentation</a><a class="codebase-link" href="./viewer-recovery.html">Viewer recovery</a><a class="codebase-link" href="./developer-guide.html">Developer guide</a></nav>
+      <section class="viewer-frame"><div class="screen docs-screen"><article class="docs-copy">
+        <p class="player-status">The repository contains local segmentation and publication utilities, but this is not a release-ready public command guide. Do not fund, deploy, or sign based on this page alone.</p>
+        <h2>Before you start</h2>
+        <ol>
+          <li>Start on Sepolia. Mainnet requires explicit confirmation in the current local tooling and can spend real funds.</li>
+          <li>Use a new, dedicated low-value publishing wallet. Keep its private key only in local secret storage; never paste it into a browser, URL, issue, screenshot, or repository file.</li>
+          <li>Independently verify the chain, Station address/deployment, wallet address, and RPC behavior before any signature.</li>
+          <li>Set a maximum total exposure and a per-publication limit before preparing media. Stop when either limit is reached; do not rely on a future reimbursement.</li>
+        </ol>
+
+        <h2>Local-file workflow <span class="status-badge">EXPERIMENTAL</span></h2>
+        <figure class="docs-flow" aria-labelledby="publisher-flow-caption"><figcaption id="publisher-flow-caption">Conceptual local-file flow</figcaption><ol><li><strong>Select local media</strong><span>Keep the source and any temporary output on the local machine.</span></li><li><strong>Segment and manifest</strong><span>Prepare bounded media segments with expected hashes and metadata.</span></li><li><strong>Preflight</strong><span>Check the selected chain, Station, wallet liquidity, and exposure limit.</span></li><li><strong>Sign and submit</strong><span>A local wallet signs a blob transaction that records the segment event.</span></li><li><strong>Monitor and recover</strong><span>Confirm the chain result and stop safely on local, network, or fee failure.</span></li></ol></figure>
+        <p>Generated media, manifests, work directories, private endpoints, wallet state, and keys are operator-local. Do not publish them as part of a source archive or static site. A viewer cannot prove that a local publisher continues to run after a segment is observed.</p>
+
+        <h2>Fees, budgets, and capacity</h2>
+        <p><span class="status-badge">EXPERIMENTAL</span> The fee-estimate schema distinguishes base, guarded, and stress planning scenarios. A stress estimate is a planning input for publisher liquidity—not a fixed cost, fee ceiling, escrow, capacity reservation, inclusion guarantee, Station subsidy, or reimbursement claim.</p>
+        <table><thead><tr><th scope="col">Keep separate</th><th scope="col">Why</th></tr></thead><tbody>
+          <tr><td>Expected cost and maximum exposure</td><td>Expected cost can change before inclusion; maximum exposure is the publisher’s own stopping boundary.</td></tr>
+          <tr><td>Publisher liquidity and expected reimbursement</td><td>Liquidity must cover publication first. An expected reimbursement cannot fund a transaction.</td></tr>
+          <tr><td>Station subsidy and assigned funding</td><td>No current public fee-policy contract assigns or guarantees a subsidy.</td></tr>
+          <tr><td>Blob availability and publication success</td><td>A successfully included transaction does not guarantee later provider retrieval or viewer playback.</td></tr>
+        </tbody></table>
+
+        <h2>Pause, stop, and recovery</h2>
+        <p>For any uncertain condition—fee spike, insufficient liquidity, failed endpoint, local encoding failure, machine shutdown risk, unknown Station state, or a transaction that has not reached the confirmation depth you require—stop new submissions and reconcile the chain before resuming. Do not assume closing a GUI, browser, or terminal has the same effect as stopping a publisher; exact supervisor behavior requires a separately reviewed public release.</p>
+
+        <h2>Live input boundary <span class="status-badge">PLANNED / EXPERIMENTAL</span></h2>
+        <p>Live capture, OBS, webcam, desktop, playlist, and looping input are not a reliable public broadcast service. A live input cannot be completely preprocessed: it needs parallel capture, encoding, segmentation, and publication with a bounded lead. Any overlay carrying a block hash, UTC estimate, or segment number is advisory liveness evidence, not a reason to reject otherwise valid media when it becomes stale.</p>
+
+        <h2>Do not proceed when</h2>
+        <ul><li>You cannot identify the exact chain, Station, and funded publisher address.</li><li>The key or endpoint would need to be shared with a browser, screenshot, archive, or third party.</li><li>The fee estimate is expired, unverified, or higher than your exposure limit.</li><li>You are relying on an unassigned subsidy, a future claim, or a name binding to cover current wallet liquidity.</li><li>You need a production uptime, delivery, or reimbursement guarantee.</li></ul>
+      </article></div></section>
+      <footer class="source-footer"><nav class="docs-pagination" aria-label="Documentation pages"><a class="codebase-link" rel="prev" href="./viewer-recovery.html">Previous: viewer recovery</a><a class="codebase-link" rel="next" href="./protocol-model.html">Next: protocol model</a></nav></footer>
+    </section>
+  </main>
+  <script src="./docs.js"></script>
+</body>
+</html>

@@ -1,7 +1,10 @@
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import solc from 'solc'
+import { helpRequested } from './lib/cli-help.mjs'
+
+const require = createRequire(import.meta.url)
 
 function assertSolcObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -33,6 +36,7 @@ function stationContract(output) {
 }
 
 export function compileStation() {
+  const solc = /** @type {typeof import('solc')} */ (require('solc'))
   const contractPath = path.resolve('contracts/Station.sol')
   const source = fs.readFileSync(contractPath, 'utf8')
   const input = {
@@ -67,13 +71,21 @@ export function compileStation() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { abi, bytecode } = compileStation()
-  fs.mkdirSync('work/blob-radio-testnet/contracts', { recursive: true })
-  fs.writeFileSync(
-    'work/blob-radio-testnet/contracts/Station.abi.json',
-    `${JSON.stringify(abi, null, 2)}\n`,
-  )
-  fs.writeFileSync('work/blob-radio-testnet/contracts/Station.bytecode.txt', `${bytecode}\n`)
-  console.log(`abi entries: ${abi.length}`)
-  console.log(`bytecode bytes: ${(bytecode.length - 2) / 2}`)
+  if (helpRequested()) {
+    console.log(`Usage:
+  pnpm station:compile
+
+Compiles contracts/Station.sol and writes ABI/bytecode under work/blob-radio-testnet/contracts.
+`)
+  } else {
+    const { abi, bytecode } = compileStation()
+    fs.mkdirSync('work/blob-radio-testnet/contracts', { recursive: true })
+    fs.writeFileSync(
+      'work/blob-radio-testnet/contracts/Station.abi.json',
+      `${JSON.stringify(abi, null, 2)}\n`,
+    )
+    fs.writeFileSync('work/blob-radio-testnet/contracts/Station.bytecode.txt', `${bytecode}\n`)
+    console.log(`abi entries: ${abi.length}`)
+    console.log(`bytecode bytes: ${(bytecode.length - 2) / 2}`)
+  }
 }

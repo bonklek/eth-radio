@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="referrer" content="no-referrer" /><meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'" /><title>Glossary and status · Radio Free Ethereum</title><link rel="stylesheet" href="./styles.css" /></head>
+<body>
+  <main class="shell docs-shell" data-layout="default"><section class="main-column panel-zone panel-player" aria-labelledby="glossary-title">
+    <header class="topbar"><button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button><div class="brand"><span class="brand-kicker"><i></i> REFERENCE / STATUS MATRIX</span><h1 id="glossary-title">Glossary and feature status</h1><p>A vocabulary that keeps current V1 behavior distinct from experimental schemas and planned protocol work.</p></div><div class="header-badges"><span class="status-badge"><i></i> MIXED MATURITY</span></div></header>
+    <nav class="nowbar" aria-label="Documentation navigation"><a class="codebase-link" href="./docs.html">Documentation</a><a class="codebase-link" href="./protocol-model.html">Protocol model</a><a class="codebase-link" href="./developer-guide.html">Developer guide</a></nav>
+    <section class="viewer-frame"><div class="screen docs-screen"><article class="docs-copy">
+      <p class="player-status">Status labels describe this repository’s evidence, not a promise of deployment. “Open design question” means there is no released, reviewable public interface to rely on.</p>
+      <h2>Public feature status</h2>
+      <table><thead><tr><th scope="col">Feature</th><th scope="col">Status</th><th scope="col">What this means</th></tr></thead><tbody>
+        <tr><td>V1 Station event and publisher-scoped segments</td><td>SHIPPED_AND_VERIFIED</td><td>The current contract and watcher implement bounded V1 segment publication, discovery, verification, and playback.</td></tr>
+        <tr><td>V2 IDs, block-lot arithmetic, availability profiles, constitution, bounded fallback, fee snapshots</td><td>EXPERIMENTAL</td><td>Dependency-light schemas and tests exist, but they are not a deployed V2 contract or a canonical browser integration.</td></tr>
+        <tr><td>`.gwei` resolution, channel generations, scheduled replay, standing fallback UI, turnover, auctions, advertising, Station vaults</td><td>PLANNED</td><td>Public documentation may explain the intended boundaries; it must not claim a live service, deployment, or user entitlement.</td></tr>
+        <tr><td>BPO, hard assignments, protected claims, runway, publication floor, inclusion feasibility, enforceable fee policy</td><td>OPEN_DESIGN_QUESTION</td><td>These terms need a public specification and applicable contract/security review before an integration can rely on their exact effects.</td></tr>
+        <tr><td>Secrets, private URLs, unpublished addresses, private operator notes, unreviewed plans</td><td>UNSAFE_TO_PUBLISH</td><td>Never place these in public documentation, examples, static artifacts, or support responses.</td></tr>
+      </tbody></table>
+      <h2>Glossary</h2>
+      <dl>
+        <dt>Station <span class="status-badge">V1 VERIFIED</span></dt><dd>A V1 contract that emits bounded segment-publication events. A proposed V2 Station is a separate identity/model and is not deployed by this documentation.</dd>
+        <dt>Channel <span class="status-badge">V1 / PLANNED V2</span></dt><dd>In V1, a publisher-scoped stream within a Station. V2 proposes a separately derived channel ID and channel generation; do not merge histories based on name text.</dd>
+        <dt>Segment / Blob <span class="status-badge">V1 VERIFIED</span></dt><dd>A bounded media unit and the blob data referenced by its Station event. The watcher verifies matching sidecars and payload hashes before playback.</dd>
+        <dt>BPO <span class="status-badge">OPEN</span></dt><dd>No released public source defines this acronym or its lifecycle. Treat it as an unresolved term, not an action, claim, or API.</dd>
+        <dt>Reservation / hard assignment <span class="status-badge">PLANNED / OPEN</span></dt><dd>A reservation is a proposed lot/program allocation. A hard assignment is not a released V1 or V2 contract concept here; it must not be presented as protected funding or a guaranteed slot.</dd>
+        <dt>Claim / runway <span class="status-badge">PLANNED / OPEN</span></dt><dd>A claim is a proposed pull-based liability; runway is a proposed estimate of how long funds may support policy-defined activity. Neither currently creates a payable right or reliable duration.</dd>
+        <dt>Season / turnover <span class="status-badge">EXPERIMENTAL / PLANNED</span></dt><dd>A season schema divides a block range into non-overlapping lots. Turnover is a proposed refresh period between seasons; it is not a V1 scheduler or clock guarantee.</dd>
+        <dt>Scheduled replay / standing fallback <span class="status-badge">PLANNED</span></dt><dd>Scheduled replay is intended as assigned playback. Standing fallback is intended as a transactionless client selection from committed assets. Neither proves a primary stream is live.</dd>
+        <dt>Canonical plan / observed selection <span class="status-badge">EXPERIMENTAL</span></dt><dd>Proposed separation between chain-backed policy/evidence and the media a client actually obtained through its providers. Provider observations must not silently rewrite canonical order.</dd>
+        <dt>`.gwei` receipt / policy module <span class="status-badge">PLANNED</span></dt><dd>A `.gwei` receipt is not a released identity or payment primitive. A policy module is a proposed, separately verifiable source of authorization, economics, fallback, or turnover behavior.</dd>
+        <dt>Publication floor / inclusion feasibility <span class="status-badge">OPEN</span></dt><dd>These are not defined public interfaces. A client fee forecast cannot establish either a minimum policy threshold or transaction inclusion.</dd>
+      </dl>
+      <h2>How to use this matrix</h2>
+      <ul><li>Use shipped-and-verified terms only for current V1 behavior you can confirm from the contract and watcher.</li><li>Show experimental schema versions and unsupported states to developers; do not infer a future default.</li><li>Use planned language for proposed flows, then require a direct address/transaction recovery path until production evidence exists.</li><li>Stop and seek a released specification when an open term would affect money, authority, availability, or user safety.</li></ul>
+    </article></div></section>
+    <footer class="source-footer"><nav class="docs-pagination" aria-label="Documentation pages"><a class="codebase-link" rel="prev" href="./scenarios.html">Previous: scenarios</a><a class="codebase-link" rel="next" href="./developer-guide.html">Next: developer guide</a></nav></footer>
+  </section></main><script src="./docs.js"></script>
+</body>
+</html>

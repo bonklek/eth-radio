@@ -1,6 +1,17 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { helpRequested } from './lib/cli-help.mjs'
+
+if (helpRequested()) {
+  console.log(`Usage:
+  pnpm web:ipfs:prepare
+
+Builds and verifies the self-contained static client, then calculates an IPFS CID
+when an IPFS CLI is available. It does not publish or pin content.
+`)
+  process.exit(0)
+}
 
 const root = process.cwd()
 const outDir = path.join(root, 'dist', 'decentralized')
@@ -31,9 +42,14 @@ function ipfsAddRootCid(output) {
 
 run(process.execPath, ['scripts/build-static-client.mjs'])
 run(process.execPath, ['scripts/verify-static-client.mjs'])
+run(process.execPath, ['scripts/verify-static-artifact.mjs'])
 
 if (!fs.existsSync(path.join(outDir, 'index.html'))) {
   throw new Error(`Missing static build output: ${outDir}`)
+}
+const outputFiles = fs.readdirSync(outDir)
+if (outputFiles.length !== 1 || outputFiles[0] !== 'index.html') {
+  throw new Error(`Static publish payload must contain only index.html; found: ${outputFiles.join(', ')}`)
 }
 
 console.log(`\nStatic client is ready at ${outDir}`)

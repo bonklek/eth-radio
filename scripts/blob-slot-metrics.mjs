@@ -1,4 +1,4 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
 import {
   commitmentToVersionedHash,
   createPublicClient,
@@ -6,31 +6,41 @@ import {
   http,
   parseEventLogs,
 } from 'viem'
-import { sepolia } from 'viem/chains'
+import { assertRpcChain, chainEndpointsFromEnv, chainFromEnv, chainNames, requireSupportedChain } from './chains.mjs'
+import { resolveLatestBeaconSlot } from './lib/beacon-head.mjs'
 import { bigintArg, numberArg, readArg } from './lib/cli-args.mjs'
-import { loadStationDeployment } from './lib/station-deployment.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import { stationReadConfig } from './lib/station-deployment.mjs'
+import { installEndpointSafeProcessHandlers } from './lib/endpoint-privacy.mjs'
+import { fetchBoundedJson } from './lib/bounded-fetch.mjs'
 
-const chains = { sepolia }
 const MAX_BLOBS_AFTER_BPO2 = 21
+const MAX_BEACON_RESPONSE_BYTES = 8 * 1024 * 1024
+const MAX_METRIC_SLOTS = 64
+const MAX_STATION_HISTORY_BLOCKS = 250_000n
+const STATION_LOG_RANGE_BLOCKS = 5_000n
+const MAX_STATION_LOGS = 10_000
 
-function usage() {
-  console.error(`Usage:
-  pnpm slots:metrics -- [--slots 6] [--station 0x...] [--from-block <number>]
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
+  pnpm slots:metrics -- [--slots 1..64] [--station 0x...] [--from-block <number>]
 
 Environment:
-  ETH_RPC_URL, BEACON_RPC_URL, CHAIN=sepolia, optional STATION_ADDRESS
+  ETH_RPC_URL, BEACON_RPC_URL, CHAIN=${chainNames}, optional STATION_ADDRESS
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
+if (helpRequested()) usage(0)
+dotenv.config({ quiet: true })
+
 async function beacon(beaconUrl, pathname) {
-  const response = await fetch(`${beaconUrl}${pathname}`, {
-    headers: { accept: 'application/json' },
+  return fetchBoundedJson(`${beaconUrl}${pathname}`, {
+    maxBytes: MAX_BEACON_RESPONSE_BYTES,
+    timeoutMs: 10_000,
+    label: `beacon response ${pathname}`,
   })
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`)
-  }
-  return response.json()
 }
 
 function assertBytes48Hex(value, label) {
@@ -93,6 +103,9 @@ function beaconData(response, label) {
 function beaconDataArray(response, label) {
   const data = beaconData(response, label)
   if (!Array.isArray(data)) throw new Error(`Invalid beacon ${label} response: data must be an array`)
+  if (data.length > MAX_BLOBS_AFTER_BPO2) {
+    throw new Error(`Invalid beacon ${label} response: exceeds ${MAX_BLOBS_AFTER_BPO2} entries`)
+  }
   return data
 }
 
@@ -105,31 +118,65 @@ function beaconGenesisTime(response) {
   return BigInt(genesisTime)
 }
 
-const chainName = process.env.CHAIN || 'sepolia'
-const chain = chains[chainName]
-const rpcUrl = process.env.ETH_RPC_URL
-const beaconUrl = process.env.BEACON_RPC_URL?.replace(/\/$/, '')
-if (!chain || !rpcUrl || !beaconUrl) usage()
+const { chainName, chain } = chainFromEnv()
+requireSupportedChain(chain)
+const endpoints = chainEndpointsFromEnv(chainName)
+const rpcUrl = endpoints.executionRpcUrl
+const beaconUrl = endpoints.beaconRpcUrl.replace(/\/$/, '')
+installEndpointSafeProcessHandlers(() => [rpcUrl, beaconUrl].filter(Boolean))
+if (!rpcUrl || !beaconUrl) usage()
 
-const deployment = loadStationDeployment(chainName)
-const station = readArg('station', process.env.STATION_ADDRESS || deployment?.address)
-const stationAbi = deployment?.abi
-const slots = numberArg('slots', '6', { integer: true, min: 1 })
+const stationConfig = stationReadConfig(chainName, {
+  stationAddress: readArg('station', process.env.STATION_ADDRESS),
+})
+const station = stationConfig.stationAddress
+const stationAbi = stationConfig.abi
+const slots = numberArg('slots', '6', { integer: true, min: 1, max: MAX_METRIC_SLOTS })
 const client = createPublicClient({ chain, transport: http(rpcUrl) })
+await assertRpcChain(client, chain)
 
-const latestBlock = await client.getBlock({ blockTag: 'latest' })
-const genesis = await beacon(beaconUrl, '/eth/v1/beacon/genesis')
+const [latestBlock, genesis] = await Promise.all([
+  client.getBlock({ blockTag: 'latest' }),
+  beacon(beaconUrl, '/eth/v1/beacon/genesis'),
+])
 const genesisTime = beaconGenesisTime(genesis)
-const latestSlot = (latestBlock.timestamp - genesisTime) / 12n
+const latestSlotResolution = await resolveLatestBeaconSlot({
+  fetchHead: () => beacon(beaconUrl, '/eth/v1/beacon/headers/head'),
+  latestExecutionTimestamp: latestBlock.timestamp,
+  genesisTime,
+})
+const latestSlot = latestSlotResolution.slot
+if (latestSlotResolution.warning) console.warn(latestSlotResolution.warning)
+if (BigInt(slots - 1) > latestSlot) {
+  throw new Error(`Requested ${slots} slots, but the resolved beacon head is only slot ${latestSlot}`)
+}
 
 const streamBlobHashes = new Map()
 if (station && stationAbi) {
-  const fromBlock = bigintArg('from-block', deployment?.blockNumber || '0', { min: 0n })
-  const logs = await client.getLogs({
-    address: getAddress(station),
-    fromBlock,
-    toBlock: 'latest',
-  })
+  const requestedFromBlock = bigintArg('from-block', stationConfig.fromBlock, { min: 0n })
+  const earliestBoundedBlock = latestBlock.number >= MAX_STATION_HISTORY_BLOCKS - 1n
+    ? latestBlock.number - MAX_STATION_HISTORY_BLOCKS + 1n
+    : 0n
+  const fromBlock = requestedFromBlock < earliestBoundedBlock ? earliestBoundedBlock : requestedFromBlock
+  if (fromBlock !== requestedFromBlock) {
+    console.warn(`Station attribution is limited to the latest ${MAX_STATION_HISTORY_BLOCKS} execution blocks; use a newer --from-block to narrow it further`)
+  }
+  const logs = []
+  for (let rangeFrom = fromBlock; rangeFrom <= latestBlock.number; rangeFrom += STATION_LOG_RANGE_BLOCKS) {
+    const rangeTo = rangeFrom + STATION_LOG_RANGE_BLOCKS - 1n < latestBlock.number
+      ? rangeFrom + STATION_LOG_RANGE_BLOCKS - 1n
+      : latestBlock.number
+    const rangeLogs = await client.getLogs({
+      address: getAddress(station),
+      fromBlock: rangeFrom,
+      toBlock: rangeTo,
+    })
+    if (!Array.isArray(rangeLogs)) throw new Error('Station attribution log response must be an array')
+    if (rangeLogs.length > MAX_STATION_LOGS || logs.length + rangeLogs.length > MAX_STATION_LOGS) {
+      throw new Error(`Station attribution exceeds ${MAX_STATION_LOGS} logs; provide a newer --from-block`)
+    }
+    logs.push(...rangeLogs)
+  }
   const parsed = parseEventLogs({
     abi: stationAbi,
     eventName: 'SegmentPublished',
@@ -145,6 +192,8 @@ if (station && stationAbi) {
       })
     }
   })
+} else {
+  console.warn('Station address is not configured; stream attribution is disabled')
 }
 
 const rows = []
@@ -186,6 +235,8 @@ console.log(JSON.stringify({
   chain: chainName,
   latestExecutionBlock: latestBlock.number.toString(),
   latestSlot: latestSlot.toString(),
+  latestSlotSource: latestSlotResolution.source,
+  latestSlotWarning: latestSlotResolution.warning,
   station: station || null,
   streamKnownBlobHashes: streamBlobHashes.size,
   rows,

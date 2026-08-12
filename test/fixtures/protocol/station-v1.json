@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "contractName": "Station",
+  "publishSegmentSignature": "publishSegment(string,uint256,uint64,uint32,bytes32,string,bytes32,uint8)",
+  "publishSegmentSelector": "0x84e4f7f7",
+  "segmentPublishedSignature": "SegmentPublished(address,bytes32,uint256,string,uint64,uint32,bytes32,string,bytes32,bytes32[])",
+  "segmentPublishedTopic": "0xfd61253da387da4d87d036a0276340bc4f04ff7c1173999c8392b158030f04c3",
+  "errors": {
+    "InvalidBlobCount()": "0xa72c89df",
+    "MissingBlob(uint256)": "0x95ed3b32",
+    "DuplicateSegment(address,bytes32,uint256)": "0x1754e581"
+  },
+  "sampleStreamId": "radio-free-ethereum",
+  "sampleStreamIdHash": "0xf04474d0eb7e5fe9e8411872fc6c888d03c35618b571b24702560457afa98bcb",
+  "maximumBlobsPerSegment": 6
+}

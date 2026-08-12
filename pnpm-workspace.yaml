@@ -1,7 +1,12 @@
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - brace-expansion@5.0.9
 allowBuilds:
   c-kzg: true
   ffmpeg-static: true
 onlyBuiltDependencies:
   - ffmpeg-static
 overrides:
+  brace-expansion: 5.0.9
   tmp: ^0.2.6
+  ws: 8.21.0

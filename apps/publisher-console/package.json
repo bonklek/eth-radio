@@ -1,0 +1,11 @@
+{
+  "name": "@rfe/publisher-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node launch.mjs",
+    "foreground": "node server.mjs",
+    "stop": "node stop.mjs",
+    "test": "node test/runtime-schema.test.mjs && node test/engine-state-integrity.test.mjs && node test/recovery-artifacts.test.mjs && node test/shutdown-coordinator.test.mjs && node test/publication-intent.test.mjs && node test/signing-coordinator.test.mjs && node test/signer-coordinator.test.mjs && node test/process-capabilities.test.mjs && node test/endpoint-operation.test.mjs && node test/gas-preflight.test.mjs && node test/restart-policy.test.mjs && node test/replacement-engine.test.mjs && node test/console.test.mjs"
+  }
+}

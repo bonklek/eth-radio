@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'" />
+  <title>Documentation · Radio Free Ethereum</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell docs-shell" data-layout="default">
+    <section class="main-column panel-zone panel-player" aria-labelledby="docs-title">
+      <header class="topbar">
+        <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
+        <div class="brand">
+          <span class="brand-kicker"><i></i> PUBLIC DOCUMENTATION / V1</span>
+          <h1 id="docs-title">Radio Free Ethereum</h1>
+          <p>What the public watcher can verify today—and the boundaries it cannot cross.</p>
+        </div>
+        <div class="header-badges"><span class="status-badge"><i></i> EXPERIMENTAL</span></div>
+      </header>
+
+      <nav class="nowbar" aria-label="Documentation navigation">
+        <a class="codebase-link" href="#viewer">Viewer</a>
+        <a class="codebase-link" href="./viewer-recovery.html">Recovery</a>
+        <a class="codebase-link" href="#publisher">Publisher</a>
+        <a class="codebase-link" href="./publisher-safety.html">Publisher safety</a>
+        <a class="codebase-link" href="#trust">Trust &amp; safety</a>
+        <a class="codebase-link" href="./protocol-model.html">Protocol model</a>
+        <a class="codebase-link" href="./station-operations.html">Station operations</a>
+        <a class="codebase-link" href="./scenarios.html">Scenarios</a>
+        <a class="codebase-link" href="./glossary-status.html">Glossary &amp; status</a>
+        <a class="codebase-link" href="#developer">Developers</a>
+        <a class="codebase-link" href="./developer-guide.html">Developer guide</a>
+        <a class="codebase-link" href="./index.html">Open watcher</a>
+      </nav>
+
+      <section class="viewer-frame">
+        <div class="screen docs-screen">
+          <article class="docs-copy">
+            <p class="player-status"><strong>Status key:</strong> <span class="status-badge">SHIPPED &amp; VERIFIED</span> documented in current public code; <span class="status-badge">EXPERIMENTAL</span> implemented prototype behavior; <span class="status-badge">PLANNED</span> a design direction, not a service or promise.</p>
+            <h2>Overview</h2>
+            <p>Radio Free Ethereum is an Ethereum blob-radio prototype. A publisher submits media segment metadata to a Station contract and supplies blob versioned hashes in the transaction; the browser watcher reads Station logs from an execution RPC, retrieves matching blob sidecars from a beacon endpoint, verifies and reconstructs the payload, then plays verified segments. A Station V1 channel is scoped by the Station contract, publisher address, and stream ID—not by a stream name alone.</p>
+            <figure class="docs-flow" aria-labelledby="evidence-flow-caption">
+              <figcaption id="evidence-flow-caption">Current V1 evidence flow <span class="status-badge">SHIPPED &amp; VERIFIED</span></figcaption>
+              <ol>
+                <li><strong>Publisher transaction</strong><span>Intent and blob hashes supplied by the publisher.</span></li>
+                <li><strong>Station event</strong><span>Canonical chain record of the V1 segment metadata.</span></li>
+                <li><strong>Execution + beacon RPCs</strong><span>Untrusted provider responses used to obtain logs and sidecars.</span></li>
+                <li><strong>Browser verification</strong><span>Bounded reconstruction and payload-hash validation.</span></li>
+                <li><strong>Playback</strong><span>Local observation of verified media, not proof of a current live broadcast.</span></li>
+              </ol>
+            </figure>
+            <p>Ethereum blocks are not a wall-clock scheduler. The watcher can display UTC estimates, but block inclusion, RPC availability, blob serving, and a local publisher’s uptime remain external reliability boundaries.</p>
+
+            <h2 id="viewer">Quick start: viewers <span class="status-badge">SHIPPED &amp; VERIFIED</span></h2>
+            <ol>
+              <li>Open the <a href="./index.html">watcher</a> and choose ETH (mainnet) or SEP (Sepolia).</li>
+              <li>Enter a Station contract/deployment transaction in Archive, or use a trusted share URL containing Station, publisher, and stream information.</li>
+              <li>Wait for the watcher to find and verify segments. It remains idle when no recent verified signal is available.</li>
+              <li>Use the status and endpoint details before assuming playback is live. A segment can be recent yet unavailable from the selected RPC or beacon provider.</li>
+            </ol>
+            <p><strong>Recovery:</strong> if a stream stalls, refresh first; then check the execution and beacon endpoint health in Settings. Paste an exact transaction, block, or blob reference into segment lookup when discovery is incomplete. A raw stream name without a publisher is ambiguous; select a publisher-specific archive/favorite or an exact Station transaction instead.</p>
+            <p><strong>What indicators mean:</strong> the current V1 watcher verifies segment metadata and payload before playback. It does not implement canonical Station V2 scheduling, `.gwei` resolution, a live-proof signal, or a contract-backed fallback policy. Treat a loaded segment as verified media evidence, not a guarantee that a broadcaster is currently live.</p>
+
+            <h2 id="publisher">Publishing <span class="status-badge">EXPERIMENTAL</span></h2>
+            <p>The public repository includes local tools for segmenting media and publishing blob-backed segments. Before funding or signing, use a dedicated low-value publishing wallet, begin on Sepolia, set a total spending limit, and independently verify the Station deployment, chain, RPC endpoint, and media input. Do not place a seed phrase or private key in a command, URL, browser field, screenshot, or issue.</p>
+            <p>Local-file and live-input operation are prototype workflows. A local machine, encoder, network connection, wallet, and endpoint availability can each stop a stream. Closing a viewer does not prove a publisher remains active. This documentation intentionally does not provide copyable funding or deployment commands because public release-ready command interfaces have not been verified here.</p>
+            <p><strong>Conceptual live pipeline (planned/experimental):</strong> capture → encode → segment → optional liveness overlay → blob publication → Station indexing → viewer buffering/playback. Live feeds cannot be fully preprocessed: segmentation and publication must progress in parallel with a bounded preparation lead. A block hash, UTC estimate, or segment number burned into media is advisory evidence; stale witness data should be labeled rather than used to reject media automatically.</p>
+
+            <h2>Identity, scheduling, and fallback <span class="status-badge">PLANNED</span></h2>
+            <p>`.gwei` is a proposed discovery and presentation layer, not the economic identity of a Station, channel, vault, claim, or reservation. Direct Station and channel identities remain the recovery path whenever name resolution is missing, stale, conflicting, unsupported, or unverified. No current public watcher resolves `.gwei` names.</p>
+            <p>Station V2 identifiers, block-range seasons, airtime allocation, vault claims, advertisements, scheduled replay, and standing fallback are not deployed V1 features. The shared protocol package contains partial, versioned experimental schemas: its fallback resolver uses bounded concrete candidates and never treats fallback as proof of a live primary. A scheduled replay would still require a prior assignment; transactionless standing fallback is a client playback choice, not an airtime reservation.</p>
+
+            <h2>Fees and availability <span class="status-badge">EXPERIMENTAL</span></h2>
+            <p>Client fee snapshots are planning evidence only. They distinguish base, guarded, and stress estimates and keep publisher liquidity, Station subsidy, and maximum reimbursement separate. A forecast is not an oracle, hard fee maximum, escrow, capacity reservation, inclusion guarantee, subsidy assignment, or reimbursement promise. Higher fees, failed inclusion, or unavailable blobs remain possible.</p>
+            <p>Blob availability is provider-dependent and time-bounded. The experimental availability profile can calculate a conservative theoretical window from explicit profile data; it never guarantees that a provider will serve media. Use fallback endpoints, reduce segment density, top up a dedicated wallet only after review, or stop safely when a configured exposure limit is reached.</p>
+
+            <h2 id="developer">Developer map <span class="status-badge">SHIPPED &amp; VERIFIED</span></h2>
+            <ul>
+              <li><code>contracts/Station.sol</code>: V1 Station contract. <code>publishSegment</code> rejects zero or over-six blobs and duplicate publisher/stream/sequence tuples, then emits <code>SegmentPublished</code>.</li>
+              <li><code>public/decentralized/</code>: browser-only watcher. It reads execution logs and beacon blob sidecars directly; endpoint CORS support is required.</li>
+              <li><code>packages/protocol/</code>: partial shared schemas for canonical V2 identifiers, availability, bounded fallback decisions, and constitution snapshots. These are not a deployed V2 ABI.</li>
+              <li><code>packages/economics/</code>: deterministic client-side fee-estimate snapshots, explicitly labeled planning-only.</li>
+            </ul>
+            <p>Pseudocode, proposed schemas, and fixtures are not production contract interfaces. Integrations should validate chain ID, Station address, publisher scope, ordering fields, hashes, version support, and reorg/finality state before acting. Make handlers idempotent: logs can be replayed, reorganized, or fetched from disagreeing providers.</p>
+
+            <h2 id="trust">Security and trust model</h2>
+            <p>Media, metadata, RPC responses, gateways, and browser state are untrusted inputs. Verify the chain, Station, publisher, stream scope, transaction, and segment generation before trusting a share or signing. Do not inject metadata as HTML. Browser extensions, compromised endpoints, reorgs, unsupported protocol profiles, and fee-estimation uncertainty can change what a user observes.</p>
+            <p>Mainnet is high risk. Test on Sepolia first with fictional or low-value example identities, a dedicated funded wallet, explicit per-transaction and total-exposure limits, and a recovery plan. Never assume a name rebinding, policy change, or tombstone moves balances or history.</p>
+
+            <h2>Glossary</h2>
+            <dl>
+              <dt>Station</dt><dd>A contract that records V1 segment publication events.</dd>
+              <dt>Channel</dt><dd>For V1, a publisher-scoped stream within a Station; V2 channel IDs are experimental schemas.</dd>
+              <dt>Segment / Blob</dt><dd>A bounded media unit and the blob data referenced by its transaction.</dd>
+              <dt>Scheduled replay / standing fallback</dt><dd>Planned distinct modes: the former is assigned playback; the latter is a client-side choice.</dd>
+              <dt>Canonical plan / observed selection</dt><dd>Planned separation between chain-backed intent and what a client actually found playable.</dd>
+              <dt>Publication floor / inclusion feasibility</dt><dd>Proposed policy concepts; neither is guaranteed by a client estimate.</dd>
+            </dl>
+
+            <h2>Public feature status</h2>
+            <table>
+              <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Public-safe statement</th></tr></thead>
+              <tbody>
+                <tr><td>V1 watcher and Station event</td><td>Shipped &amp; verified</td><td>Current code can discover, verify, and play bounded V1 segments from configured endpoints.</td></tr>
+                <tr><td>Fee snapshots and fallback resolver</td><td>Experimental</td><td>Versioned client schemas exist; they are not enforceable contracts or V2 viewer behavior.</td></tr>
+                <tr><td>`.gwei`, Stations V2, auctions, vaults, ads</td><td>Planned</td><td>No deployed functionality or production API is documented here.</td></tr>
+                <tr><td>Economic policy and production ABI</td><td>Open design question</td><td>Requires public specification, contract implementation, and security review.</td></tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+      </section>
+      <footer class="source-footer"><nav class="docs-pagination" aria-label="Documentation pages"><a class="codebase-link" href="./index.html">Back to watcher</a><a class="codebase-link" rel="next" href="./viewer-recovery.html">Next: viewer recovery</a></nav></footer>
+    </section>
+  </main>
+  <script src="./docs.js"></script>
+</body>
+</html>

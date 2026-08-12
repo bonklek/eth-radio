@@ -3,18 +3,23 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import ffmpegPath from 'ffmpeg-static'
 import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import { sha256FileSync } from './lib/bounded-files.mjs'
+import { serializeSegmentManifest } from './lib/live-segment-manifest.mjs'
+import { prepareSegmentOutputDirectory, segmentOutputEntries } from './lib/segment-output.mjs'
+import { segmentMsArg } from './lib/station-cli.mjs'
+import { resolveSegmentSet, withFilesystemIdentity } from './lib/filesystem-identity.mjs'
 
-function usage() {
-  console.error(`Usage:
+const ffmpegExecutable = /** @type {string | null} */ (/** @type {unknown} */ (ffmpegPath))
+
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm media:segment -- --input <video> [--out-dir work/blob-radio-testnet/live-segments] [--stream-id milady-mandate]
                        [--segment-ms 12000] [--width 640] [--height 360] [--fps 24] [--video-bitrate 420k]
                        [--audio-bitrate 32k] [--no-audio]
 `)
-  process.exit(1)
-}
-
-function sanitize(value) {
-  return String(value || '').replace(/[^a-zA-Z0-9_.-]/g, '_')
+  process.exit(exitCode)
 }
 
 function run(command, args) {
@@ -28,15 +33,17 @@ function run(command, args) {
   })
 }
 
+if (helpRequested()) usage(0)
 const input = readArg('input')
 if (!input) usage()
-if (!ffmpegPath) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
+if (!ffmpegExecutable) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
 
 const inputPath = path.resolve(input)
 const streamId = readArg('stream-id', 'milady-mandate')
-const safeStreamId = sanitize(streamId)
 const outDir = path.resolve(readArg('out-dir', 'work/blob-radio-testnet/live-segments'))
-const segmentMs = numberArg('segment-ms', '12000', { integer: true, min: 1 })
+const segmentSet = resolveSegmentSet({ directory: outDir, streamId })
+const filePrefix = segmentSet.identity.key
+const segmentMs = segmentMsArg('12000')
 const segmentSeconds = segmentMs / 1000
 const width = numberArg('width', '640', { integer: true, min: 1 })
 const height = numberArg('height', '360', { integer: true, min: 1 })
@@ -50,8 +57,8 @@ if (!Number.isFinite(segmentSeconds) || segmentSeconds <= 0) {
   throw new Error(`Invalid segment duration: ${segmentMs}`)
 }
 
-fs.mkdirSync(outDir, { recursive: true })
-const outputPattern = path.join(outDir, `${safeStreamId}-%06d.webm`)
+prepareSegmentOutputDirectory(outDir, filePrefix)
+const outputPattern = path.join(outDir, `${filePrefix}-%06d.webm`)
 
 const args = [
   '-hide_banner',
@@ -107,26 +114,18 @@ console.log(`segmenting: ${inputPath}`)
 console.log(`output: ${outputPattern}`)
 console.log(`profile: ${width}x${height} ${fps}fps AV1 WebM, segment ${segmentSeconds}s, video ${videoBitrate}${noAudio ? ', no audio' : `, audio ${audioBitrate}`}`)
 
-await run(ffmpegPath, args)
+await run(ffmpegExecutable, args)
 
-const files = fs
-  .readdirSync(outDir)
-  .filter((name) => name.startsWith(`${safeStreamId}-`) && name.endsWith('.webm'))
-  .sort()
-  .map((name, index) => {
-    const filePath = path.join(outDir, name)
-    return {
-      sequence: index,
-      file: filePath,
-      bytes: fs.statSync(filePath).size,
-    }
-  })
+const files = segmentOutputEntries(outDir, filePrefix).map((file) => ({
+  ...file,
+  payloadSha256: sha256FileSync(file.file, { label: `segment output ${file.file}` }),
+}))
 
-const manifest = {
+const manifest = withFilesystemIdentity({
   app: 'eth-radio',
   kind: 'segment-set',
   streamId,
-  filePrefix: safeStreamId,
+  filePrefix,
   input: inputPath,
   outDir,
   segmentMs,
@@ -138,10 +137,10 @@ const manifest = {
   codec: noAudio ? 'av1/webm' : 'av1-opus/webm',
   createdAt: new Date().toISOString(),
   segments: files,
-}
+}, segmentSet.identity)
 
-const out = path.join(outDir, `${safeStreamId}.segments.json`)
-fs.writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`)
+const out = path.join(outDir, `${filePrefix}.segments.json`)
+fs.writeFileSync(out, serializeSegmentManifest(manifest, out))
 
 console.log(`segments: ${files.length}`)
 for (const file of files) {

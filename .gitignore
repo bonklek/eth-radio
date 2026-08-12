@@ -37,3 +37,7 @@ dist/
 build/
 coverage/
 *.log
+
+# Local publisher runtime and generated previews
+apps/publisher-console/runtime/
+apps/publisher-console/*.lock

@@ -1,18 +1,31 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
 import { createPublicClient, getAddress, http, parseEventLogs } from 'viem'
-import { assertRpcChain, chainFromEnv, chainNames, requireSupportedChain } from './chains.mjs'
+import { assertRpcChain, chainEndpointsFromEnv, chainFromEnv, chainNames, requireSupportedChain } from './chains.mjs'
 import { bigintArg, readArg } from './lib/cli-args.mjs'
-import { loadStationDeployment } from './lib/station-deployment.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import { stationReadConfig } from './lib/station-deployment.mjs'
+import { installEndpointSafeProcessHandlers } from './lib/endpoint-privacy.mjs'
+import {
+  fetchStationLogsInChunks,
+  STATION_LOG_AGGREGATE_LIMIT,
+  STATION_LOG_RANGE_BLOCK_LIMIT,
+  STATION_LOG_RESPONSE_LIMIT,
+  STATION_SCAN_BLOCK_LIMIT,
+} from './lib/station-history.mjs'
 
-function usage() {
-  console.error(`Usage:
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm station:segments -- [--station 0x...] [--from-block <number>] [--to-block latest]
 
 Environment:
   ETH_RPC_URL, CHAIN=${chainNames}, optional STATION_ADDRESS
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
+
+if (helpRequested()) usage(0)
+dotenv.config({ quiet: true })
 
 function nonNegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -84,25 +97,33 @@ function stationSegment(log, index) {
 }
 
 const { chainName, chain } = chainFromEnv()
-const rpcUrl = process.env.ETH_RPC_URL
+const { executionRpcUrl: rpcUrl } = chainEndpointsFromEnv(chainName)
+installEndpointSafeProcessHandlers(() => [rpcUrl].filter(Boolean))
 if (!rpcUrl) usage()
 requireSupportedChain(chain)
 
-const deployment = loadStationDeployment(chainName)
-const station = readArg('station', process.env.STATION_ADDRESS || deployment?.address)
-const abi = deployment?.abi
-if (!station || !abi) usage()
+const stationConfig = stationReadConfig(chainName, {
+  stationAddress: readArg('station', process.env.STATION_ADDRESS),
+})
+const station = stationConfig.stationAddress
+const abi = stationConfig.abi
+if (!station) usage()
 
-const fromBlock = bigintArg('from-block', deployment?.blockNumber || '0', { min: 0n })
+const fromBlock = bigintArg('from-block', stationConfig.fromBlock, { min: 0n })
 const toBlockArg = readArg('to-block', 'latest')
 const toBlock = toBlockArg === 'latest' ? 'latest' : bigintArg('to-block', toBlockArg, { min: 0n })
 const client = createPublicClient({ chain, transport: http(rpcUrl) })
 await assertRpcChain(client, chain)
 
-const logs = await client.getLogs({
-  address: getAddress(station),
+const latestBlock = toBlock === 'latest' ? await client.getBlockNumber() : toBlock
+const logs = await fetchStationLogsInChunks({
   fromBlock,
-  toBlock,
+  toBlock: latestBlock,
+  logRangeBlockLimit: STATION_LOG_RANGE_BLOCK_LIMIT,
+  scanBlockLimit: STATION_SCAN_BLOCK_LIMIT,
+  responseLogLimit: STATION_LOG_RESPONSE_LIMIT,
+  aggregateLogLimit: STATION_LOG_AGGREGATE_LIMIT,
+  getLogs: (range) => client.getLogs({ address: getAddress(station), ...range }),
 })
 
 const parsed = parseEventLogs({

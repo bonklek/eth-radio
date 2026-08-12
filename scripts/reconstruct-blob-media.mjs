@@ -3,20 +3,36 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { hexToBytes } from 'viem'
 import { readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import { scopedStreamFilesystemIdentity } from './lib/filesystem-identity.mjs'
+import { readBoundedFileSync, readBoundedJsonFileSync } from './lib/bounded-files.mjs'
 
-function usage() {
-  console.error(`Usage:
+const MAX_RECONSTRUCTION_MANIFEST_BYTES = 1024 * 1024
+const MAX_RECONSTRUCTION_SIDECARS_BYTES = 16 * 1024 * 1024
+
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm blob:reconstruct -- --manifest <manifest.json> --sidecars <sidecars.json> [--out <file.webm>]
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
+if (helpRequested()) usage(0)
 const manifestPath = readArg('manifest')
 const sidecarsPath = readArg('sidecars')
 if (!manifestPath || !sidecarsPath) usage()
 
-const manifest = JSON.parse(fs.readFileSync(path.resolve(manifestPath), 'utf8'))
-const sidecars = JSON.parse(fs.readFileSync(path.resolve(sidecarsPath), 'utf8'))
+const resolvedManifestPath = path.resolve(manifestPath)
+const resolvedSidecarsPath = path.resolve(sidecarsPath)
+const manifest = readBoundedJsonFileSync(resolvedManifestPath, {
+  maxBytes: MAX_RECONSTRUCTION_MANIFEST_BYTES,
+  label: `reconstruction manifest ${resolvedManifestPath}`,
+})
+const sidecars = readBoundedJsonFileSync(resolvedSidecarsPath, {
+  maxBytes: MAX_RECONSTRUCTION_SIDECARS_BYTES,
+  label: `reconstruction sidecars ${resolvedSidecarsPath}`,
+})
 
 function assertBytes32Hex(value, label) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(String(value || ''))) throw new Error(`Invalid ${label}: ${value}`)
@@ -103,6 +119,9 @@ for (const blob of blobs) {
   }
 }
 
+if (decodedLength < payloadBytes) {
+  throw new Error(`Decoded blob payload is truncated: expected ${payloadBytes} bytes, found ${decodedLength}`)
+}
 const payload = Buffer.concat(chunks, decodedLength).subarray(0, payloadBytes)
 const sha256 = crypto.createHash('sha256').update(payload).digest('hex')
 
@@ -110,14 +129,35 @@ if (sha256 !== manifest.payloadSha256) {
   throw new Error(`SHA-256 mismatch: expected ${manifest.payloadSha256}, got ${sha256}`)
 }
 
+const reconstructionIdentity = scopedStreamFilesystemIdentity({
+  chain: manifest.chain,
+  station: manifest.stationAddress || manifest.station,
+  publisher: manifest.publisher,
+  streamId: manifest.streamId,
+})
 const out = path.resolve(
   readArg(
     'out',
-    `work/blob-radio-testnet/reconstructed/${manifest.streamId.replace(/[^a-zA-Z0-9_.-]/g, '_')}-${sequence}.webm`,
+    `work/blob-radio-testnet/reconstructed/${reconstructionIdentity.key}-${sequence}-${manifest.payloadSha256}.webm`,
   ),
 )
 fs.mkdirSync(path.dirname(out), { recursive: true })
-fs.writeFileSync(out, payload)
+if (fs.existsSync(out)) {
+  let existing
+  try {
+    existing = readBoundedFileSync(out, {
+      maxBytes: Math.max(payloadBytes, 1),
+      label: `existing reconstructed output ${out}`,
+    })
+  } catch (error) {
+    throw new Error(`Refusing to reuse reconstructed output with mismatched SHA-256: ${out}`, { cause: error })
+  }
+  const existingHash = crypto.createHash('sha256').update(existing).digest('hex')
+  if (existingHash !== sha256) throw new Error(`Refusing to reuse reconstructed output with mismatched SHA-256: ${out}`)
+  console.log(`verified existing output: ${out}`)
+} else {
+  fs.writeFileSync(out, payload)
+}
 
 console.log(`decoded bytes: ${decodedLength}`)
 console.log(`payload bytes: ${payload.length}`)

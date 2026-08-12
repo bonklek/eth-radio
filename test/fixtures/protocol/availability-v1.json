@@ -1,0 +1,50 @@
+{
+  "profile": {
+    "protocol": "rfe",
+    "schema": "network-availability-profile",
+    "version": 1,
+    "network": "sepolia",
+    "chainId": "11155111",
+    "secondsPerSlot": "12",
+    "slotsPerEpoch": "32",
+    "minimumBlobServeEpochs": "4096",
+    "safetyMarginSlots": "1024",
+    "source": {
+      "specification": "https://ethereum.github.io/consensus-specs/deneb/p2p-interface/",
+      "parameter": "MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS",
+      "observedAt": "2026-07-10"
+    }
+  },
+  "cases": [
+    {
+      "name": "exact required boundary",
+      "inclusionSlot": "1000000",
+      "estimatedSeasonEndSlot": "1130048",
+      "observationSlot": "1131071",
+      "expected": {
+        "eligible": true,
+        "theoreticalStatus": "inside-minimum-serving-window",
+        "minimumAvailableUntilSlot": "1131072",
+        "requiredUntilSlot": "1131072",
+        "marginSlots": "0",
+        "shortfallSlots": "0",
+        "remainingMinimumServingSlots": "1"
+      }
+    },
+    {
+      "name": "one-slot shortfall at serving boundary",
+      "inclusionSlot": "1000000",
+      "estimatedSeasonEndSlot": "1130049",
+      "observationSlot": "1131072",
+      "expected": {
+        "eligible": false,
+        "theoreticalStatus": "outside-minimum-serving-window",
+        "minimumAvailableUntilSlot": "1131072",
+        "requiredUntilSlot": "1131073",
+        "marginSlots": "0",
+        "shortfallSlots": "1",
+        "remainingMinimumServingSlots": "0"
+      }
+    }
+  ]
+}

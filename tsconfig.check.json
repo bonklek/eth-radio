@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "include": [
+    "packages/economics/**/*.mjs",
+    "packages/protocol/**/*.js",
+    "packages/protocol/**/*.mjs",
+    "packages/economics/**/*.mjs",
+    "public/decentralized/static-client-core.js",
+    "public/decentralized/static-client-io.js",
+    "scripts/*.mjs",
+    "scripts/lib/**/*.mjs"
+  ],
+  "exclude": [
+    "scripts/test-*.mjs"
+  ]
+}

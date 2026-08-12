@@ -92,6 +92,33 @@ function assertMissingValueGuard({ label, script }) {
   }
 }
 
+function assertSparseOversizedPayloadRejectedBeforeRead({ label, script }) {
+  const dir = path.join(tempRoot, `${label}-sparse-oversized`)
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'stream-000005.webm')
+  fs.writeFileSync(file, 'x')
+  fs.truncateSync(file, 64 * 1024 * 1024)
+  const result = runNode([
+    script,
+    '--dir',
+    dir,
+    '--stream-id',
+    'stream',
+    '--start-seq',
+    '5',
+    '--max-bytes',
+    '32',
+    '--poll-ms',
+    '1',
+    '--once',
+    '--dry-run',
+  ])
+  if (result.status === 0) throw new Error(`${label} accepted an oversized sparse segment\n${result.output}`)
+  if (!result.output.includes('segment 5 payload exceeds 32 bytes')) {
+    throw new Error(`${label} did not reject the sparse payload through its bounded descriptor reader\n${result.output}`)
+  }
+}
+
 function assertManifestPathGuard({ label, script }) {
   const dir = path.join(tempRoot, `${label}-manifest-path`)
   writeSparseSegment(dir)
@@ -134,13 +161,17 @@ function assertManifestPathGuard({ label, script }) {
 
 function assertManifestShapeGuards({ label, script }) {
   const source = fs.readFileSync(path.join(root, script), 'utf8')
+  const helperSource = fs.readFileSync(path.join(root, 'scripts/lib/segment-input.mjs'), 'utf8')
+  if (!source.includes("from './lib/segment-input.mjs'")) {
+    throw new Error(`${label} does not use the authoritative segment input helper`)
+  }
   for (const marker of [
-    'function manifestNonNegativeInteger(value, label)',
-    'function manifestSegmentSequence(entry, index, manifestPath)',
-    'function manifestSegmentBytes(segment, sequence)',
+    'export function manifestNonNegativeInteger(value, label)',
+    'export function manifestSegmentSequence(entry, index, manifestPath)',
+    'export function manifestSegmentBytes(segment, sequence)',
     '.find((entry, index) => manifestSegmentSequence(entry, index, manifestPath) === sequence)',
   ]) {
-    if (!source.includes(marker)) {
+    if (!helperSource.includes(marker)) {
       throw new Error(`${label} missing strict manifest segment guard marker: ${marker}`)
     }
   }
@@ -149,7 +180,7 @@ function assertManifestShapeGuards({ label, script }) {
     'const bytes = Number(segment.bytes)',
     'has invalid bytes',
   ]) {
-    if (source.includes(fallback)) {
+    if (source.includes(fallback) || helperSource.includes(fallback)) {
       throw new Error(`${label} reintroduced permissive manifest segment fallback: ${fallback}`)
     }
   }
@@ -404,11 +435,8 @@ function assertPipelinedRecoveredQueueGuard() {
     throw new Error('pipelined publisher reintroduced submitted queue fallback after state normalization')
   }
   for (const marker of [
-    'function normalizeBlobVersionedHashes(value, label, { optional = false } = {})',
-    'function stationEventSequenceMatches(eventSequence, expectedSequence)',
+    "from './lib/publisher-manifest.mjs'",
     'stationEventSequenceMatches(log.args.sequence, item.sequence)',
-    'function manifestBlobVersionedHashes(transaction, stationEvent)',
-    "normalizeBlobVersionedHashes(stationEvent.args.blobVersionedHashes, 'Station event blobVersionedHashes')",
     'blobVersionedHashes: manifestBlobVersionedHashes(transaction, stationEvent)',
   ]) {
     if (!pipelinedSource.includes(marker)) {
@@ -518,12 +546,8 @@ function assertPipelinedRecoveredQueueGuard() {
 function assertBlobPublisherCliGuards() {
   const source = fs.readFileSync(path.join(root, 'scripts', 'publish-blob-chunk.mjs'), 'utf8')
   for (const marker of [
-    'function normalizeBlobVersionedHashes(value, label, { optional = false } = {})',
-    'function stationEventSequenceMatches(eventSequence, expectedSequence)',
+    "from './lib/publisher-manifest.mjs'",
     'stationEventSequenceMatches(log.args.sequence, sequence)',
-    'function manifestBlobVersionedHashes(transaction, stationEvent)',
-    "normalizeBlobVersionedHashes(transaction.blobVersionedHashes, 'transaction blobVersionedHashes')",
-    "normalizeBlobVersionedHashes(stationEvent.args.blobVersionedHashes, 'Station event blobVersionedHashes')",
     'blobVersionedHashes: manifestBlobVersionedHashes(transaction, stationEvent)',
   ]) {
     if (!source.includes(marker)) {
@@ -673,6 +697,14 @@ try {
     script: 'scripts/publish-live-segments.mjs',
   })
   assertMissingValueGuard({
+    label: 'pipelined',
+    script: 'scripts/publish-live-segments-pipelined.mjs',
+  })
+  assertSparseOversizedPayloadRejectedBeforeRead({
+    label: 'serial',
+    script: 'scripts/publish-live-segments.mjs',
+  })
+  assertSparseOversizedPayloadRejectedBeforeRead({
     label: 'pipelined',
     script: 'scripts/publish-live-segments-pipelined.mjs',
   })

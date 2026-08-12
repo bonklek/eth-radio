@@ -2,7 +2,11 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { stationDeploymentPath } from './lib/station-deployment.mjs'
+import {
+  loadStationDeployment,
+  MAX_STATION_DEPLOYMENT_BYTES,
+  stationDeploymentPath,
+} from './lib/station-deployment.mjs'
 
 const root = process.cwd()
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'eth-radio-utility-cli-'))
@@ -70,6 +74,8 @@ function assertFetchSidecarBeaconResponseGuards() {
     "nonEmptyBlobVersionedHashes(tx.blobVersionedHashes, 'transaction blobVersionedHashes')",
     "throw new Error('Missing transaction blobVersionedHashes; provide a manifest with blobVersionedHashes')",
     "beaconDataArray(sidecars, 'blob sidecars')",
+    'fetchBoundedJson(`${beaconUrl}${pathname}`',
+    'data.length > MAX_BEACON_SIDECARS',
     'const wanted = new Set(transactionBlobVersionedHashes(tx, manifest))',
   ]) {
     if (!source.includes(marker)) {
@@ -105,6 +111,10 @@ function assertBlobSlotMetricsBeaconResponseGuards() {
     'assertBytes48Hex(commitment, \'sidecar KZG commitment\')',
     "index: sidecarIndex(sidecar.index, 'sidecar index')",
     "sidecars = beaconDataArray(result, 'blob sidecars')",
+    'max: MAX_METRIC_SLOTS',
+    'rangeFrom += STATION_LOG_RANGE_BLOCKS',
+    'logs.length + rangeLogs.length > MAX_STATION_LOGS',
+    'fetchBoundedJson(`${beaconUrl}${pathname}`',
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`blob-slot-metrics missing beacon response guard marker: ${marker}`)
@@ -206,22 +216,36 @@ assertOverlayPngGuards()
 
 function assertMonitorLatencySegmentGuards() {
   const source = fs.readFileSync(path.join(root, 'scripts', 'monitor-stream-latency.mjs'), 'utf8')
+  const latencySource = fs.readFileSync(path.join(root, 'scripts', 'lib', 'latency-metrics.mjs'), 'utf8')
   for (const marker of [
     'function nonNegativeSafeNumber(value, label)',
-    'function blockTimestampMs(value, label)',
     'function segmentBlobVersionedHashes(value, label)',
-    'function monitorSegment(log, latestBlock, latestBlockMs)',
+    'function monitorSegment(log, eventBlockTimestamps)',
     "const latestBlockMs = blockTimestampMs(latestBlock.timestamp, 'latest block timestamp')",
     "if (typeof args.streamId !== 'string') throw new Error('SegmentPublished streamId must be a string')",
     'streamId: args.streamId',
     "nonNegativeSafeNumber(args.sequence, 'SegmentPublished sequence')",
     "nonNegativeSafeNumber(args.payloadBytes, 'SegmentPublished payloadBytes')",
     "segmentBlobVersionedHashes(args.blobVersionedHashes, 'SegmentPublished blobVersionedHashes').length",
-    '.map((log) => monitorSegment(log, latestBlock, latestBlockMs))',
+    'await hydrateEventBlockTimestamps(client, parsed, eventBlockTimestamps)',
+    'pruneEventBlockTimestamps(eventBlockTimestamps, parsed)',
+    '.map((log) => monitorSegment(log, eventBlockTimestamps))',
     '.filter((segment) => segment.streamId === streamId)',
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`monitor-stream-latency missing segment guard marker: ${marker}`)
+    }
+  }
+  for (const marker of [
+    'export function blockTimestampMs(value',
+    'export async function hydrateEventBlockTimestamps(client, logs, cache = new Map(), { concurrency = 8 } = {})',
+    'export function pruneEventBlockTimestamps(cache, logs)',
+    'Math.min(concurrency, queue.length)',
+    'export function latencySegmentStats(segments, segmentMs)',
+    'const block = await client.getBlock({ blockNumber })',
+  ]) {
+    if (!latencySource.includes(marker)) {
+      throw new Error(`latency metrics helper missing actual block timestamp marker: ${marker}`)
     }
   }
   for (const fallback of [
@@ -248,6 +272,18 @@ try {
   if (!error.message.includes('Invalid Station deployment chain name')) throw error
 }
 
+const oversizedDeploymentPath = stationDeploymentPath('sepolia', tempRoot)
+fs.mkdirSync(path.dirname(oversizedDeploymentPath), { recursive: true })
+fs.writeFileSync(oversizedDeploymentPath, '{}')
+fs.truncateSync(oversizedDeploymentPath, MAX_STATION_DEPLOYMENT_BYTES + 1)
+const deploymentWarnings = []
+if (loadStationDeployment('sepolia', { root: tempRoot, warn: (message) => deploymentWarnings.push(message) }) !== null) {
+  throw new Error('oversized sparse Station deployment metadata was accepted')
+}
+if (!deploymentWarnings.some((message) => message.includes(`exceeds ${MAX_STATION_DEPLOYMENT_BYTES} bytes`))) {
+  throw new Error(`oversized Station deployment warning did not identify the descriptor bound: ${deploymentWarnings.join('\n')}`)
+}
+
 assertFails({
   label: 'reconstruct missing manifest',
   args: ['scripts/reconstruct-blob-media.mjs', '--manifest', '--sidecars', 'sidecars.json'],
@@ -266,6 +302,29 @@ assertFails({
   label: 'monitor malformed publish state',
   args: ['scripts/monitor-live-stream.mjs', '--state', malformedMonitorState],
   expected: 'Unreadable publish state',
+})
+
+const oversizedDirectPublish = path.join(tempRoot, 'oversized-direct-publish.webm')
+fs.writeFileSync(oversizedDirectPublish, '')
+fs.truncateSync(oversizedDirectPublish, 6 * 126_976 + 1)
+assertFails({
+  label: 'direct publisher oversized sparse payload',
+  args: ['scripts/publish-blob-chunk.mjs', '--input', oversizedDirectPublish],
+  expected: `exceeds ${6 * 126_976} bytes`,
+  env: {
+    ETH_RPC_URL: 'http://127.0.0.1:1',
+    PRIVATE_KEY: `0x${'01'.repeat(32)}`,
+    CHAIN: 'sepolia',
+  },
+})
+
+const oversizedMonitorState = path.join(tempRoot, 'oversized-publish-state.json')
+fs.writeFileSync(oversizedMonitorState, '{}')
+fs.truncateSync(oversizedMonitorState, 32 * 1024 * 1024 + 1)
+assertFails({
+  label: 'monitor oversized sparse publish state',
+  args: ['scripts/monitor-live-stream.mjs', '--state', oversizedMonitorState],
+  expected: 'publisher state exceeds 33554432 bytes',
 })
 
 const invalidMonitorState = path.join(tempRoot, 'invalid-publish-state.json')
@@ -296,12 +355,13 @@ assertFails({
 })
 
 const monitorSource = fs.readFileSync(path.join(root, 'scripts', 'monitor-live-stream.mjs'), 'utf8')
-if (!monitorSource.includes('const published = state.published === undefined ? [] : state.published')
-  || monitorSource.includes('published: state.published || []')) {
-  throw new Error('monitor should normalize published history without permissive fallback')
+const publisherStateSource = fs.readFileSync(path.join(root, 'scripts', 'lib', 'publisher-state.mjs'), 'utf8')
+if (!monitorSource.includes('readPublisherStateSnapshot(filePath')
+  || !publisherStateSource.includes('export function readPublisherStateSnapshot(statePath')
+  || monitorSource.includes("JSON.parse(fs.readFileSync(filePath, 'utf8'))")) {
+  throw new Error('monitor should use the authoritative bounded publisher-state snapshot reader')
 }
 if (!monitorSource.includes('function nonNegativeInteger(value, label)')
-  || !monitorSource.includes("nonNegativeInteger(item.sequence, `published[${index}].sequence`)")
   || monitorSource.includes('const sequence = Number(segment?.sequence)')
   || monitorSource.includes('Number(latestGenerated.sequence) - Number(latest.sequence)')) {
   throw new Error('monitor should strictly validate generated and published sequences before lag math')
@@ -311,6 +371,7 @@ const monitorState = path.join(tempRoot, 'publish-state.json')
 const monitorManifest = path.join(tempRoot, 'generated.segments.json')
 fs.writeFileSync(monitorState, `${JSON.stringify({
   nextSequence: 1,
+  historyAnchor: { publishedCount: 5 },
   published: [{
     sequence: 0,
     txHash: `0x${'1'.repeat(64)}`,
@@ -321,6 +382,19 @@ fs.writeFileSync(monitorState, `${JSON.stringify({
   }],
 })}\n`)
 fs.writeFileSync(monitorManifest, '{ bad json')
+assertSucceeds({
+  label: 'monitor includes compacted confirmations in published count',
+  args: [
+    'scripts/monitor-live-stream.mjs',
+    '--state',
+    monitorState,
+    '--manifest',
+    monitorManifest,
+    '--stale-ms',
+    '999999999',
+  ],
+  expected: '"publishedCount": 6',
+})
 assertSucceeds({
   label: 'monitor ignores malformed optional manifest',
   args: [
@@ -403,7 +477,7 @@ withTemporaryFile(sepoliaDeployment, '{ bad json', () => {
   assertFails({
     label: 'latency ignores malformed deployment metadata',
     args: ['scripts/monitor-stream-latency.mjs', '--rpc-url', 'http://127.0.0.1:1', '--max-loops', '1'],
-    expected: 'Missing chain, rpc url, station address, or Station ABI',
+    expected: 'Missing rpc url or station address',
     env: {
       CHAIN: 'sepolia',
     },
@@ -509,6 +583,31 @@ assertFails({
   },
 })
 
+assertFails({
+  label: 'blob slot metrics excessive slots',
+  args: ['scripts/blob-slot-metrics.mjs', '--slots', '65'],
+  expected: 'Invalid --slots: 65; expected <= 64',
+  env: {
+    ETH_RPC_URL: 'http://127.0.0.1:1',
+    BEACON_RPC_URL: 'http://127.0.0.1:1',
+    CHAIN: 'sepolia',
+  },
+})
+
+const oversizedFetchManifest = path.join(tempRoot, 'oversized-fetch-manifest.json')
+fs.writeFileSync(oversizedFetchManifest, '{}')
+fs.truncateSync(oversizedFetchManifest, 1024 * 1024 + 1)
+assertFails({
+  label: 'fetch sidecars oversized sparse manifest',
+  args: ['scripts/fetch-blob-sidecars.mjs', '--manifest', oversizedFetchManifest],
+  expected: 'exceeds 1048576 bytes',
+  env: {
+    ETH_RPC_URL: 'http://127.0.0.1:1',
+    BEACON_RPC_URL: 'http://127.0.0.1:1',
+    CHAIN: 'sepolia',
+  },
+})
+
 const invalidReconstructManifest = path.join(tempRoot, 'invalid-reconstruct-manifest.json')
 const sidecarsPath = path.join(tempRoot, 'sidecars.json')
 fs.writeFileSync(invalidReconstructManifest, `${JSON.stringify({
@@ -520,6 +619,14 @@ fs.writeFileSync(invalidReconstructManifest, `${JSON.stringify({
   blobVersionedHashes: [],
 })}\n`)
 fs.writeFileSync(sidecarsPath, '{"matches":[]}\n')
+const oversizedReconstructManifest = path.join(tempRoot, 'oversized-reconstruct-manifest.json')
+fs.writeFileSync(oversizedReconstructManifest, '{}')
+fs.truncateSync(oversizedReconstructManifest, 1024 * 1024 + 1)
+assertFails({
+  label: 'reconstruct oversized sparse manifest',
+  args: ['scripts/reconstruct-blob-media.mjs', '--manifest', oversizedReconstructManifest, '--sidecars', sidecarsPath],
+  expected: 'exceeds 1048576 bytes',
+})
 const arrayReconstructManifest = path.join(tempRoot, 'array-reconstruct-manifest.json')
 fs.writeFileSync(arrayReconstructManifest, '[]\n')
 assertFails({
@@ -557,6 +664,14 @@ fs.writeFileSync(validReconstructManifest, `${JSON.stringify({
   blobCount: 1,
   blobVersionedHashes: [`0x${'1'.repeat(64)}`],
 })}\n`)
+const oversizedReconstructSidecars = path.join(tempRoot, 'oversized-reconstruct-sidecars.json')
+fs.writeFileSync(oversizedReconstructSidecars, '{}')
+fs.truncateSync(oversizedReconstructSidecars, 16 * 1024 * 1024 + 1)
+assertFails({
+  label: 'reconstruct oversized sparse sidecars',
+  args: ['scripts/reconstruct-blob-media.mjs', '--manifest', validReconstructManifest, '--sidecars', oversizedReconstructSidecars],
+  expected: 'exceeds 16777216 bytes',
+})
 const invalidSidecarShape = path.join(tempRoot, 'invalid-sidecar-shape.json')
 fs.writeFileSync(invalidSidecarShape, '{"matches":{}}\n')
 assertFails({
@@ -576,6 +691,28 @@ assertFails({
   label: 'reconstruct invalid sidecar blob',
   args: ['scripts/reconstruct-blob-media.mjs', '--manifest', validReconstructManifest, '--sidecars', invalidSidecarBlob],
   expected: 'Invalid sidecar match 0 blob',
+})
+
+const truncatedReconstructManifest = path.join(tempRoot, 'truncated-reconstruct-manifest.json')
+const truncatedSidecarPayload = path.join(tempRoot, 'truncated-sidecar-payload.json')
+fs.writeFileSync(truncatedReconstructManifest, `${JSON.stringify({
+  streamId: 'stream',
+  sequence: 1,
+  payloadBytes: 1,
+  payloadSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  blobCount: 1,
+  blobVersionedHashes: [`0x${'2'.repeat(64)}`],
+})}\n`)
+fs.writeFileSync(truncatedSidecarPayload, `${JSON.stringify({
+  matches: [{
+    versionedHash: `0x${'2'.repeat(64)}`,
+    blob: '0x00',
+  }],
+})}\n`)
+assertFails({
+  label: 'reconstruct truncated decoded payload',
+  args: ['scripts/reconstruct-blob-media.mjs', '--manifest', truncatedReconstructManifest, '--sidecars', truncatedSidecarPayload],
+  expected: 'Decoded blob payload is truncated: expected 1 bytes, found 0',
 })
 
 assertFails({

@@ -1,4 +1,43 @@
 import fs from 'node:fs'
+import { readBoundedJsonFileSync } from './bounded-files.mjs'
+
+export const MAX_SEGMENT_MANIFEST_BYTES = 8 * 1024 * 1024
+export const MAX_SEGMENT_MANIFEST_ENTRIES = 10_000
+
+export function readBoundedSegmentManifest(manifestPath) {
+  try {
+    return readBoundedJsonFileSync(manifestPath, {
+      maxBytes: MAX_SEGMENT_MANIFEST_BYTES,
+      label: `manifest ${manifestPath}`,
+    })
+  } catch (error) {
+    if (error.cause instanceof SyntaxError) throw error.cause
+    throw error
+  }
+}
+
+export function segmentManifestEntries(manifest, manifestPath) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error(`Manifest ${manifestPath} must be a JSON object`)
+  }
+  if (!Array.isArray(manifest.segments)) {
+    throw new Error(`Manifest ${manifestPath} segments must be an array`)
+  }
+  if (manifest.segments.length > MAX_SEGMENT_MANIFEST_ENTRIES) {
+    throw new Error(`Manifest ${manifestPath} exceeds ${MAX_SEGMENT_MANIFEST_ENTRIES} segment entries`)
+  }
+  assertUniqueSegmentSequences(manifest.segments, `Manifest ${manifestPath}`)
+  return manifest.segments
+}
+
+export function serializeSegmentManifest(manifest, manifestPath) {
+  segmentManifestEntries(manifest, manifestPath)
+  const serialized = `${JSON.stringify(manifest, null, 2)}\n`
+  if (Buffer.byteLength(serialized) > MAX_SEGMENT_MANIFEST_BYTES) {
+    throw new Error(`Manifest ${manifestPath} exceeds ${MAX_SEGMENT_MANIFEST_BYTES} bytes`)
+  }
+  return serialized
+}
 
 export function segmentSequence(value, label) {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
@@ -19,21 +58,57 @@ function normalizeSegment(segment, index) {
   }
 }
 
-export function upsertSegment(segments, entry) {
-  const normalizedEntry = normalizeSegment(entry, 'new segment')
-  return [
-    ...segments.filter((segment, index) => normalizeSegment(segment, index).sequence !== normalizedEntry.sequence),
-    normalizedEntry,
-  ].sort((a, b) => a.sequence - b.sequence)
+function assertUniqueSegmentSequences(segments, label) {
+  const sequences = new Set()
+  for (const [index, segment] of segments.entries()) {
+    const normalized = normalizeSegment(segment, index)
+    if (sequences.has(normalized.sequence)) {
+      throw new Error(`${label} contains duplicate segment sequence ${normalized.sequence}`)
+    }
+    sequences.add(normalized.sequence)
+  }
 }
 
-export function readExistingSegmentManifest(manifestPath, { streamId, filePrefix }) {
+export function upsertSegment(segments, entry) {
+  assertUniqueSegmentSequences(segments, 'Segment manifest')
+  const normalizedEntry = normalizeSegment(entry, 'new segment')
+  let replaced = false
+  const next = segments.map((segment, index) => {
+    const normalized = normalizeSegment(segment, index)
+    if (normalized.sequence !== normalizedEntry.sequence) return normalized
+    replaced = true
+    return normalizedEntry
+  })
+  if (!replaced) {
+    if (next.length >= MAX_SEGMENT_MANIFEST_ENTRIES) {
+      throw new Error(`Segment manifest exceeds ${MAX_SEGMENT_MANIFEST_ENTRIES} segment entries`)
+    }
+    next.push(normalizedEntry)
+  }
+  return next.sort((a, b) => a.sequence - b.sequence)
+}
+
+function invariantValue(value) {
+  if (typeof value === 'string') return JSON.stringify(value)
+  return JSON.stringify(value) ?? String(value)
+}
+
+export function assertLiveSegmentManifestInvariants(manifest, manifestPath, invariants = {}) {
+  for (const [name, expected] of Object.entries(invariants)) {
+    if (Object.is(manifest[name], expected)) continue
+    throw new Error(
+      `Invalid live segment manifest ${manifestPath}: ${name} ${invariantValue(manifest[name])} does not match requested ${invariantValue(expected)}; use --reset or a new stream id`,
+    )
+  }
+}
+
+export function readExistingSegmentManifest(manifestPath, { streamId, filePrefix, invariants = {} }) {
   if (!fs.existsSync(manifestPath)) return null
   let manifest
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    manifest = readBoundedSegmentManifest(manifestPath)
   } catch (error) {
-    throw new Error(`Unreadable live segment manifest ${manifestPath}: ${error.message}`)
+    throw new Error(`Unreadable live segment manifest ${manifestPath}: ${error.message}`, { cause: error })
   }
 
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
@@ -50,6 +125,11 @@ export function readExistingSegmentManifest(manifestPath, { streamId, filePrefix
   }
   const segments = manifest.segments === undefined
     ? []
-    : manifest.segments.map((segment, index) => normalizeSegment(segment, index))
+    : segmentManifestEntries(manifest, manifestPath)
+      .map((segment, index) => normalizeSegment(segment, index))
+  if (segments.length > MAX_SEGMENT_MANIFEST_ENTRIES) {
+    throw new Error(`Invalid live segment manifest ${manifestPath}: exceeds ${MAX_SEGMENT_MANIFEST_ENTRIES} segment entries`)
+  }
+  assertLiveSegmentManifestInvariants(manifest, manifestPath, invariants)
   return { ...manifest, segments }
 }

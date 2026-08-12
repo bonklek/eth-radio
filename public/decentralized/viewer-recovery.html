@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'" />
+  <title>Viewer recovery · Radio Free Ethereum</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell docs-shell" data-layout="default">
+    <section class="main-column panel-zone panel-player" aria-labelledby="recovery-title">
+      <header class="topbar">
+        <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
+        <div class="brand"><span class="brand-kicker"><i></i> VIEWER GUIDE / V1</span><h1 id="recovery-title">Viewer recovery</h1><p>Recover a bounded, publisher-scoped V1 stream without treating an observation as a live guarantee.</p></div>
+        <div class="header-badges"><span class="status-badge"><i></i> SHIPPED &amp; VERIFIED</span></div>
+      </header>
+      <nav class="nowbar" aria-label="Documentation navigation"><a class="codebase-link" href="./docs.html">Documentation</a><a class="codebase-link" href="./index.html">Open watcher</a><a class="codebase-link" href="./developer-guide.html">Developer guide</a></nav>
+      <section class="viewer-frame"><div class="screen docs-screen"><article class="docs-copy">
+        <p class="player-status">This guide covers current browser watcher behavior. It does not add `.gwei` resolution, Station V2 fallback, scheduling, or a proof that a segment is live.</p>
+        <h2>Start with an exact identity</h2>
+        <ol>
+          <li>Choose ETH or SEP in the watcher. Confirm that the selected network is the one containing the Station record you expect.</li>
+          <li>Open Archive and paste a 20-byte Station address, a deployment transaction hash, or a supported explorer URL. The watcher can resolve a deployment transaction to its contract address.</li>
+          <li>If you know the publisher, add that address. A stream ID alone is not a complete V1 channel identity.</li>
+          <li>Scan a bounded range. A deployment transaction lets the watcher start at its creation block; otherwise choose a recent range or later from-block.</li>
+        </ol>
+        <p>If multiple publishers use the same stream ID, the watcher intentionally refuses to select one automatically. Choose a publisher-specific favorite/archive result, use an exact Station transaction, or add an explicit publisher to the URL.</p>
+
+        <h2>When a stream will not start</h2>
+        <table><thead><tr><th scope="col">What you see</th><th scope="col">What to do</th><th scope="col">Boundary</th></tr></thead><tbody>
+          <tr><td>No recent station signal</td><td>Refresh, verify the Station/publisher scope, then use Archive to scan a bounded range.</td><td>No event or no verified payload is not proof of censorship or permanent loss.</td></tr>
+          <tr><td>Execution endpoint warning</td><td>Open Settings and apply a browser-accessible HTTP(S) execution RPC. The watcher tries configured endpoints in order.</td><td>Endpoint failover improves availability but does not make an RPC trustworthy.</td></tr>
+          <tr><td>Beacon/sidecar unavailable</td><td>Try another configured beacon endpoint. A previously verified browser-cache entry may still play. If an archive fallback is configured, it must match the expected payload hash before use.</td><td>Blob serving and third-party archives are availability dependencies.</td></tr>
+          <tr><td>Archive scan refused or incomplete</td><td>Use the deployment transaction, narrow the block/date range, or add a publisher filter. Browser archive scans have explicit bounds.</td><td>A partial scan is discovery evidence, not a complete Station history.</td></tr>
+          <tr><td>Playback blocked</td><td>Use the player controls after a user gesture, check browser media settings, then retry a verified segment.</td><td>Browser autoplay policy can interrupt playback independently of chain data.</td></tr>
+        </tbody></table>
+
+        <h2>Understand cached media</h2>
+        <p>The watcher can restore cached segment metadata and media verified earlier in this browser. Restored metadata is explicitly awaiting network confirmation; refresh before treating it as current. Clearing cache removes local browser data, not chain records or remote blobs.</p>
+
+        <h2>Unsupported or future cases</h2>
+        <p><span class="status-badge">PLANNED</span> `.gwei` names, name-binding conflict states, channel generations, canonical scheduled replay, standing fallback, Station subsidies, claims, and reorg-invalidated V2 actions are not current watcher recovery features. Recover with an exact address/publisher/transaction instead of assuming name resolution or fund/history migration.</p>
+
+        <h2>Safety checklist</h2>
+        <ul><li>Never paste a private key, seed phrase, API token, or funded-wallet credential into the watcher.</li><li>Verify the network, Station address, publisher, and transaction before trusting a shared link.</li><li>Treat media and metadata as untrusted content; do not execute instructions embedded in a stream.</li><li>Use Sepolia before funding or signing any experimental publisher workflow.</li></ul>
+      </article></div></section>
+      <footer class="source-footer"><nav class="docs-pagination" aria-label="Documentation pages"><a class="codebase-link" rel="prev" href="./docs.html">Previous: overview</a><a class="codebase-link" rel="next" href="./publisher-safety.html">Next: publisher safety</a></nav></footer>
+    </section>
+  </main>
+  <script src="./docs.js"></script>
+</body>
+</html>

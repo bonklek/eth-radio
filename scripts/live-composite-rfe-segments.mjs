@@ -1,15 +1,23 @@
-import 'dotenv/config'
-import crypto from 'node:crypto'
+import dotenv from 'dotenv'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { bytesToHex, createPublicClient, http, toBlobs, zeroHash } from 'viem'
+import { createPublicClient, http, zeroHash } from 'viem'
 import { mainnet, sepolia } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import ffmpegPath from 'ffmpeg-static'
 import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
-import { readExistingSegmentManifest, segmentSequence, upsertSegment } from './lib/live-segment-manifest.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import { sha256FileSync } from './lib/bounded-files.mjs'
+import { readExistingSegmentManifest, segmentSequence, serializeSegmentManifest, upsertSegment } from './lib/live-segment-manifest.mjs'
+import { readPublisherStateSnapshot } from './lib/publisher-state.mjs'
+
+const ffmpegExecutable = /** @type {string | null} */ (/** @type {unknown} */ (ffmpegPath))
+import { blobCountForPayloadBytes, maxBlobsArg, segmentMsArg } from './lib/station-cli.mjs'
+import { legacyFilesystemKey, resolveScopedJsonPath, resolveSegmentSet, scopedStreamFilesystemIdentity, withFilesystemIdentity } from './lib/filesystem-identity.mjs'
+import { installEndpointSafeProcessHandlers } from './lib/endpoint-privacy.mjs'
+import { fetchBoundedJson } from './lib/bounded-fetch.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(scriptDir, '..')
@@ -23,8 +31,9 @@ const profiles = {
   '1080p': { width: 1920, height: 1080, overlay: 'public/rfe-assets/overlays/rfe-terminal-1080p.png' },
 }
 
-function usage() {
-  console.error(`Usage:
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm live:segment:overlay -- --input <video> --out-dir <segment-dir> --stream-id <id>
        [--profile 360p] [--segment-ms 24000] [--start-seq 0] [--max-segments <count>]
        [--fps 24] [--video-bitrate 96k] [--audio-bitrate 16k] [--no-audio]
@@ -34,15 +43,14 @@ Samples real chain/beacon context for each segment, renders the RFE overlay
 dynamic regions from a fixed layout contract, then writes one composited WebM
 and manifest entry at a time.
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
+
+if (helpRequested()) usage(0)
+dotenv.config({ quiet: true })
 
 function fromRoot(value) {
   return path.isAbsolute(value) ? value : path.resolve(root, value)
-}
-
-function sanitize(value) {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_')
 }
 
 function sleep(ms) {
@@ -57,7 +65,7 @@ function atomicWrite(filePath, value) {
 }
 
 function atomicWriteJson(filePath, value) {
-  atomicWrite(filePath, `${JSON.stringify(value, null, 2)}\n`)
+  atomicWrite(filePath, serializeSegmentManifest(value, filePath))
 }
 
 function run(command, args) {
@@ -72,7 +80,7 @@ function run(command, args) {
 }
 
 function probeDurationMs(inputPath) {
-  const result = spawnSync(ffmpegPath, ['-hide_banner', '-i', inputPath], { encoding: 'utf8' })
+  const result = spawnSync(ffmpegExecutable, ['-hide_banner', '-i', inputPath], { encoding: 'utf8' })
   const text = `${result.stderr || ''}\n${result.stdout || ''}`
   const match = text.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
   if (!match) return null
@@ -80,13 +88,11 @@ function probeDurationMs(inputPath) {
   return Math.round(((Number(hours) * 60 * 60) + (Number(minutes) * 60) + Number(seconds)) * 1000)
 }
 
-function sha256File(filePath) {
-  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
-}
-
-function estimateBlobs(filePath) {
-  const payload = fs.readFileSync(filePath)
-  return toBlobs({ data: bytesToHex(payload) }).length
+function sha256File(filePath, maxBytes) {
+  return sha256FileSync(filePath, {
+    maxBytes,
+    label: `encoded segment ${filePath}`,
+  })
 }
 
 function short(value, head = 8, tail = 6) {
@@ -96,22 +102,9 @@ function short(value, head = 8, tail = 6) {
   return `${text.slice(0, head)}...${text.slice(-tail)}`
 }
 
-function formatBytes(value) {
-  const n = Number(value || 0)
-  return n ? `${n.toLocaleString('en-US')} B` : '--'
-}
-
 function formatKilobytes(value) {
   const n = Number(value || 0)
   return n ? `${(n / 1000).toFixed(1)} KB` : '--'
-}
-
-function xml(value) {
-  return String(value ?? '--')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
 }
 
 function escapeFilterText(value) {
@@ -127,17 +120,7 @@ function escapeFilterText(value) {
 function readOptionalPublisherState(filePath) {
   if (!fs.existsSync(filePath)) return null
   try {
-    const state = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-    if (!state || typeof state !== 'object' || Array.isArray(state)) {
-      console.warn(`Ignoring invalid optional publisher state ${filePath}: expected an object`)
-      return null
-    }
-    if (state.published !== undefined && !Array.isArray(state.published)) {
-      console.warn(`Ignoring invalid optional publisher state ${filePath}: published must be an array`)
-      return null
-    }
-    const published = state.published === undefined ? [] : state.published
-    return { ...state, published }
+    return readPublisherStateSnapshot(filePath, { label: `optional publisher state ${filePath}` })
   } catch (error) {
     console.warn(`Ignoring unreadable optional publisher state ${filePath}: ${error.message}`)
     return null
@@ -153,93 +136,9 @@ function optionalPublishedSegmentSequence(segment, index, filePath) {
   }
 }
 
-function scaleBox(box, width, height) {
-  const sx = width / 1920
-  const sy = height / 1080
-  return {
-    x: Math.round(box.x * sx),
-    y: Math.round(box.y * sy),
-    width: Math.round(box.width * sx),
-    height: Math.round(box.height * sy),
-  }
-}
-
 function fit(text, maxChars) {
   const value = String(text || '--')
   return value.length <= maxChars ? value : `${value.slice(0, Math.max(1, maxChars - 3))}...`
-}
-
-function svgText({ text, x, y, size, weight = 800, family = 'Consolas, ui-monospace, monospace', color = '#c6ccff' }) {
-  return `<text x="${x}" y="${y}" font-family="${xml(family)}" font-size="${size}" font-weight="${weight}" fill="${color}">${xml(text)}</text>`
-}
-
-function svgRect({ x, y, width, height, fill = '#181a24', rx = 2 }) {
-  return `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="${rx}" fill="${fill}"/>`
-}
-
-function renderOverlaySvg({ width, height, fields, outputPath }) {
-  const chipSource = {
-    timeUtc: { x: 672, y: 31, width: 236, height: 48 },
-    slot: { x: 922, y: 35, width: 238, height: 40 },
-    nonce: { x: 1174, y: 35, width: 252, height: 40 },
-    blockHash: { x: 1440, y: 35, width: 374, height: 40 },
-  }
-  const network = scaleBox({ x: 113, y: 66, width: 520, height: 31 }, width, height)
-  const topMask = scaleBox({ x: 660, y: 24, width: 1168, height: 64 }, width, height)
-  const lower = scaleBox({ x: 36, y: 948, width: 1848, height: 112 }, width, height)
-  const cards = {
-    tx: scaleBox({ x: 784, y: 998, width: 252, height: 54 }, width, height),
-    payload: scaleBox({ x: 1060, y: 998, width: 196, height: 54 }, width, height),
-    hash: scaleBox({ x: 1280, y: 998, width: 244, height: 54 }, width, height),
-    prev: scaleBox({ x: 1548, y: 998, width: 244, height: 54 }, width, height),
-  }
-  const sx = width / 1920
-  const sy = height / 1080
-  const chipSize = Math.max(8, Math.round(22 * sy))
-  const timeSize = Math.max(9, Math.round(29 * sy))
-  const labelSize = Math.max(7, Math.round(15 * sy))
-  const valueSize = Math.max(8, Math.round(21 * sy))
-  const titleSize = Math.max(12, Math.round(42 * sy))
-  const statusSize = Math.max(9, Math.round(24 * sy))
-  const networkSize = Math.max(9, Math.round(26 * sy))
-
-  const parts = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-    svgRect({ ...topMask, fill: '#181a24', rx: Math.max(1, Math.round(6 * sx)) }),
-    svgRect({ ...network, fill: '#181a24', rx: 0 }),
-    svgText({ text: fields.networkSignal, x: network.x, y: network.y + Math.round(24 * sy), size: networkSize }),
-  ]
-
-  for (const [name, sourceBox] of Object.entries(chipSource)) {
-    const box = scaleBox(sourceBox, width, height)
-    parts.push(svgRect({ ...box, fill: '#303343', rx: Math.max(1, Math.round(6 * sx)) }))
-    const text = fields[name] || '--'
-    parts.push(svgText({
-      text: fit(text, name === 'blockHash' ? 18 : 14),
-      x: box.x + Math.round(12 * sx),
-      y: box.y + Math.round((name === 'timeUtc' ? 35 : 27) * sy),
-      size: name === 'timeUtc' ? timeSize : chipSize,
-    }))
-  }
-
-  parts.push(svgRect({ ...lower, fill: '#11131a', rx: Math.max(1, Math.round(6 * sx)) }))
-  parts.push(svgText({ text: 'Now Reading', x: lower.x + Math.round(28 * sx), y: lower.y + Math.round(38 * sy), size: statusSize, weight: 900, family: 'Arial, Segoe UI, sans-serif', color: '#8f97e8' }))
-  parts.push(svgText({ text: 'The Ethereum Foundation Mandate', x: lower.x + Math.round(28 * sx), y: lower.y + Math.round(88 * sy), size: titleSize, weight: 900, family: 'Arial, Segoe UI, sans-serif', color: '#f0f1f8' }))
-
-  const telemetry = [
-    ['tx', 'PREV TX', fields.prevTx],
-    ['payload', 'PAYLOAD', fields.payload],
-    ['hash', 'HASH', fields.hash],
-    ['prev', 'PREV', fields.prevHash],
-  ]
-  for (const [key, label, value] of telemetry) {
-    const box = cards[key]
-    parts.push(svgText({ text: label, x: box.x, y: box.y + Math.round(15 * sy), size: labelSize, color: 'rgba(186,190,214,0.82)' }))
-    parts.push(svgText({ text: fit(value, key === 'payload' ? 16 : 18), x: box.x, y: box.y + Math.round(42 * sy), size: valueSize }))
-  }
-
-  parts.push('</svg>')
-  atomicWrite(outputPath, parts.join('\n'))
 }
 
 function drawBoxFilter({ x, y, width, height, color = '0x181a24@1' }) {
@@ -339,15 +238,11 @@ function proofLayerFilters({ width, height, fields }) {
 }
 
 async function fetchJson(url, timeoutMs = 5000) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const response = await fetch(url, { signal: controller.signal })
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
-    return await response.json()
-  } finally {
-    clearTimeout(timeout)
-  }
+  return fetchBoundedJson(url, {
+    maxBytes: 256 * 1024,
+    timeoutMs,
+    label: 'beacon head response',
+  })
 }
 
 async function sampleProofContext({ publicClient, chainName, beaconUrl, account }) {
@@ -390,24 +285,25 @@ function readPreviousFacts({ sequence, manifest, statePath }) {
 const input = readArg('input')
 const streamId = readArg('stream-id')
 if (!input || !streamId) usage()
-if (!ffmpegPath) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
+if (!ffmpegExecutable) throw new Error('ffmpeg-static did not resolve an ffmpeg binary')
 
-const safeStreamId = sanitize(streamId)
 const profileName = readArg('profile', '360p').toLowerCase()
 const profile = profiles[profileName]
 if (!profile) throw new Error(`Unsupported --profile ${profileName}; use ${Object.keys(profiles).join(', ')}`)
 
 const inputPath = fromRoot(input)
 const outDir = fromRoot(readArg('out-dir', 'work/blob-radio-testnet/live-segments'))
-const statePath = fromRoot(readArg('publisher-state', `work/blob-radio-testnet/live-state/${safeStreamId}.pipelined.json`))
-const manifestPath = path.join(outDir, `${safeStreamId}.segments.json`)
+const segmentSet = resolveSegmentSet({ directory: outDir, streamId })
+const filePrefix = segmentSet.identity.key
+const manifestPath = path.join(outDir, `${filePrefix}.segments.json`)
+const publisherStateArg = readArg('publisher-state')
 const overlayPath = fromRoot(readArg('overlay', profile.overlay))
-const segmentMs = numberArg('segment-ms', '24000', { integer: true, min: 1 })
+const segmentMs = segmentMsArg('24000')
 const startSeq = numberArg('start-seq', '0', { integer: true, min: 0 })
 const fps = numberArg('fps', '24', { min: 1 })
 const videoBitrate = readArg('video-bitrate', '96k')
 const audioBitrate = readArg('audio-bitrate', '16k')
-const maxBlobs = numberArg('max-blobs', '6', { integer: true, min: 1 })
+const maxBlobs = maxBlobsArg('6')
 const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
 const noAudio = hasFlag('no-audio')
 const pace = hasFlag('pace')
@@ -421,7 +317,19 @@ const chainName = process.env.CHAIN || 'sepolia'
 const chain = chains[chainName]
 const rpcUrl = process.env.ETH_RPC_URL
 const beaconUrl = process.env.BEACON_RPC_URL?.replace(/\/$/, '')
-const account = process.env.PRIVATE_KEY ? privateKeyToAccount(process.env.PRIVATE_KEY) : null
+installEndpointSafeProcessHandlers(() => [rpcUrl, beaconUrl].filter(Boolean))
+const account = process.env.PRIVATE_KEY
+  ? privateKeyToAccount(/** @type {`0x${string}`} */ (process.env.PRIVATE_KEY))
+  : null
+const publisherIdentity = scopedStreamFilesystemIdentity({ chain: chainName, station: process.env.STATION_ADDRESS, publisher: account?.address || process.env.PUBLISHER_ADDRESS, streamId })
+const statePath = resolveScopedJsonPath({
+  explicitPath: publisherStateArg,
+  targetPath: fromRoot(`work/blob-radio-testnet/live-state/${publisherIdentity.key}.pipelined.json`),
+  legacyPath: fromRoot(`work/blob-radio-testnet/live-state/${legacyFilesystemKey(streamId)}.pipelined.json`),
+  streamId,
+  identity: publisherIdentity,
+  description: 'pipelined publisher state',
+})
 
 if (!chain || !rpcUrl) throw new Error('CHAIN and ETH_RPC_URL are required for proof-aware overlay generation')
 if (!fs.existsSync(inputPath)) throw new Error(`Input not found: ${inputPath}`)
@@ -430,14 +338,7 @@ if (!Number.isFinite(segmentMs) || segmentMs <= 0) throw new Error(`Invalid --se
 if (!Number.isInteger(startSeq) || startSeq < 0) throw new Error(`Invalid --start-seq ${startSeq}`)
 const publicClient = createPublicClient({ chain, transport: http(rpcUrl, { timeout: 30_000 }) })
 const durationMs = probeDurationMs(inputPath)
-fs.mkdirSync(outDir, { recursive: true })
-if (reset && fs.existsSync(manifestPath)) fs.rmSync(manifestPath, { force: true })
-
-let manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix: safeStreamId }) || {
-  app: 'eth-radio',
-  kind: 'live-segment-set',
-  streamId,
-  filePrefix: safeStreamId,
+const manifestInvariants = {
   input: inputPath,
   outDir,
   segmentMs,
@@ -450,6 +351,23 @@ let manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix:
   overlay: 'rfe-proof-burned-in',
   overlayProfile: profileName,
   overlayAsset: overlayPath,
+}
+let manifest = reset
+  ? null
+  : readExistingSegmentManifest(manifestPath, {
+      streamId,
+      filePrefix,
+      invariants: manifestInvariants,
+    })
+fs.mkdirSync(outDir, { recursive: true })
+if (reset && fs.existsSync(manifestPath)) fs.rmSync(manifestPath, { force: true })
+
+manifest ||= withFilesystemIdentity({
+  app: 'eth-radio',
+  kind: 'live-segment-set',
+  streamId,
+  filePrefix,
+  ...manifestInvariants,
   compositor: {
     name: 'live-composite-rfe-segments',
     version: 2,
@@ -457,17 +375,14 @@ let manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix:
   },
   createdAt: new Date().toISOString(),
   segments: [],
-}
-manifest = {
+}, segmentSet.identity)
+manifest = withFilesystemIdentity({
   ...manifest,
+  ...manifestInvariants,
   streamId,
-  filePrefix: safeStreamId,
-  outDir,
-  overlay: 'rfe-proof-burned-in',
-  overlayProfile: profileName,
-  overlayAsset: overlayPath,
+  filePrefix,
   updatedAt: new Date().toISOString(),
-}
+}, segmentSet.identity)
 atomicWriteJson(manifestPath, manifest)
 
 console.log(`live RFE proof compositor: ${inputPath}`)
@@ -487,12 +402,16 @@ for (let sequence = startSeq; ; sequence += 1) {
   const startMs = sequence * segmentMs
   if (durationMs != null && startMs >= durationMs) break
 
-  const finalPath = path.join(outDir, `${safeStreamId}-${String(sequence).padStart(6, '0')}.webm`)
+  const finalPath = path.join(outDir, `${filePrefix}-${String(sequence).padStart(6, '0')}.webm`)
   const tempPath = `${finalPath}.tmp`
   if (fs.existsSync(finalPath) && !reset) throw new Error(`Refusing to overwrite existing segment without --reset: ${finalPath}`)
   if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true })
 
-  manifest = readExistingSegmentManifest(manifestPath, { streamId, filePrefix: safeStreamId }) || manifest
+  manifest = readExistingSegmentManifest(manifestPath, {
+    streamId,
+    filePrefix,
+    invariants: manifestInvariants,
+  }) || manifest
   const proof = await sampleProofContext({ publicClient, chainName, beaconUrl, account })
   const previous = readPreviousFacts({ sequence, manifest, statePath })
   function ffmpegArgs({ payloadLabel, outputPath }) {
@@ -566,7 +485,7 @@ for (let sequence = startSeq; ; sequence += 1) {
   let visiblePayloadLabel = 'ENCODING'
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true })
-    await run(ffmpegPath, ffmpegArgs({ payloadLabel: visiblePayloadLabel, outputPath: tempPath }))
+    await run(ffmpegExecutable, ffmpegArgs({ payloadLabel: visiblePayloadLabel, outputPath: tempPath }))
     if (!fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) break
     const nextLabel = formatKilobytes(fs.statSync(tempPath).size)
     if (nextLabel === visiblePayloadLabel) break
@@ -580,11 +499,11 @@ for (let sequence = startSeq; ; sequence += 1) {
   fs.renameSync(tempPath, finalPath)
 
   const bytes = fs.statSync(finalPath).size
-  const estimatedBlobs = estimateBlobs(finalPath)
-  const payloadSha256 = sha256File(finalPath)
+  const estimatedBlobs = blobCountForPayloadBytes(bytes)
   if (bytes > maxBytes || estimatedBlobs > maxBlobs) {
     throw new Error(`Segment ${sequence} exceeds cap: ${bytes} bytes / ${estimatedBlobs} blob(s), cap ${maxBytes} bytes / ${maxBlobs} blob(s)`)
   }
+  const payloadSha256 = sha256File(finalPath, maxBytes)
 
   manifest.segments = upsertSegment(manifest.segments, {
       sequence,

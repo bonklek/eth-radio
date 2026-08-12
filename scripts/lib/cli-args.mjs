@@ -25,7 +25,9 @@ export function numberArg(name, fallback, { integer = false, min = undefined, ma
   const value = readArg(name, fallback, argv)
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) throw new Error(`Invalid --${name}: ${value}`)
-  if (integer && !Number.isInteger(parsed)) throw new Error(`Invalid --${name}: ${value}; expected an integer`)
+  if (integer && !Number.isSafeInteger(parsed)) {
+    throw new Error(`Invalid --${name}: ${value}; expected an integer within JavaScript safe range`)
+  }
   if (min !== undefined && parsed < min) throw new Error(`Invalid --${name}: ${value}; expected >= ${min}`)
   if (max !== undefined && parsed > max) throw new Error(`Invalid --${name}: ${value}; expected <= ${max}`)
   return parsed

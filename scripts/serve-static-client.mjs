@@ -3,6 +3,21 @@ import http from 'node:http'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import {
+  HttpFileError,
+  openValidatedStaticFile,
+  sendHttpFileError,
+  serveOpenedFile,
+} from './lib/http-file-serving.mjs'
+
+if (helpRequested()) {
+  console.log(`Usage:
+  pnpm web:serve -- [--host 127.0.0.1] [--port 8080] [--source public|dist]
+                     [--dist] [--build]
+`)
+  process.exit(0)
+}
 
 const root = process.cwd()
 
@@ -50,17 +65,6 @@ function send(response, status, body, headers = {}) {
   response.end(body)
 }
 
-function isInsideStaticRoot(filePath) {
-  const rootWithSep = staticRoot.endsWith(path.sep) ? staticRoot : `${staticRoot}${path.sep}`
-  return filePath === staticRoot || filePath.startsWith(rootWithSep)
-}
-
-function canonicalStaticFile(filePath) {
-  if (!fs.existsSync(filePath)) return filePath
-  const realPath = fs.realpathSync(filePath)
-  return isInsideStaticRoot(realPath) ? realPath : null
-}
-
 function resolveRequest(url) {
   let pathname
   try {
@@ -73,10 +77,7 @@ function resolveRequest(url) {
   const resolved = path.resolve(staticDir, relative)
   const rootWithSep = staticDir.endsWith(path.sep) ? staticDir : `${staticDir}${path.sep}`
   if (resolved !== staticDir && !resolved.startsWith(rootWithSep)) return null
-  const filePath = fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()
-    ? path.join(resolved, 'index.html')
-    : resolved
-  return canonicalStaticFile(filePath)
+  return resolved
 }
 
 if (!fs.existsSync(path.join(staticDir, 'index.html'))) {
@@ -86,21 +87,42 @@ if (!fs.existsSync(path.join(staticDir, 'index.html'))) {
 }
 staticRoot = fs.realpathSync(staticDir)
 
-const server = http.createServer((request, response) => {
+async function openRequestFile(filePath) {
+  try {
+    return await openValidatedStaticFile(staticRoot, filePath)
+  } catch (error) {
+    if (!(error instanceof HttpFileError) || error.status !== 404) throw error
+    return openValidatedStaticFile(staticRoot, path.join(filePath, 'index.html'))
+  }
+}
+
+const server = http.createServer(async (request, response) => {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    send(response, 405, 'Method not allowed\n', {
+      allow: 'GET, HEAD',
+      'content-type': 'text/plain; charset=utf-8',
+    })
+    return
+  }
   const file = resolveRequest(request.url || '/')
   if (file === badRequest) {
     send(response, 400, 'Bad request\n', { 'content-type': 'text/plain; charset=utf-8' })
     return
   }
-  if (!file || !fs.existsSync(file)) {
+  if (!file) {
     send(response, 404, 'Not found\n', { 'content-type': 'text/plain; charset=utf-8' })
     return
   }
-
-  const ext = path.extname(file).toLowerCase()
-  send(response, 200, fs.readFileSync(file), {
-    'content-type': contentTypes.get(ext) || 'application/octet-stream',
-  })
+  try {
+    const opened = await openRequestFile(file)
+    const ext = path.extname(opened.canonicalPath).toLowerCase()
+    await serveOpenedFile(request, response, opened, {
+      contentType: contentTypes.get(ext) || 'application/octet-stream',
+      headers: defaultHeaders,
+    })
+  } catch (error) {
+    sendHttpFileError(response, error, defaultHeaders)
+  }
 })
 
 server.listen(port, host, () => {
