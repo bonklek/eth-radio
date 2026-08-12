@@ -91,7 +91,7 @@ if (!builder.includes("'static-client-media.js'")
 for (const documentMarker of [
   'Content-Security-Policy', 'id="player"', 'id="settings-panel-appearance"',
   'role="dialog" aria-modal="true"', 'id="segment-lookup"',
-  'https://github.com/bonklek/eth-radio', 'target="_blank" rel="noreferrer"',
+  'https://github.com/bonklek/poc-blobcast', 'target="_blank" rel="noreferrer"',
 ]) {
   if (!html.includes(documentMarker)) throw new Error(`Missing static document boundary: ${documentMarker}`)
 }
