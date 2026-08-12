@@ -161,6 +161,7 @@ try {
       loadManifest: (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')),
     })
     let sequenceResult
+    sequenceIndex.query()
     for (let pass = 0; pass < 5; pass += 1) {
       sequenceResult = sequenceIndex.query({ streamId: 'sequence-order', publisher: publisherA })
       sequenceIndex.query()

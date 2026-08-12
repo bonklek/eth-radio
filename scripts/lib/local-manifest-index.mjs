@@ -239,7 +239,9 @@ export function createLocalManifestIndex({
     if (!scan.retentionRequest?.streamId && request?.streamId) {
       scan.retentionRequest = { ...request }
     }
-    if (scan.coverageKey !== requestKey(request)) {
+    if (scan.retentionRequest?.streamId && !request?.streamId) return
+    const currentRequestKey = requestKey(request)
+    if (currentRequestKey && scan.coverageKey !== currentRequestKey) {
       scan.coverageKey = null
       scan.coverageRequest = null
     }
