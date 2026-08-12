@@ -46,6 +46,7 @@ export function createLocalManifestIndex({
   let clock = 0
   let scan = null
   let completedDirectorySignature = null
+  let completedCoverageKey = null
   let eligibleCount = 0
   let revalidationCursor = 0
   const completedMisses = new Map()
@@ -87,6 +88,7 @@ export function createLocalManifestIndex({
     closeScan()
     scan = null
     completedDirectorySignature = null
+    completedCoverageKey = null
     eligibleCount = 0
     entries.clear()
     cacheBytes = 0
@@ -214,6 +216,7 @@ export function createLocalManifestIndex({
 
   function startScan(signature, request) {
     closeScan()
+    completedCoverageKey = null
     scan = {
       directory: fs.opendirSync(directoryPath),
       signature,
@@ -261,6 +264,7 @@ export function createLocalManifestIndex({
         }
         const finalDirectorySignature = directorySignature(directoryPath)
         completedDirectorySignature = completedScanSignature
+        completedCoverageKey = coverageKey
         scan = null
         enforceBounds(retentionRequest)
         if (finalDirectorySignature !== completedScanSignature) {
@@ -302,16 +306,18 @@ export function createLocalManifestIndex({
       return { manifests: [], complete: true, eligibleCount: 0, cacheEntries: 0, cacheBytes: 0, negativeEntries: 0 }
     }
     const key = requestKey(request)
+    const hadCompletedMiss = key ? completedMisses.has(key) : false
     const freshCompletedMiss = key ? hasFreshCompletedMiss(key) : false
+    const expiredCompletedMiss = hadCompletedMiss && !freshCompletedMiss
     if (!freshCompletedMiss) {
       discover(request)
       revalidate(request)
     }
     let matchingEntries = [...entries.values()].filter((entry) => requestMatches(entry.manifest, request))
-    if (!matchingEntries.length && key && !scan && !freshCompletedMiss) {
-      // A prior request may have filled the bounded cache with other channels.
-      // Rescan incrementally with this identity protected so a busy channel
-      // cannot permanently starve a later, quieter requested channel.
+    if (key && !scan && (completedCoverageKey !== key || expiredCompletedMiss) && !freshCompletedMiss) {
+      // A global or different-identity scan may have filled the bounded cache
+      // with only a subset of this channel. Rescan with this identity protected
+      // before treating any partial cache match as exhaustive.
       startScan(directorySignature(directoryPath), request)
       discover(request)
       matchingEntries = [...entries.values()].filter((entry) => requestMatches(entry.manifest, request))
