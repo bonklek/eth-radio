@@ -17,6 +17,11 @@ function requestMatches(manifest, request) {
   return !request.publisher || manifest.publisher === request.publisher
 }
 
+function manifestSequence(entry) {
+  const sequence = entry.manifest?.sequence
+  return Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : null
+}
+
 /**
  * Incrementally discovers and parses a directory of bounded segment manifests.
  * Parsed, immutable manifest data is cached; callers add mutable filesystem
@@ -117,11 +122,17 @@ export function createLocalManifestIndex({
       const rightRecent = Math.max(...right[1].map((entry) => entry.lastUsed))
       return leftRecent - rightRecent || String(left[0]).localeCompare(String(right[0]))
     })[0]?.[1] || []
-    return victimChannel.sort((left, right) => (
-      left.mtimeMs - right.mtimeMs
+    return victimChannel.sort((left, right) => {
+      const leftSequence = manifestSequence(left)
+      const rightSequence = manifestSequence(right)
+      const sequenceOrder = leftSequence != null && rightSequence != null
+        ? leftSequence - rightSequence
+        : 0
+      return sequenceOrder
+      || left.mtimeMs - right.mtimeMs
       || left.lastUsed - right.lastUsed
       || left.name.localeCompare(right.name)
-    ))[0]
+    })[0]
   }
 
   function enforceBounds(request) {

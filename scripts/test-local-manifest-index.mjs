@@ -137,6 +137,41 @@ try {
     fs.rmSync(bytesDir, { recursive: true, force: true })
   }
 
+  const sequenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eth-radio-local-index-sequence-'))
+  try {
+    for (let sequence = 0; sequence < 5; sequence += 1) {
+      const filePath = path.join(sequenceDir, `${sequence}.json`)
+      fs.writeFileSync(filePath, JSON.stringify({
+        streamId: 'sequence-order',
+        publisher: publisherA,
+        channelKey: 'sequence-order',
+        sequence,
+      }))
+      const misleadingTime = new Date(1_700_000_000_000 + (sequence === 2 ? 10_000 : sequence * 1000))
+      fs.utimesSync(filePath, misleadingTime, misleadingTime)
+    }
+    const sequenceIndex = createLocalManifestIndex({
+      directoryPath: sequenceDir,
+      maxManifestBytes: 4096,
+      maxCacheEntries: 2,
+      maxCacheBytes: 4096,
+      maxScanEntries: 2,
+      loadManifest: (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')),
+    })
+    let sequenceResult
+    for (let pass = 0; pass < 5; pass += 1) {
+      sequenceResult = sequenceIndex.query({ streamId: 'sequence-order', publisher: publisherA })
+      if (sequenceResult.complete) break
+    }
+    assert.deepEqual(
+      sequenceResult.manifests.map((manifest) => manifest.sequence).sort((left, right) => left - right),
+      [3, 4],
+      'same-channel retention must follow protocol sequence rather than filesystem timestamps',
+    )
+  } finally {
+    fs.rmSync(sequenceDir, { recursive: true, force: true })
+  }
+
   const missesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eth-radio-local-index-misses-'))
   try {
     const missIndex = createLocalManifestIndex({
