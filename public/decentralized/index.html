@@ -3,22 +3,32 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src https: http:; img-src 'self' data:; media-src 'self' blob:; font-src 'self'; worker-src 'none'; manifest-src 'none'" />
   <title>Radio Free Ethereum</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <main id="app-shell" class="shell" data-layout="default">
+  <section id="startup-shell" class="startup-shell" role="status" aria-live="polite" aria-atomic="true">
+    <strong>Viewer starting</strong>
+    <p>If this message remains, the chain viewer did not finish loading. No live Station state is being shown.</p>
+    <p>Reload the page or review the local browser console. Custom endpoints are contacted only after the viewer starts.</p>
+    <a href="">Reload viewer</a>
+    <noscript><p>JavaScript is disabled. Chain playback and verification are unavailable until JavaScript is enabled and the page is reloaded.</p></noscript>
+  </section>
+  <main id="app-shell" class="shell" data-layout="default" inert aria-hidden="true">
     <section class="main-column panel-zone panel-player">
       <header class="topbar">
         <button id="settings-toggle" class="settings-toggle icon-button" type="button" aria-label="Open settings" title="Settings">&#9881;</button>
         <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
-        <div class="chain-toggle" aria-label="Chain selector">
-          <button id="chain-mainnet" type="button" data-chain-preset="mainnet" aria-pressed="false">ETH</button>
-          <button id="chain-sepolia" type="button" data-chain-preset="sepolia" aria-pressed="true">SEP</button>
+        <div class="chain-toggle" role="group" aria-label="Chain selector">
+          <button id="chain-mainnet" type="button" data-chain-preset="mainnet" aria-label="Ethereum mainnet" aria-pressed="false">ETH</button>
+          <button id="chain-sepolia" type="button" data-chain-preset="sepolia" aria-label="Sepolia testnet" aria-pressed="true">SEP</button>
         </div>
         <div class="brand">
+          <span class="brand-kicker" aria-hidden="true"><i></i> SIGNAL NODE / RFE-01</span>
           <h1>Radio Free Ethereum</h1>
-          <p>Milady stream watched through live Ethereum blobspace</p>
+          <p>Milady broadcasts, tuned straight from Ethereum blobspace</p>
         </div>
         <div class="header-badges">
           <span class="status-badge"><i></i><span id="station-state">OFFLINE</span></span>
@@ -27,14 +37,17 @@
       </header>
 
       <section class="viewer-frame">
-        <span id="status" class="player-status" role="status">Idle</span>
+        <span id="status" class="player-status">Idle</span>
+        <span id="status-announcer" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></span>
+        <span id="alert-announcer" class="visually-hidden" role="alert" aria-live="assertive" aria-atomic="true"></span>
         <div class="screen">
           <div class="video-column">
-            <video id="player" controls playsinline muted></video>
+            <video id="player" controls playsinline muted aria-label="Ethereum blob radio player"></video>
           </div>
           <div id="empty-state" class="empty-state">
             <strong>No recent station signal</strong>
             <span>No recent segment announcements are available. The viewer stays idle until Ethereum carries new blobs for this stream.</span>
+            <button id="empty-recovery" type="button" hidden>Open connection settings</button>
           </div>
         </div>
         <div class="nowbar">
@@ -43,9 +56,9 @@
             <span id="now-detail">Execution RPC announces segments; beacon sidecars carry the bytes.</span>
           </div>
           <div class="now-controls">
-            <button id="favorite-stream" class="icon-button" type="button" aria-label="Save current stream" title="Save current stream">☆</button>
-            <button id="stream-toggle" class="live-button" type="button">LIVE</button>
-            <button id="loop-toggle" type="button">LOOP</button>
+            <button id="favorite-stream" class="icon-button" type="button" aria-label="Save current stream" aria-pressed="false" title="Save current stream">☆</button>
+            <button id="stream-toggle" class="live-button" type="button" aria-label="Start following live stream" aria-pressed="false">LIVE OFF</button>
+            <button id="loop-toggle" type="button" aria-label="Loop loaded segments" aria-pressed="false">LOOP OFF</button>
             <button id="refresh" class="icon-button" type="button" aria-label="Refresh">↻</button>
             <button id="mute-toggle" class="icon-button" type="button" aria-label="Mute">&#128263;</button>
             <input id="volume" class="volume" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="Volume" />
@@ -70,7 +83,7 @@
         </div>
         <div class="network-actions">
           <span id="network-label">Mainnet</span>
-          <a id="station-explorer" class="station-explorer" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true">Station</a>
+          <a id="station-explorer" class="station-explorer" target="_blank" rel="noopener noreferrer" aria-disabled="true" tabindex="-1">No Station</a>
         </div>
       </div>
 
@@ -91,33 +104,39 @@
         <div class="stat-item stat-short"><span>Metadata</span><strong id="metadata-age">-</strong></div>
         <div class="stat-item stat-health"><span>Health</span><strong id="stream-health">-</strong></div>
       </div>
-      <div id="blobspace-status" class="blobspace-status"></div>
+      <div id="blobspace-status" class="blobspace-status" aria-label="Blobspace connection details">
+        <span id="blobspace-warning" class="blobspace-warning">No endpoint warnings.</span>
+        <div id="blobspace-details" class="blobspace-details"></div>
+      </div>
 
-      <section class="blobspace-panel">
-        <div id="slots" class="slots"></div>
-      </section>
+      <div class="feed-panes" role="region" aria-label="Blobspace scanner and stream segments">
+        <section id="blobspace-scanner" class="blobspace-panel" aria-label="Blobspace scanner">
+          <div id="slots" class="slots"></div>
+        </section>
 
-      <section class="segments-panel">
-        <div id="segment-rail-resizer" class="segment-rail-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize segment rail" tabindex="0"></div>
-        <div class="segments-heading">
-          <strong id="segments-title">Stream Segments</strong>
-          <div class="lookup-box">
-            <input id="segment-lookup" type="search" placeholder="Paste explorer URL, tx, block, or blob..." autocomplete="off" />
-            <span id="lookup-message" class="lookup-message">Paste a transaction URL, transaction hash, blob hash, block number, or sequence.</span>
+        <section id="stream-segments" class="segments-panel" aria-labelledby="segments-title">
+          <div id="segment-rail-resizer" class="segment-rail-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize blobspace scanner and stream segments" aria-controls="blobspace-scanner stream-segments" tabindex="0"></div>
+          <div class="segments-heading">
+            <strong id="segments-title">Stream Segments</strong>
+            <div class="lookup-box">
+              <label class="visually-hidden" for="segment-lookup">Find a stream segment</label>
+              <input id="segment-lookup" type="search" maxlength="2048" placeholder="Paste explorer URL, tx, block, or blob..." autocomplete="off" aria-describedby="lookup-message" />
+              <span id="lookup-message" class="lookup-message">Paste a transaction URL, transaction hash, blob hash, block number, or sequence.</span>
+            </div>
+            <button id="watch-segment" type="button">WATCH</button>
           </div>
-          <button id="watch-segment" type="button">WATCH</button>
-        </div>
-        <div class="segments-table">
-          <div class="segment-head">
-            <span>SEQ</span>
-            <span>UTC / BLOCK</span>
-            <span>TX</span>
-            <span>BLOBS</span>
-            <span>PLAY</span>
+          <div class="segments-table" role="table" aria-label="Stream segments" aria-colcount="5">
+            <div class="segment-head" role="row">
+              <span role="columnheader">SEQ</span>
+              <span role="columnheader">UTC / BLOCK</span>
+              <span role="columnheader">TX</span>
+              <span role="columnheader">BLOBS</span>
+              <span role="columnheader">PLAY</span>
+            </div>
+            <div id="segments" class="segments" role="rowgroup"></div>
           </div>
-          <div id="segments" class="segments"></div>
-        </div>
-      </section>
+        </section>
+      </div>
 
       <div class="cache-actions">
         <button id="play-latest" type="button">Play latest</button>
@@ -137,7 +156,7 @@
       <details id="archive-details">
         <summary>Watch old streams</summary>
         <div class="archive-body">
-          <div class="archive-mode-toggle" aria-label="Discovery mode">
+          <div class="archive-mode-toggle" role="group" aria-label="Discovery mode">
             <button id="archive-mode-station" type="button" data-archive-mode="station">Indexed Station</button>
             <button id="archive-mode-inbox" type="button" data-archive-mode="inbox">Blob inbox</button>
           </div>
@@ -160,6 +179,13 @@
               <input id="archive-stream-filter" name="archiveStreamFilter" autocomplete="off" placeholder="any compatible RFE1 stream" />
             </label>
             <label>
+              Range selection
+              <select id="archive-range-mode" name="archiveRangeMode">
+                <option value="date">Date range</option>
+                <option value="block">From block</option>
+              </select>
+            </label>
+            <label>
               From block
               <input id="archive-from-block" name="archiveFromBlock" inputmode="numeric" placeholder="recent window, or deployment block" />
             </label>
@@ -178,7 +204,7 @@
               <button id="archive-stop" type="button">Stop</button>
             </div>
           </form>
-          <div class="archive-progress-row" role="status">
+          <div class="archive-progress-row">
             <progress id="archive-progress-bar" class="archive-progress-bar" max="100" value="0" aria-label="Archive scan progress"></progress>
             <p id="archive-progress" class="archive-progress">Scan a bounded block range to discover prior Station streams.</p>
           </div>
@@ -223,23 +249,29 @@
     </aside>
 
     <footer class="source-footer">
+      <a class="codebase-link" href="./docs.html">documentation</a>
       <a class="codebase-link" href="https://github.com/bonklek/eth-radio" target="_blank" rel="noreferrer">source code</a>
     </footer>
+
+    <div id="layout-recovery" class="layout-recovery" hidden>
+      <button id="settings-recovery-toggle" type="button" aria-label="Open settings to restore hidden panels">SETTINGS</button>
+      <span id="status-recovery" class="layout-recovery-status">Idle</span>
+    </div>
   </main>
 
   <div id="settings-modal" class="settings-modal" hidden>
     <div class="settings-backdrop" data-settings-close></div>
-    <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
       <header class="settings-dialog-header">
         <h2 id="settings-title">Settings</h2>
         <button id="settings-close" class="icon-button" type="button" aria-label="Close settings">&times;</button>
       </header>
       <div class="settings-tabs" role="tablist" aria-label="Settings sections">
-        <button id="settings-tab-appearance" type="button" role="tab" aria-selected="true" data-settings-tab="appearance">Appearance</button>
-        <button id="settings-tab-layout" type="button" role="tab" aria-selected="false" data-settings-tab="layout">Layout</button>
-        <button id="settings-tab-connections" type="button" role="tab" aria-selected="false" data-settings-tab="connections">Connections</button>
+        <button id="settings-tab-appearance" type="button" role="tab" aria-selected="true" aria-controls="settings-panel-appearance" tabindex="0" data-settings-tab="appearance">Appearance</button>
+        <button id="settings-tab-layout" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-layout" tabindex="-1" data-settings-tab="layout">Layout</button>
+        <button id="settings-tab-connections" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-connections" tabindex="-1" data-settings-tab="connections">Connections</button>
       </div>
-      <div class="settings-tab-panel" data-settings-panel="appearance" role="tabpanel" aria-labelledby="settings-tab-appearance">
+      <div id="settings-panel-appearance" class="settings-tab-panel" data-settings-panel="appearance" role="tabpanel" aria-labelledby="settings-tab-appearance">
         <div class="settings-card">
           <h3>Clock</h3>
           <label>
@@ -256,17 +288,17 @@
           </label>
         </div>
       </div>
-      <div class="settings-tab-panel" data-settings-panel="layout" role="tabpanel" aria-labelledby="settings-tab-layout" hidden>
+      <div id="settings-panel-layout" class="settings-tab-panel" data-settings-panel="layout" role="tabpanel" aria-labelledby="settings-tab-layout" hidden>
         <div class="settings-card">
           <h3>Presets</h3>
-          <div class="layout-presets" id="layout-presets">
-            <button type="button" data-layout-preset="default">Default</button>
-            <button type="button" data-layout-preset="player-side">Player side</button>
-            <button type="button" data-layout-preset="player-top">Player top</button>
-            <button type="button" data-layout-preset="player-bottom">Player bottom</button>
-            <button type="button" data-layout-preset="horizontal-rails">Horizontal rails</button>
-            <button type="button" data-layout-preset="archive-side">Archive side rail</button>
-            <button type="button" data-layout-preset="archive-bottom">Archive bottom</button>
+          <div class="layout-presets" id="layout-presets" role="group" aria-label="Layout preset">
+            <button type="button" data-layout-preset="default" aria-pressed="true">Default</button>
+            <button type="button" data-layout-preset="player-side" aria-pressed="false">Player side</button>
+            <button type="button" data-layout-preset="player-top" aria-pressed="false">Player top</button>
+            <button type="button" data-layout-preset="player-bottom" aria-pressed="false">Player bottom</button>
+            <button type="button" data-layout-preset="horizontal-rails" aria-pressed="false">Horizontal rails</button>
+            <button type="button" data-layout-preset="archive-side" aria-pressed="false">Archive side rail</button>
+            <button type="button" data-layout-preset="archive-bottom" aria-pressed="false">Archive bottom</button>
           </div>
         </div>
         <div class="settings-card">
@@ -302,15 +334,15 @@
           </div>
         </div>
       </div>
-      <div class="settings-tab-panel" data-settings-panel="connections" role="tabpanel" aria-labelledby="settings-tab-connections" hidden>
+      <div id="settings-panel-connections" class="settings-tab-panel" data-settings-panel="connections" role="tabpanel" aria-labelledby="settings-tab-connections" hidden>
         <div class="settings-card">
-          <div class="endpoint-setup" aria-label="Endpoint setup">
+          <div class="endpoint-setup" role="group" aria-label="Endpoint setup">
             <div class="endpoint-summary">
               <span>Active endpoints</span>
             <strong id="endpoint-summary">Using preset endpoints</strong>
           </div>
           <div id="endpoint-presets" class="endpoint-presets"></div>
-          <p id="endpoint-apply-status" class="endpoint-apply-status" role="status">Choose a preset or apply custom browser-accessible endpoints.</p>
+          <p id="endpoint-apply-status" class="endpoint-apply-status">Choose a preset or apply custom browser-accessible endpoints.</p>
         </div>
         <form id="settings" class="settings">
           <label>
@@ -334,16 +366,18 @@
           </label>
           <label>
             Execution RPCs
-            <textarea id="execution-rpcs" name="executionRpcs" rows="3" spellcheck="false"></textarea>
+            <textarea id="execution-rpcs" name="executionRpcs" rows="3" spellcheck="false" aria-describedby="endpoint-url-help"></textarea>
           </label>
           <label>
             Beacon APIs
-            <textarea id="beacon-apis" name="beaconApis" rows="3" spellcheck="false"></textarea>
+            <textarea id="beacon-apis" name="beaconApis" rows="3" spellcheck="false" aria-describedby="endpoint-url-help"></textarea>
           </label>
+          <small id="endpoint-url-help" class="field-help">Use up to 8 HTTP(S) URLs per list. Each URL is limited to 2,048 UTF-8 bytes. URLs with user information or query parameters stay in this tab's session and are not saved persistently.</small>
           <label>
             Archive payload URLs
-            <textarea id="archive-templates" name="archiveTemplates" rows="3" spellcheck="false"></textarea>
+            <textarea id="archive-templates" name="archiveTemplates" rows="3" spellcheck="false" aria-describedby="archive-template-help"></textarea>
           </label>
+          <small id="archive-template-help" class="field-help">Optional placeholders: {streamId}, {sequence}, {txHash}, and {payloadSha256}. Retrieved bytes must still match Station metadata.</small>
           <label>
             Cache limit MB
             <input id="cache-limit" name="cacheLimitMb" inputmode="numeric" />

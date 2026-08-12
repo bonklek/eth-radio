@@ -1,10 +1,12 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadKZG } from 'kzg-wasm'
 import {
+  blobsToCommitments,
   bytesToHex,
+  commitmentsToVersionedHashes,
   createPublicClient,
   createWalletClient,
   decodeEventLog,
@@ -18,7 +20,9 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { assertRpcChain, chainFromEnv, chainNames, requireMainnetConfirmation, requireSupportedChain } from './chains.mjs'
+import { acquireAccountLease } from './lib/account-lease.mjs'
 import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
 import {
   formatEth,
   hasCostBudget,
@@ -27,8 +31,37 @@ import {
   readSegmentFilesAsCostSegments,
   runCostPreflightOrExit,
 } from './lib/cost-preflight.mjs'
-import { makePublisherState, publisherStateInteger, readPublisherStateWithRecovery } from './lib/publisher-state.mjs'
+import {
+  credentialSafeEndpointLabel,
+  endpointSafeErrorMessage,
+  installEndpointSafeProcessHandlers,
+} from './lib/endpoint-privacy.mjs'
+import {
+  appendPublishedHistory,
+  makePublisherState,
+  MAX_SUBMITTED_HISTORY,
+  publisherStateInteger,
+  readPublisherStateWithRecovery,
+  savePublisherState,
+} from './lib/publisher-state.mjs'
+import {
+  assertRecoveredSignedTransactionIntent,
+  assertRuntimeExposureBudget,
+  atomicWriteJson,
+  maybeInjectPublisherFault,
+  pendingReservedExposure,
+  receiptCostWei,
+  runtimeExposureDecision,
+  signedTransactionHash,
+  transactionExposureWei,
+} from './lib/publisher-safety.mjs'
+import { BLOB_DATA_BYTES, maxBlobsArg, segmentMsArg } from './lib/station-cli.mjs'
 import { gasLimitEnv, optionalGweiEnv } from './lib/tx-env.mjs'
+import { legacyFilesystemKey, resolveScopedJsonPath, resolveSegmentSet, scopedStreamFilesystemIdentity, withFilesystemIdentity } from './lib/filesystem-identity.mjs'
+import { segmentEntries, segmentEntry, waitForManifestSegment, waitForStableFile } from './lib/segment-input.mjs'
+import { readBoundedFileSync } from './lib/bounded-files.mjs'
+import { assertStationEventMetadata, manifestBlobVersionedHashes, stationEventSequenceMatches } from './lib/publisher-manifest.mjs'
+
 function usage(exitCode = 1) {
   const output = exitCode === 0 ? console.log : console.error
   output(`Usage:
@@ -47,132 +80,16 @@ Environment:
   process.exit(exitCode)
 }
 
-if (hasFlag('help')) usage(0)
+if (helpRequested()) usage(0)
+dotenv.config({ quiet: true })
+installEndpointSafeProcessHandlers(rpcUrls)
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function sanitize(value) {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_')
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'))
-}
-
-function segmentEntries(dir, filePrefix) {
-  const pattern = new RegExp(`^${escapeRegExp(filePrefix)}-(\\d+)\\.webm$`)
-  return fs
-    .readdirSync(dir)
-    .map((name) => {
-      const match = name.match(pattern)
-      return match ? { sequence: Number(match[1]), file: path.join(dir, name) } : null
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.sequence - b.sequence)
-}
-
-function manifestSegmentFile({ dir, filePrefix, sequence, segment }) {
-  const fileValue = String(segment.file || '')
-  if (!fileValue) throw new Error(`Manifest segment ${sequence} is missing file`)
-
-  const file = path.isAbsolute(fileValue) ? path.resolve(fileValue) : path.resolve(dir, fileValue)
-  const root = path.resolve(dir)
-  const expectedName = `${filePrefix}-${String(sequence).padStart(6, '0')}.webm`
-  if (path.dirname(file) !== root || path.basename(file) !== expectedName) {
-    throw new Error(`Manifest segment ${sequence} points outside the watched segment file: ${fileValue}`)
-  }
-  return file
-}
-
-function manifestSegments(manifestPath, manifest) {
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    throw new Error(`Manifest ${manifestPath} must be a JSON object`)
-  }
-  if (!Array.isArray(manifest.segments)) {
-    throw new Error(`Manifest ${manifestPath} segments must be an array`)
-  }
-  return manifest.segments
-}
-
-function manifestNonNegativeInteger(value, label) {
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
-  if (typeof value === 'string' && /^\d+$/.test(value)) {
-    const number = Number(value)
-    if (Number.isSafeInteger(number)) return number
-  }
-  throw new Error(`${label} must be a non-negative integer`)
-}
-
-function manifestSegmentSequence(entry, index, manifestPath) {
-  return manifestNonNegativeInteger(entry?.sequence, `Manifest ${manifestPath} segment ${index} sequence`)
-}
-
-function manifestSegmentBytes(segment, sequence) {
-  const bytes = manifestNonNegativeInteger(segment.bytes, `Manifest segment ${sequence} bytes`)
-  if (bytes <= 0) throw new Error(`Manifest segment ${sequence} bytes must be greater than zero`)
-  return bytes
-}
-
-async function waitForStableFile(file, pollMs) {
-  let previous = null
-  while (true) {
-    const current = fs.statSync(file)
-    if (current.size > 0 && previous && previous.size === current.size && previous.mtimeMs === current.mtimeMs) {
-      return current
-    }
-    previous = { size: current.size, mtimeMs: current.mtimeMs }
-    await sleep(Math.min(1000, Math.max(250, pollMs)))
-  }
-}
-
-async function waitForManifestSegment(dir, filePrefix, sequence, pollMs, required) {
-  const manifestPath = path.join(dir, `${filePrefix}.segments.json`)
-  let warned = false
-  while (required || fs.existsSync(manifestPath)) {
-    if (!fs.existsSync(manifestPath)) {
-      await sleep(Math.min(1000, Math.max(250, pollMs)))
-      continue
-    }
-
-    try {
-      const manifest = readJson(manifestPath)
-      const segment = manifestSegments(manifestPath, manifest)
-        .find((entry, index) => manifestSegmentSequence(entry, index, manifestPath) === sequence)
-      if (segment) {
-        const bytes = manifestSegmentBytes(segment, sequence)
-        const file = manifestSegmentFile({ dir, filePrefix, sequence, segment })
-        if (bytes > 0 && fs.existsSync(file)) {
-          const stat = fs.statSync(file)
-          if (stat.size === bytes) return { ...segment, file, bytes }
-        }
-      }
-    } catch (error) {
-      if (!warned) {
-        const mode = required
-          ? (error instanceof SyntaxError ? 'waiting for a valid manifest' : 'failing because --require-manifest is set')
-          : 'falling back to segment file'
-        console.warn(`Ignoring invalid segment manifest ${manifestPath}: ${error.message}; ${mode}`)
-        warned = true
-      }
-      if (!required) return null
-      if (!(error instanceof SyntaxError)) throw error
-      await sleep(Math.min(1000, Math.max(250, pollMs)))
-      continue
-    }
-    await sleep(Math.min(1000, Math.max(250, pollMs)))
-  }
-  return null
-}
-
 function saveState(statePath, state, { dryRun = false } = {}) {
-  if (dryRun) return
-  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+  savePublisherState(statePath, state, { dryRun })
 }
 
 function rpcUrls() {
@@ -185,41 +102,16 @@ function rpcUrls() {
   ].filter((url, index, urls) => url && urls.indexOf(url) === index)
 }
 
-function shortError(error) {
+function shortError(error, endpoints = []) {
   const cause = error?.cause || {}
   const status = error?.status || cause.status ? ` status ${error?.status || cause.status}` : ''
-  const details = error?.shortMessage || cause.shortMessage || cause.details || error?.message || String(error)
+  const details = endpointSafeErrorMessage(error, endpoints)
   return `${details}${status}`.split('\n')[0]
 }
 
 function timingMs(start, end) {
   if (!start || !end) return null
   return Date.parse(end) - Date.parse(start)
-}
-
-function normalizeBlobVersionedHashes(value, label, { optional = false } = {}) {
-  if (value === undefined || value === null) {
-    if (optional) return null
-    throw new Error(`${label} must be an array`)
-  }
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`)
-  return value.map((hash) => {
-    const normalized = String(hash || '').toLowerCase()
-    if (!/^0x[0-9a-f]{64}$/.test(normalized)) throw new Error(`${label} contains invalid bytes32 hash: ${hash}`)
-    return normalized
-  })
-}
-
-function stationEventSequenceMatches(eventSequence, expectedSequence) {
-  return eventSequence === BigInt(expectedSequence)
-}
-
-function manifestBlobVersionedHashes(transaction, stationEvent) {
-  const eventHashes = normalizeBlobVersionedHashes(stationEvent.args.blobVersionedHashes, 'Station event blobVersionedHashes')
-  const transactionHashes = normalizeBlobVersionedHashes(transaction?.blobVersionedHashes, 'transaction blobVersionedHashes', {
-    optional: true,
-  })
-  return transactionHashes ?? eventHashes
 }
 
 function pendingAgeMs(item, now = Date.now()) {
@@ -236,17 +128,12 @@ function adaptivePendingLimit({ state, baseMaxPending, minPending, maxPending, s
   return baseMaxPending
 }
 
-function receiptCostWei(receipt) {
-  const executionWei = receipt.gasUsed * receipt.effectiveGasPrice
-  const blobWei = receipt.blobGasUsed && receipt.blobGasPrice ? receipt.blobGasUsed * receipt.blobGasPrice : 0n
-  return { executionWei, blobWei, totalWei: executionWei + blobWei }
-}
-
 function makeClients({ urls, account, chain }) {
-  return urls.map((url) => {
+  return urls.map((url, index) => {
     const transport = http(url, { timeout: 60_000 })
     return {
       url,
+      label: credentialSafeEndpointLabel(url, `RPC endpoint ${index + 1}`),
       publicClient: createPublicClient({ chain, transport }),
       walletClient: createWalletClient({ account, chain, transport }),
     }
@@ -309,7 +196,6 @@ async function main() {
   const dirArg = readArg('dir')
   const streamId = readArg('stream-id')
   if (!dirArg || !streamId) usage()
-  const safeStreamId = sanitize(streamId)
   const dryRun = hasFlag('dry-run')
   if (!dryRun && (!process.env.ETH_RPC_URL || !process.env.PRIVATE_KEY || !process.env.STATION_ADDRESS)) usage()
 
@@ -324,27 +210,50 @@ async function main() {
   }
 
   const dir = path.resolve(dirArg)
-  const segmentMs = numberArg('segment-ms', '24000', { min: 1 })
+  const segmentMs = segmentMsArg('24000')
   const codec = readArg('codec', 'av1-opus/webm')
   const startSeq = numberArg('start-seq', '0', { integer: true, min: 0 })
-  const maxBlobs = numberArg('max-blobs', '6', { integer: true, min: 1 })
-  const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
-  const baseMaxPending = numberArg('max-pending', '2', { integer: true, min: 1 })
-  const minPending = numberArg('max-pending-min', '1', { integer: true, min: 1 })
-  const hardMaxPending = numberArg('max-pending-max', String(Math.max(baseMaxPending, 4)), { integer: true, min: 1 })
+const maxBlobs = maxBlobsArg('6')
+const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
+const maximumPayloadBytes = Math.min(maxBytes, maxBlobs * BLOB_DATA_BYTES)
+  const baseMaxPending = numberArg('max-pending', '2', { integer: true, min: 1, max: MAX_SUBMITTED_HISTORY })
+  const minPending = numberArg('max-pending-min', '1', { integer: true, min: 1, max: MAX_SUBMITTED_HISTORY })
+  const hardMaxPending = numberArg('max-pending-max', String(Math.max(baseMaxPending, 4)), {
+    integer: true,
+    min: 1,
+    max: MAX_SUBMITTED_HISTORY,
+  })
   const pollMs = numberArg('poll-ms', '1000', { integer: true, min: 1 })
   const sendRetries = numberArg('send-retries', '8', { integer: true, min: 1 })
   const retryMs = numberArg('retry-ms', '5000', { integer: true, min: 0 })
   const requireManifest = hasFlag('require-manifest')
   const recoverState = hasFlag('recover-state')
-  const statePath = path.resolve(readArg('state', `work/blob-radio-testnet/live-state/${safeStreamId}.pipelined.json`))
+  const stateArg = readArg('state')
   const once = hasFlag('once')
   const exitWhenCaughtUp = hasFlag('exit-when-caught-up')
   const adaptivePending = hasFlag('adaptive-pending')
   const costOptions = readCostOptions(process.argv)
-  const runtimeBudgetWei = costOptions.maxCostEth ? parseEthToWei(costOptions.maxCostEth) : null
+  const requestedRuntimeBudgetWei = costOptions.maxCostEth ? parseEthToWei(costOptions.maxCostEth) : null
+  const configuredRpcUrls = dryRun ? [] : rpcUrls()
 
   if (!fs.existsSync(dir)) throw new Error(`Segment directory not found: ${dir}`)
+  const segmentSet = resolveSegmentSet({ directory: dir, streamId, migrate: !dryRun, allowUnmanifestedSafeLegacy: true, allowInvalidSafeLegacyManifest: !requireManifest })
+  const filePrefix = segmentSet.filePrefix
+  const publisherAddress = process.env.PRIVATE_KEY
+    ? privateKeyToAccount(/** @type {`0x${string}`} */ (process.env.PRIVATE_KEY)).address
+    : process.env.PUBLISHER_ADDRESS
+  const publisherIdentity = scopedStreamFilesystemIdentity({ chain: chainName, station: process.env.STATION_ADDRESS, publisher: publisherAddress, streamId })
+  const defaultStatePath = path.resolve(`work/blob-radio-testnet/live-state/${publisherIdentity.key}.pipelined.json`)
+  const statePath = dryRun
+    ? path.resolve(stateArg || defaultStatePath)
+    : resolveScopedJsonPath({
+        explicitPath: stateArg,
+        targetPath: defaultStatePath,
+        legacyPath: path.resolve(`work/blob-radio-testnet/live-state/${legacyFilesystemKey(streamId)}.pipelined.json`),
+        streamId,
+        identity: publisherIdentity,
+        description: 'pipelined publisher state',
+      })
   if (!Number.isInteger(baseMaxPending) || baseMaxPending < 1) throw new Error(`Invalid --max-pending ${baseMaxPending}`)
   if (!Number.isInteger(minPending) || minPending < 1) throw new Error(`Invalid --max-pending-min ${minPending}`)
   if (!Number.isInteger(hardMaxPending) || hardMaxPending < baseMaxPending) {
@@ -358,8 +267,9 @@ async function main() {
     previousSegmentHash: zeroHash,
     submitted: true,
   })
+  state.filesystemIdentity = publisherIdentity
   state.metrics.latestPendingLimit = baseMaxPending
-  state.metrics.runtimeBudgetWei = runtimeBudgetWei?.toString() || null
+  state.metrics.runtimeBudgetWei = requestedRuntimeBudgetWei?.toString() || null
   if (!dryRun && fs.existsSync(statePath) && !hasFlag('reset')) {
     const recoveredState = readPublisherStateWithRecovery(statePath, state, { submitted: true, recover: recoverState })
     state = recoveredState.state
@@ -368,24 +278,38 @@ async function main() {
       console.warn(`Recovery status written to ${recoveredState.statusPath}`)
     }
   }
-  if (runtimeBudgetWei) state.metrics.runtimeBudgetWei = runtimeBudgetWei.toString()
+  const runtimeBudgetWei = requestedRuntimeBudgetWei
+    ?? (state.metrics.runtimeBudgetWei ? BigInt(state.metrics.runtimeBudgetWei) : null)
+  if (!dryRun && chainName === 'mainnet' && runtimeBudgetWei === null) {
+    throw new Error('--max-cost-eth is required for mainnet publishing')
+  }
+  if (runtimeBudgetWei !== null) state.metrics.runtimeBudgetWei = runtimeBudgetWei.toString()
 
   let account = null
   let clients = []
   let kzg = null
   let nextNonce = 0
+  let accountLease = null
   if (!dryRun) {
-    account = privateKeyToAccount(process.env.PRIVATE_KEY)
-    clients = makeClients({ urls: rpcUrls(), account, chain })
+    account = privateKeyToAccount(/** @type {`0x${string}`} */ (process.env.PRIVATE_KEY))
+    clients = makeClients({ urls: configuredRpcUrls, account, chain })
     const publicClient = clients[0].publicClient
     await assertRpcChain(publicClient, chain)
+    accountLease = acquireAccountLease({ chainId: chain.id, account: account.address })
     const wasmKzg = await loadKZG()
     kzg = {
+      /** @param {Uint8Array} blob */
       blobToKzgCommitment(blob) {
-        return hexToBytes(wasmKzg.blobToKzgCommitment(bytesToHex(blob)))
+        const blobHex = /** @type {`0x${string}`} */ (bytesToHex(blob))
+        const commitmentHex = /** @type {`0x${string}`} */ (wasmKzg.blobToKzgCommitment(blobHex))
+        return hexToBytes(commitmentHex)
       },
+      /** @param {Uint8Array} blob @param {Uint8Array} commitment */
       computeBlobKzgProof(blob, commitment) {
-        return hexToBytes(wasmKzg.computeBlobKZGProof(bytesToHex(blob), bytesToHex(commitment)))
+        const blobHex = /** @type {`0x${string}`} */ (bytesToHex(blob))
+        const commitmentHex = /** @type {`0x${string}`} */ (bytesToHex(commitment))
+        const proofHex = /** @type {`0x${string}`} */ (wasmKzg.computeBlobKZGProof(blobHex, commitmentHex))
+        return hexToBytes(proofHex)
       },
     }
     nextNonce = await publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' })
@@ -396,6 +320,23 @@ async function main() {
   }, -1)
   nextNonce = Math.max(nextNonce, maxSubmittedNonce + 1)
 
+  function currentExposure(nextReservedWei = 0n) {
+    const pending = pendingReservedExposure(state.submitted)
+    const confirmedSpendWei = BigInt(state.metrics.actualSpendWei)
+    const decision = runtimeExposureDecision({
+      budgetWei: runtimeBudgetWei,
+      confirmedSpendWei,
+      pendingReservedWei: pending.totalWei,
+      nextReservedWei,
+    })
+    state.metrics.reservedPendingWei = pending.totalWei.toString()
+    state.metrics.totalExposureWei = (confirmedSpendWei + pending.totalWei).toString()
+    state.metrics.pendingCount = state.submitted.length
+    return { ...decision, unknownPendingReservations: pending.unknown }
+  }
+
+  currentExposure()
+
   console.log(`pipelined publisher watching ${dir}`)
   console.log(`stream: ${streamId}`)
   console.log(`next sequence: ${state.nextSequence}`)
@@ -405,14 +346,14 @@ async function main() {
   if (dryRun) {
     console.log('dry run: validating local segment discovery and guardrails without publishing')
   } else {
-    console.log(`rpc read: ${clients[0].url}`)
-    console.log(`rpc send order: ${clients.map((client) => client.url).join(', ')}`)
+    console.log(`rpc read: ${clients[0].label}`)
+    console.log(`rpc send order: ${clients.map((client) => client.label).join(', ')}`)
   }
 
   if (!dryRun && hasCostBudget()) {
     await runCostPreflightOrExit({
       segments: readSegmentFilesAsCostSegments(
-        segmentEntries(dir, safeStreamId)
+        segmentEntries(dir, filePrefix)
           .filter((entry) => entry.sequence >= state.nextSequence)
           .map((entry) => entry.file),
       ),
@@ -420,21 +361,29 @@ async function main() {
     })
   }
 
-  async function sendTransactionWithFallback(tx) {
+  async function sendTransactionWithFallback(serializedTransaction, expectedHash) {
+    if (signedTransactionHash(serializedTransaction).toLowerCase() !== expectedHash.toLowerCase()) {
+      throw new Error('Serialized transaction does not match its durable transaction hash')
+    }
     let lastError = null
     for (let attempt = 1; attempt <= sendRetries; attempt += 1) {
       for (const client of clients) {
         try {
-          if (attempt > 1) console.log(`send retry ${attempt}/${sendRetries} via ${client.url}`)
-          return await client.walletClient.sendTransaction(tx)
+          if (attempt > 1) console.log(`send retry ${attempt}/${sendRetries} via ${client.label}`)
+          const hash = await client.walletClient.sendRawTransaction({ serializedTransaction })
+          if (hash.toLowerCase() !== expectedHash.toLowerCase()) {
+            throw new Error(`RPC returned unexpected transaction hash ${hash}`)
+          }
+          return hash
         } catch (error) {
           lastError = error
-          console.warn(`send via ${client.url} failed: ${shortError(error)}`)
+          console.warn(`send via ${client.label} failed: ${shortError(error, configuredRpcUrls)}`)
+          if (await getReceipt(expectedHash) || await getTransaction(expectedHash)) return expectedHash
         }
       }
       if (attempt < sendRetries) await sleep(retryMs)
     }
-    throw new Error(`Unable to send blob transaction after ${sendRetries} attempt(s): ${shortError(lastError)}`)
+    throw new Error(`Unable to send blob transaction after ${sendRetries} attempt(s): ${shortError(lastError, configuredRpcUrls)}`)
   }
 
   async function getReceipt(hash) {
@@ -478,20 +427,58 @@ async function main() {
     if (!stationEvent) {
       throw new Error(`Transaction ${item.txHash} did not emit Station SegmentPublished for ${streamId} seq ${item.sequence}`)
     }
-    return stationEvent
+    return assertStationEventMetadata(stationEvent, {
+      streamId,
+      durationMs: segmentMs,
+      payloadBytes: item.payloadBytes,
+      payloadSha256: item.payloadSha256,
+      codec,
+      previousSegmentHash: item.previousSegmentHash,
+    })
   }
 
   async function confirmSubmitted() {
     const remaining = []
     for (const item of state.submitted) {
-      const receipt = await getReceipt(item.txHash)
+      let receipt = await getReceipt(item.txHash)
+      if (!receipt && item.serializedTransaction) {
+        const recoveryData = buildStationData({
+          streamId,
+          sequence: item.sequence,
+          durationMs: segmentMs,
+          payloadBytes: item.payloadBytes,
+          payloadSha256: item.payloadSha256,
+          codec,
+          previousSegmentHash: item.previousSegmentHash,
+          blobCount: item.blobCount,
+        })
+        await assertRecoveredSignedTransactionIntent(item.serializedTransaction, {
+          txHash: item.txHash,
+          chainId: chain.id,
+          publisher: account.address,
+          destination: process.env.STATION_ADDRESS,
+          nonce: item.nonce,
+          data: recoveryData,
+          blobVersionedHashes: item.blobVersionedHashes,
+          blobCount: item.blobCount,
+          reservedCostWei: item.reservedCostWei,
+        })
+        console.log(`rebroadcasting prepared seq ${item.sequence}: ${item.txHash}`)
+        await sendTransactionWithFallback(item.serializedTransaction, item.txHash)
+        maybeInjectPublisherFault('pipelined-after-broadcast')
+        item.submissionStatus = 'broadcast'
+        item.broadcastAt ||= new Date().toISOString()
+        saveState(statePath, state, { dryRun })
+        receipt = await getReceipt(item.txHash)
+      }
       if (!receipt) {
         remaining.push(item)
         continue
       }
+      maybeInjectPublisherFault('pipelined-after-confirmation')
       const stationEvent = verifyStationEvent(receipt, item)
       const transaction = await getTransaction(item.txHash)
-      const manifest = {
+      const manifest = withFilesystemIdentity({
         app: 'eth-radio',
         version: 1,
         chain: chainName,
@@ -505,20 +492,24 @@ async function main() {
         previousSegmentHash: item.previousSegmentHash,
         blobCount: item.blobCount,
         stationAddress: process.env.STATION_ADDRESS,
+        publisher: account.address,
         txHash: item.txHash,
         blockHash: receipt.blockHash,
         blockNumber: receipt.blockNumber.toString(),
         transactionIndex: receipt.transactionIndex,
         blobVersionedHashes: manifestBlobVersionedHashes(transaction, stationEvent),
         createdAt: new Date().toISOString(),
-      }
+      }, publisherIdentity)
       fs.mkdirSync('work/blob-radio-testnet/manifests', { recursive: true })
-      const manifestPath = path.resolve(`work/blob-radio-testnet/manifests/${sanitize(streamId)}-${item.sequence}.json`)
-      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+      const manifestPath = path.resolve(`work/blob-radio-testnet/manifests/${publisherIdentity.key}-${item.sequence}.json`)
+      atomicWriteJson(manifestPath, manifest)
 
       const itemSequence = publisherStateInteger(item.sequence, 'submitted sequence')
       if (!state.published.some((published) => publisherStateInteger(published.sequence, 'published sequence') === itemSequence)) {
-        const costs = receiptCostWei(receipt)
+        const costs = receiptCostWei(receipt, { expectedBlobCount: item.blobCount })
+        if (item.reservedCostWei && costs.totalWei > BigInt(item.reservedCostWei)) {
+          throw new Error(`Confirmed transaction ${item.txHash} cost exceeds its reserved exposure`)
+        }
         const includedAt = manifest.createdAt
         const timings = {
           generatedToSubmitMs: timingMs(item.generatedAt, item.submittedAt),
@@ -526,7 +517,7 @@ async function main() {
           generatedToIncludedMs: timingMs(item.generatedAt, includedAt),
           firstSeenToIncludedMs: timingMs(item.firstSeenAt, includedAt),
         }
-        state.published.push({
+        appendPublishedHistory(state, {
           sequence: item.sequence,
           file: item.file,
           payloadBytes: item.payloadBytes,
@@ -546,7 +537,6 @@ async function main() {
           blobCostWei: costs.blobWei.toString(),
           costEth: formatEth(costs.totalWei),
         })
-        state.published.sort((a, b) => publisherStateInteger(a.sequence, 'published sequence') - publisherStateInteger(b.sequence, 'published sequence'))
         state.metrics.confirmedCount = publisherStateInteger(state.metrics.confirmedCount, 'metrics.confirmedCount') + 1
         state.metrics.latestTimings = timings
         state.metrics.actualSpendWei = (BigInt(state.metrics.actualSpendWei) + costs.totalWei).toString()
@@ -572,20 +562,30 @@ async function main() {
       console.log(`confirmed seq ${item.sequence}: ${item.txHash} block ${receipt.blockNumber}`)
     }
     state.submitted = remaining
+    currentExposure()
     saveState(statePath, state, { dryRun })
   }
 
+  let budgetBlocked
+
   async function submitNext() {
-    const entry = segmentEntries(dir, safeStreamId).find((candidate) => candidate.sequence === state.nextSequence)
+    const entry = segmentEntry(dir, filePrefix, state.nextSequence)
     if (!entry) return false
 
     const firstSeenAt = new Date().toISOString()
-    const manifestSegment = await waitForManifestSegment(dir, safeStreamId, state.nextSequence, pollMs, requireManifest)
+    const manifestSegment = await waitForManifestSegment(dir, filePrefix, state.nextSequence, pollMs, requireManifest)
     const file = manifestSegment?.file || entry.file
     const stat = manifestSegment ? fs.statSync(file) : await waitForStableFile(file, pollMs)
     const generatedAt = new Date(stat.mtimeMs).toISOString()
-    const payload = fs.readFileSync(file)
+    const payload = readBoundedFileSync(file, {
+      maxBytes: maximumPayloadBytes,
+      label: `segment ${state.nextSequence} payload`,
+    })
     const blobs = toBlobs({ data: bytesToHex(payload) })
+    const blobVersionedHashes = dryRun ? [] : commitmentsToVersionedHashes({
+      commitments: blobsToCommitments({ blobs, kzg, to: 'hex' }),
+      to: 'hex',
+    })
     const payloadSha256 = crypto.createHash('sha256').update(payload).digest('hex')
     if (payload.length > maxBytes || blobs.length > maxBlobs) {
       throw new Error(
@@ -630,41 +630,86 @@ async function main() {
     if (maxPriorityFeePerGas !== undefined) tx.maxPriorityFeePerGas = maxPriorityFeePerGas
     if (gas !== undefined) tx.gas = gas
 
+    const preparedTransaction = await clients[0].walletClient.prepareTransactionRequest(tx)
+    const reservedCostWei = transactionExposureWei(preparedTransaction, blobs.length)
+    const exposure = currentExposure(reservedCostWei)
+    if (exposure.unknownPendingReservations) {
+      budgetBlocked = true
+      state.metrics.runtimeBudgetExhausted = true
+      state.metrics.runtimeBudgetExhaustedAt ||= new Date().toISOString()
+      saveState(statePath, state, { dryRun })
+      console.log('runtime budget paused: recovered pending transactions lack durable exposure reservations')
+      return false
+    }
+    try {
+      assertRuntimeExposureBudget({
+        budgetWei: runtimeBudgetWei,
+        confirmedSpendWei: exposure.confirmedSpendWei,
+        pendingReservedWei: exposure.pendingReservedWei,
+        nextReservedWei: reservedCostWei,
+      })
+    } catch (error) {
+      budgetBlocked = true
+      state.metrics.runtimeBudgetExhausted = true
+      state.metrics.runtimeBudgetExhaustedAt ||= new Date().toISOString()
+      saveState(statePath, state, { dryRun })
+      console.log(shortError(error))
+      return false
+    }
+    const serializedTransaction = await clients[0].walletClient.signTransaction(preparedTransaction)
+    const txHash = signedTransactionHash(serializedTransaction)
+
     const submittedAt = new Date().toISOString()
-    console.log(`submitting seq ${sequence}: ${payload.length} bytes, ${blobs.length} blob(s), nonce ${nextNonce}`)
-    const txHash = await sendTransactionWithFallback(tx)
-    console.log(`submitted seq ${sequence}: ${txHash}`)
-    state.submitted.push({
+    const submittedItem = {
       sequence,
       file,
       payloadBytes: payload.length,
       payloadSha256,
       blobCount: blobs.length,
+      blobVersionedHashes,
       previousSegmentHash,
       txHash,
+      serializedTransaction,
+      reservedCostWei: reservedCostWei.toString(),
+      submissionStatus: 'prepared',
       nonce: nextNonce,
       firstSeenAt,
       generatedAt,
       submittedAt,
-    })
+    }
+    state.submitted.push(submittedItem)
     state.metrics.submittedCount = publisherStateInteger(state.metrics.submittedCount, 'metrics.submittedCount') + 1
     state.nextSequence += 1
     state.previousSegmentHash = `0x${payloadSha256}`
     nextNonce += 1
+    currentExposure()
     saveState(statePath, state, { dryRun })
+    maybeInjectPublisherFault('pipelined-after-prepared')
+
+    console.log(`submitting seq ${sequence}: ${payload.length} bytes, ${blobs.length} blob(s), nonce ${submittedItem.nonce}, reserved ${reservedCostWei} wei`)
+    await sendTransactionWithFallback(serializedTransaction, txHash)
+    maybeInjectPublisherFault('pipelined-after-broadcast')
+    submittedItem.submissionStatus = 'broadcast'
+    submittedItem.broadcastAt = new Date().toISOString()
+    saveState(statePath, state, { dryRun })
+    console.log(`submitted seq ${sequence}: ${txHash}`)
     return true
   }
 
   while (true) {
+    budgetBlocked = false
     if (!dryRun) await confirmSubmitted()
-    if (runtimeBudgetWei && BigInt(state.metrics.actualSpendWei) >= runtimeBudgetWei) {
+    const exposure = currentExposure()
+    if (runtimeBudgetWei !== null && (exposure.unknownPendingReservations || exposure.totalExposureWei >= runtimeBudgetWei)) {
       state.metrics.runtimeBudgetExhausted = true
       state.metrics.runtimeBudgetExhaustedAt ||= new Date().toISOString()
       saveState(statePath, state, { dryRun })
       console.log(
-        `runtime budget exhausted: spent ${formatEth(BigInt(state.metrics.actualSpendWei))} ETH / ${formatEth(runtimeBudgetWei)} ETH`,
+        `runtime budget fully reserved: confirmed ${formatEth(BigInt(state.metrics.actualSpendWei))} ETH + pending ${formatEth(exposure.pendingReservedWei)} ETH / ${formatEth(runtimeBudgetWei)} ETH`,
       )
-      break
+      if (!state.submitted.length) break
+      await sleep(pollMs)
+      continue
     }
 
     let submittedAny = false
@@ -682,16 +727,23 @@ async function main() {
       if (once) break
     }
 
+    if (budgetBlocked) {
+      if (!state.submitted.length) break
+      await sleep(pollMs)
+      continue
+    }
+
     if ((once || exitWhenCaughtUp) && !submittedAny && state.submitted.length === 0) break
     await sleep(pollMs)
   }
 
   if (!dryRun) await confirmSubmitted()
   saveState(statePath, state, { dryRun })
+  accountLease?.release()
   console.log(dryRun ? 'dry run complete: no state written' : `state: ${statePath}`)
 }
 
 main().catch((error) => {
-  console.error(shortError(error))
+  console.error(shortError(error, rpcUrls()))
   process.exit(1)
 })

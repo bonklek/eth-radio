@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="rfe-token" content="__RFE_TOKEN__">
+    <title>RFE Publisher Console</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="brand-lockup">
+        <p class="eyebrow"><span class="brand-pulse"></span>PUBLISH NODE / RFE-LOCAL</p>
+        <h1>Radio Free Ethereum</h1>
+        <p class="masthead-subtitle">Local broadcast uplink · private operator console</p>
+      </div>
+      <div class="network-lockup">
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="false">
+          <span class="theme-icon sun" aria-hidden="true">☀</span>
+          <span class="theme-icon moon" aria-hidden="true">☾</span>
+          <span class="theme-thumb" aria-hidden="true"></span>
+        </button>
+        <span id="supervisor-dot" class="signal-dot"></span>
+        <span id="supervisor-copy">Supervisor connecting</span>
+        <time id="utc-clock">--:--:-- UTC</time>
+      </div>
+    </header>
+
+    <main>
+      <section class="status-deck" aria-labelledby="status-heading">
+        <div class="status-primary">
+          <p class="eyebrow">TRANSMISSION STATE</p>
+          <div class="status-line">
+            <h2 id="status-heading">Idle</h2>
+            <span id="risk-badge" class="badge idle">IDLE</span>
+          </div>
+          <p id="status-detail" class="status-detail">Configure a source and run a preflight.</p>
+          <div class="progress-track" aria-label="Confirmed segment progress">
+            <span id="progress-fill"></span>
+          </div>
+        </div>
+        <dl class="metrics">
+          <div><dt>Generated</dt><dd id="metric-generated">0</dd></div>
+          <div><dt>Confirmed</dt><dd id="metric-confirmed">0</dd></div>
+          <div><dt>Pending</dt><dd id="metric-pending">0</dd></div>
+          <div><dt>Ahead</dt><dd id="metric-ahead">0</dd></div>
+          <div><dt>Dropped</dt><dd id="metric-dropped">0</dd></div>
+          <div><dt>Spend</dt><dd id="metric-spend">0 ETH</dd></div>
+        </dl>
+        <div class="process-strip">
+          <span>Encoder <strong id="encoder-state">stopped</strong></span>
+          <span>Publisher <strong id="publisher-state">stopped</strong></span>
+          <span>Tx engine <strong id="transaction-state">idle</strong></span>
+          <span>Viewer cushion <strong id="buffer-state">not ready</strong></span>
+        </div>
+        <div class="control-row">
+          <button id="pause-button" class="secondary" type="button">Pause source</button>
+          <button id="resume-button" class="secondary" type="button">Resume</button>
+          <button id="drain-button" class="secondary" type="button">Drain &amp; finish</button>
+          <button id="stop-button" class="danger" type="button">Stop now</button>
+        </div>
+      </section>
+
+      <div class="workspace-grid">
+        <form id="job-form" class="configuration-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">NEW TRANSMISSION</p>
+              <h2>Source and destination</h2>
+            </div>
+            <span class="step-index">01</span>
+          </div>
+
+          <label class="field network-primary"><span>Publishing network</span><select id="chain" name="chain"><option value="sepolia">Sepolia testnet</option><option value="mainnet">Ethereum mainnet</option></select></label>
+          <div class="source-mode-field">
+            <span class="field-label">Source mode</span>
+            <div class="source-mode-switch" role="radiogroup" aria-label="Source mode">
+              <label><input type="radio" name="sourceMode" value="file" checked><span>Local file<small>rolling encode</small></span></label>
+              <label><input type="radio" name="sourceMode" value="screen"><span>Desktop live<small>continuous capture</small></span></label>
+              <label><input type="radio" name="sourceMode" value="live-url"><span>Live URL<small>network ingest</small></span></label>
+            </div>
+          </div>
+          <label id="file-source-field" class="field full">
+            <span>Source video</span>
+            <span class="input-with-button">
+              <input id="source-path" name="sourcePath" placeholder="C:\media\program.mp4" required>
+              <button id="browse-button" type="button" class="compact">Browse</button>
+            </span>
+          </label>
+          <label id="live-url-field" class="field full hidden"><span>Live input URL</span><input id="live-input-url" type="url" placeholder="https://… · rtmp://… · srt://… · udp://…"></label>
+          <div id="screen-controls" class="live-control-block hidden">
+            <div class="field-grid two">
+              <label class="field"><span>Capture target</span><select id="capture-target"><option value="desktop">Entire desktop</option><option value="region">Screen region</option></select></label>
+              <label class="field"><span>Optional audio device</span><span class="input-with-button"><input id="capture-audio-device" list="audio-device-list" placeholder="Video only"><button id="discover-audio" type="button" class="compact">Detect</button></span></label>
+              <datalist id="audio-device-list"></datalist>
+            </div>
+            <div id="capture-region-fields" class="field-grid four hidden">
+              <label class="field"><span>X offset</span><input id="capture-x" type="number" min="0" value="0"></label>
+              <label class="field"><span>Y offset</span><input id="capture-y" type="number" min="0" value="0"></label>
+              <label class="field"><span>Width</span><input id="capture-width" type="number" min="160" value="1280"></label>
+              <label class="field"><span>Height</span><input id="capture-height" type="number" min="90" value="720"></label>
+            </div>
+          </div>
+          <p id="source-mode-note" class="mode-note">The file is segmented progressively while confirmed segments publish in parallel. The entire encode does not run first.</p>
+          <label class="field full"><span>Stream ID</span><input id="stream-id" name="streamId" placeholder="rfe-evening-signal" required></label>
+          <label class="field full"><span>Station contract</span><input id="station-address" name="stationAddress" placeholder="Use configured network default"></label>
+          <details>
+            <summary>RPC routing</summary>
+            <div class="details-body">
+              <label class="field"><span>Execution RPC</span><input id="execution-rpc" type="url" placeholder="Use local environment"></label>
+              <label class="field"><span>Beacon RPC</span><input id="beacon-rpc" type="url" placeholder="Use local environment"></label>
+              <label class="field"><span>Fallback send RPCs</span><textarea id="send-rpcs" rows="2" placeholder="One URL per line"></textarea></label>
+            </div>
+          </details>
+
+          <div class="section-heading inset">
+            <div><p class="eyebrow">ENCODE ENVELOPE</p><h2>Cadence and capacity</h2></div>
+            <span class="step-index">02</span>
+          </div>
+          <div class="field-grid three">
+            <label class="field"><span>Profile</span><select id="profile"><option value="360p">360p / resilient</option><option value="480p">480p</option><option value="720p">720p</option></select></label>
+            <label class="field"><span>Segment</span><select id="segment-ms"><option value="12000">12 seconds</option><option value="24000">24 seconds</option><option value="6000">6 seconds</option></select></label>
+            <label class="field"><span>Blob cap</span><select id="max-blobs"><option value="2">2 blobs</option><option value="3" selected>3 blobs</option><option value="4">4 blobs</option><option value="5">5 blobs</option><option value="6">6 blobs</option></select></label>
+          </div>
+          <div class="field-grid three">
+            <label class="field"><span>Video kbps</span><input id="video-rate" type="number" min="48" max="4000" value="220"></label>
+            <label class="field"><span>Audio kbps</span><input id="audio-rate" type="number" min="8" max="320" value="32"></label>
+            <label class="field"><span>Pending txs</span><input id="max-pending" type="number" min="1" max="6" value="2"></label>
+          </div>
+          <label class="field"><span>Rolling queue ceiling</span><span class="unit-input"><input id="max-ahead-segments" type="number" min="2" max="60" value="6"><em>segments</em></span></label>
+          <p class="hint">The encoder automatically steps down bitrate when a difficult segment would exceed the blob cap.</p>
+
+          <div class="section-heading inset">
+            <div><p class="eyebrow">SPEND BOUNDARY</p><h2>Fees and recovery</h2></div>
+            <span class="step-index">03</span>
+          </div>
+          <div class="field-grid three">
+            <label class="field"><span>Total budget (ETH)</span><input id="max-cost" inputmode="decimal" value="0.05"></label>
+            <label class="field"><span>Per-segment exposure</span><input id="max-segment-cost" inputmode="decimal" value="0.005"></label>
+            <label class="field"><span>Startup cushion</span><input id="buffer-segments" type="number" min="1" max="12" value="2"></label>
+          </div>
+          <div class="continuity-policy">
+            <p class="eyebrow">TRANSACTION CONTINUITY</p>
+            <div class="field-grid four">
+              <label class="field"><span>Replace after</span><span class="unit-input"><input id="replace-after" type="number" min="12" max="600" value="36"><em>sec</em></span></label>
+              <label class="field"><span>Fee bump</span><span class="unit-input"><input id="fee-bump" type="number" min="10" max="200" value="15"><em>%</em></span></label>
+              <label class="field"><span>Max replacements</span><input id="max-replacements" type="number" min="0" max="10" value="3"></label>
+              <label class="field"><span>Confirmations</span><input id="confirmation-depth" type="number" min="1" max="12" value="2"></label>
+            </div>
+            <p class="hint">Replacement attempts reuse the same nonce and payload. Only the largest exposure in each nonce lineage counts against the budget.</p>
+          </div>
+          <details>
+            <summary>Advanced fee ceilings</summary>
+            <div class="details-body field-grid three">
+              <label class="field"><span>Blob gas (gwei)</span><input id="blob-fee" inputmode="decimal" placeholder="Automatic"></label>
+              <label class="field"><span>Execution gas (gwei)</span><input id="gas-fee" inputmode="decimal" placeholder="Automatic"></label>
+              <label class="field"><span>Priority gas (gwei)</span><input id="priority-fee" inputmode="decimal" placeholder="Automatic"></label>
+              <label class="field"><span>RPC send retries</span><input id="send-retries" type="number" min="1" max="50" value="8"></label>
+            </div>
+          </details>
+          <label id="mainnet-confirm-wrap" class="check-row hidden"><input id="mainnet-confirm" type="checkbox"><span>I understand this spends real ETH on Mainnet.</span></label>
+          <label class="check-row"><input id="cleanup-segments" type="checkbox" checked><span>Delete generated segments only after an attributed finalized-tag observation; retain the original and manifests.</span></label>
+
+          <section class="preflight-panel" aria-labelledby="preflight-title">
+            <div><p class="eyebrow">GO / NO-GO</p><h2 id="preflight-title">Source preview and preflight</h2></div>
+            <div class="preflight-actions"><button id="preview-button" type="button" class="secondary">Preview source</button><button id="preflight-button" type="button" class="secondary">Run preflight</button></div>
+            <div id="preflight-results" class="preflight-results"><p>Preview the source, then verify the RPC, station, wallet, and queue before going live.</p></div>
+          </section>
+
+          <div class="start-panel">
+            <div>
+              <strong id="wallet-copy">Wallet not detected</strong>
+              <span>The key never enters this page.</span>
+            </div>
+            <button id="start-button" type="submit">Start transmission</button>
+          </div>
+          <p id="form-message" class="form-message" role="status"></p>
+        </form>
+
+        <aside class="visual-panel">
+          <div class="section-heading">
+            <div><p class="eyebrow">BURNED-IN LAYER</p><h2>Overlay designer</h2></div>
+            <span class="step-index">04</span>
+          </div>
+          <div id="overlay-preview" class="overlay-preview terminal">
+            <img id="source-preview-image" alt="Live source preview" class="source-preview-image hidden">
+            <div class="preview-noise"></div>
+            <div class="preview-top"><span id="preview-chain">SEPOLIA / STATION</span><span>CHAIN SEQ 000042</span></div>
+            <div class="preview-bottom">
+              <div><strong id="preview-title">RADIO FREE ETHEREUM</strong><span id="preview-subtitle">PUBLIC SIGNAL</span></div>
+              <p id="preview-fields">SEPOLIA / ENCODED 03:14:15 UTC / BLOCK 9,104,322 / HEAD 0x4c12...91aa / SEG 3/18</p>
+            </div>
+          </div>
+          <div class="witness-policy"><span class="signal-dot good"></span><p><strong>Liveness witness is best effort.</strong> A delayed or unavailable RPC is labeled in the pixels and never rejects a segment or interrupts transmission.</p></div>
+          <p class="overlay-note">For ahead-of-time files, UTC and block values describe encoding/publication context—not the viewer’s eventual wall clock.</p>
+          <label class="check-row"><input id="overlay-enabled" type="checkbox" checked><span>Burn overlay into video</span></label>
+          <div class="field-grid two">
+            <label class="field"><span>Title</span><input id="overlay-title" value="RADIO FREE ETHEREUM"></label>
+            <label class="field"><span>Subtitle</span><input id="overlay-subtitle" value="PUBLIC SIGNAL"></label>
+            <label class="field"><span>Layout</span><select id="overlay-layout"><option value="terminal">Terminal frame</option><option value="lower-third">Lower third</option><option value="minimal">Minimal bug</option></select></label>
+            <label class="field"><span>Accent</span><input id="overlay-accent" type="color" value="#ff9ed1"></label>
+          </div>
+          <label class="field"><span>Panel opacity <output id="opacity-output">82%</output></span><input id="overlay-opacity" type="range" min="10" max="100" value="82"></label>
+          <div class="toggle-grid">
+            <label><input id="show-utc" type="checkbox" checked> Encoded UTC</label>
+            <label><input id="show-network" type="checkbox" checked> Network</label>
+            <label><input id="show-block-number" type="checkbox" checked> Block number</label>
+            <label><input id="show-block-hash" type="checkbox" checked> Head hash</label>
+            <label><input id="show-segment" type="checkbox" checked> Segment count</label>
+            <label><input id="show-stream-id" type="checkbox" checked> Stream ID</label>
+          </div>
+
+          <div class="lineage-heading"><span>Pending transaction lineages</span><strong id="lineage-count">0</strong></div>
+          <div id="lineage-list" class="lineage-list"><p>No pending nonces.</p></div>
+          <div class="log-heading"><span>Supervisor log</span><button id="refresh-log" class="text-button" type="button">Refresh</button></div>
+          <pre id="log-output" class="log-output">No active job.</pre>
+        </aside>
+      </div>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

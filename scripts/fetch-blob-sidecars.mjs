@@ -1,11 +1,19 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
 import fs from 'node:fs'
 import path from 'node:path'
 import { commitmentToVersionedHash, createPublicClient, http } from 'viem'
-import { sepolia } from 'viem/chains'
+import { assertRpcChain, chainEndpointsFromEnv, chainFromEnv, chainNames, requireSupportedChain } from './chains.mjs'
+import { executionTimestampSlot } from './lib/beacon-head.mjs'
+import { assertCompleteBlobSidecarMatches } from './lib/blob-sidecar-matches.mjs'
 import { readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+import { installEndpointSafeProcessHandlers } from './lib/endpoint-privacy.mjs'
+import { readBoundedJsonFileSync } from './lib/bounded-files.mjs'
+import { fetchBoundedJson } from './lib/bounded-fetch.mjs'
 
-const chains = { sepolia }
+const MAX_PUBLISHER_MANIFEST_BYTES = 1024 * 1024
+const MAX_BEACON_RESPONSE_BYTES = 8 * 1024 * 1024
+const MAX_BEACON_SIDECARS = 21
 
 function assertTxHash(value) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(String(value || ''))) {
@@ -52,6 +60,9 @@ function beaconData(response, label) {
 function beaconDataArray(response, label) {
   const data = beaconData(response, label)
   if (!Array.isArray(data)) throw new Error(`Invalid beacon ${label} response: data must be an array`)
+  if (data.length > MAX_BEACON_SIDECARS) {
+    throw new Error(`Invalid beacon ${label} response: exceeds ${MAX_BEACON_SIDECARS} entries`)
+  }
   return data
 }
 
@@ -65,7 +76,10 @@ function beaconGenesisTime(response) {
 }
 
 function readManifest(filePath) {
-  const manifest = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  const manifest = readBoundedJsonFileSync(filePath, {
+    maxBytes: MAX_PUBLISHER_MANIFEST_BYTES,
+    label: `manifest ${filePath}`,
+  })
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     throw new Error(`Invalid manifest ${filePath}: expected a JSON object`)
   }
@@ -85,25 +99,29 @@ function transactionBlobVersionedHashes(tx, manifest) {
   return hashes
 }
 
-function usage() {
-  console.error(`Usage:
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm blob:fetch -- --manifest <manifest.json>
   pnpm blob:fetch -- --tx 0x...
 
 Environment:
-  ETH_RPC_URL, BEACON_RPC_URL, CHAIN=sepolia
+  ETH_RPC_URL, BEACON_RPC_URL, CHAIN=${chainNames}
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
-const chainName = process.env.CHAIN || 'sepolia'
-const chain = chains[chainName]
-const rpcUrl = process.env.ETH_RPC_URL
-const beaconUrl = process.env.BEACON_RPC_URL?.replace(/\/$/, '')
+if (helpRequested()) usage(0)
+dotenv.config({ quiet: true })
 
-if (!chain || !rpcUrl || !beaconUrl) usage()
+const { chainName, chain } = chainFromEnv()
+requireSupportedChain(chain)
+const endpoints = chainEndpointsFromEnv(chainName)
+const rpcUrl = endpoints.executionRpcUrl
+const beaconUrl = endpoints.beaconRpcUrl.replace(/\/$/, '')
+installEndpointSafeProcessHandlers(() => [rpcUrl, beaconUrl].filter(Boolean))
 
-const publicClient = createPublicClient({ chain, transport: http(rpcUrl) })
+if (!rpcUrl || !beaconUrl) usage()
 
 let txHash = readArg('tx')
 let manifest
@@ -116,22 +134,22 @@ if (manifestArg) {
 if (!txHash) usage()
 assertTxHash(txHash)
 
+const publicClient = createPublicClient({ chain, transport: http(rpcUrl) })
+await assertRpcChain(publicClient, chain)
+
 async function beacon(pathname) {
-  const response = await fetch(`${beaconUrl}${pathname}`, {
-    headers: { accept: 'application/json' },
+  return fetchBoundedJson(`${beaconUrl}${pathname}`, {
+    maxBytes: MAX_BEACON_RESPONSE_BYTES,
+    timeoutMs: 10_000,
+    label: `beacon response ${pathname}`,
   })
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`)
-  }
-  return response.json()
 }
 
 const tx = await publicClient.getTransaction({ hash: txHash })
 const block = await publicClient.getBlock({ blockHash: tx.blockHash })
 const genesis = await beacon('/eth/v1/beacon/genesis')
 const genesisTime = beaconGenesisTime(genesis)
-const secondsPerSlot = 12n
-const slot = (block.timestamp - genesisTime) / secondsPerSlot
+const slot = executionTimestampSlot(block.timestamp, genesisTime)
 
 console.log(`execution block: ${block.number} (${block.hash})`)
 console.log(`estimated beacon slot: ${slot}`)
@@ -150,6 +168,7 @@ for (const sidecar of beaconDataArray(sidecars, 'blob sidecars')) {
   }
 }
 
+assertCompleteBlobSidecarMatches(wanted, matches)
 fs.mkdirSync('work/blob-radio-testnet/sidecars', { recursive: true })
 const out = path.resolve(`work/blob-radio-testnet/sidecars/${txHash}.json`)
 fs.writeFileSync(out, `${JSON.stringify({ txHash, slot: slot.toString(), matches }, null, 2)}\n`)

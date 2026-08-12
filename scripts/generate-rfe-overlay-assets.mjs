@@ -5,6 +5,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ffmpegPath from 'ffmpeg-static'
 import { readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
+
+const ffmpegExecutable = /** @type {string | null} */ (/** @type {unknown} */ (ffmpegPath))
+
+if (helpRequested()) {
+  console.log(`Usage:
+  pnpm assets:overlays -- [--input <1920x1080.png>] [--out-dir <directory>]
+`)
+  process.exit(0)
+}
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(scriptDir, '..')
@@ -17,6 +27,7 @@ const source = fromRoot(readArg('input', 'public/rfe-assets/rfe-terminal-final.p
 const outDir = fromRoot(readArg('out-dir', 'public/rfe-assets/overlays'))
 
 // Keep this list in sync with the tracked overlay assets.
+/** @type {Array<[string, number, number]>} */
 const profiles = [
   ['360p', 640, 360],
   ['420p', 746, 420],
@@ -25,7 +36,7 @@ const profiles = [
   ['1080p', 1920, 1080],
 ]
 
-if (!ffmpegPath) {
+if (!ffmpegExecutable) {
   throw new Error('ffmpeg-static did not provide an ffmpeg binary path')
 }
 
@@ -80,7 +91,7 @@ for (const [name, width, height] of profiles) {
     `${box({ x: 112, y: 18, w: 1720, h: 82 })}:color=0x181a24@1:t=fill`,
     `${box({ x: 36, y: 916, w: 1848, h: 144 })}:color=0x11131a@1:t=fill`,
   ].join(',')
-  const result = spawnSync(ffmpegPath, [
+  const result = spawnSync(ffmpegExecutable, [
     '-hide_banner',
     '-loglevel',
     'error',

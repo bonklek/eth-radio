@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'" />
+  <title>Protocol model · Radio Free Ethereum</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell docs-shell" data-layout="default">
+    <section class="main-column panel-zone panel-player" aria-labelledby="protocol-title">
+      <header class="topbar"><button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button><div class="brand"><span class="brand-kicker"><i></i> PROTOCOL MODEL / V2 BOUNDARY</span><h1 id="protocol-title">Proposed Station model</h1><p>How identity, scheduling, availability, fallback, and economics are intended to fit together—without presenting them as deployed V1 behavior.</p></div><div class="header-badges"><span class="status-badge"><i></i> PLANNED / EXPERIMENTAL</span></div></header>
+      <nav class="nowbar" aria-label="Documentation navigation"><a class="codebase-link" href="./docs.html">Documentation</a><a class="codebase-link" href="./publisher-safety.html">Publisher safety</a><a class="codebase-link" href="./developer-guide.html">Developer guide</a></nav>
+      <section class="viewer-frame"><div class="screen docs-screen"><article class="docs-copy">
+        <p class="player-status">Nothing on this page is a production contract interface, name resolver, auction rule, funding promise, or current watcher behavior. The existing V1 watcher remains publisher-scoped and address/transaction recoverable.</p>
+        <h2>Identity: address first, `.gwei` second</h2>
+        <p><span class="status-badge">PLANNED</span> A Station identity is intended to bind a chain ID and Station core address. A channel, season, lot, reservation, program, asset, and segment each have separate domain-separated identifiers. This prevents a raw stream name—or a `.gwei` presentation name—from becoming an economic identity by accident.</p>
+        <p>`.gwei` is proposed as discovery and presentation authority. A future binding must be treated as verified, one-sided, conflicting, stale, expired, unsupported, or reorged based on actual evidence. A rebinding or transfer must not silently migrate balances, claims, history, reservations, or a prior channel generation. Until production integration exists, use direct addresses and publisher-scoped V1 identity.</p>
+        <h2>Scheduling: blocks, not wall-clock promises</h2>
+        <p><span class="status-badge">EXPERIMENTAL</span> The shared schema uses non-empty half-open block intervals: <code>[startBlock, endBlock)</code>. A season is divided into fixed block lots, so adjacent lots do not overlap. UTC can help users estimate timing, but Ethereum cannot guarantee a wall-clock start, retrieve media, encode content, or sign a new blob transaction autonomously.</p>
+        <figure class="docs-flow" aria-labelledby="schedule-flow-caption"><figcaption id="schedule-flow-caption">Intended scheduling lifecycle</figcaption><ol><li><strong>Commit / bid</strong><span>Proposed policy records allocation intent.</span></li><li><strong>Prepare</strong><span>Publisher prepares local media before its block window.</span></li><li><strong>Seal / activate</strong><span>Future chain rules define when a reservation can become active.</span></li><li><strong>Fulfil</strong><span>Live publication or referenced replay proceeds within the assigned range.</span></li><li><strong>Turn over</strong><span>Next lot/season selection uses its own evidence and policy.</span></li></ol></figure>
+        <p>Auction mechanics, cancellation, no-bid handling, bid increments, related-party disclosures, and advertising allocation are not implemented public V1 functionality. They need a public specification, deployed interfaces, and review before a user can rely on them.</p>
+        <h2>Availability and replay</h2>
+        <p><span class="status-badge">EXPERIMENTAL</span> Availability profiles can calculate a conservative theoretical blob-serving window from explicit chain-profile values and a Station safety margin. This is not provider health, a retrieval guarantee, or an inclusion guarantee. A profile must be versioned when network parameters change.</p>
+        <p><span class="status-badge">PLANNED</span> Scheduled replay and standing fallback are distinct. Scheduled replay would have an assigned program/reservation and may need an execution transaction; standing fallback is a transactionless client-side selection from an already committed catalog. Neither is evidence that a primary stream is live.</p>
+        <h2>Bounded fallback, canonical plan, observed playback</h2>
+        <p><span class="status-badge">EXPERIMENTAL</span> The prototype resolver accepts only concrete, distinct asset candidates. It derives a deterministic starting point from Station, season, lot, failure class, and seed, then uses a bounded order: reservation fallback, season archive, base catalog, previous catalog, then a procedural slate. Provider response order must not alter that canonical candidate order, and recursive fallback references are rejected.</p>
+        <p>A canonical plan is proposed chain-backed policy/evidence. An observed selection is what a particular client found playable through its providers. They are not interchangeable: provider divergence or unavailable data can change observation without rewriting canonical intent. Current browser UI does not claim this V2 decision model.</p>
+        <h2>Fees, funding, and claims</h2>
+        <p><span class="status-badge">EXPERIMENTAL</span> Client fee snapshots are bounded, versioned planning evidence tied to a canonical observation. They keep airtime value, transmission contribution, publisher liquidity, performance bond, Station subsidy, and maximum reimbursement separate. A snapshot is not a fee oracle, hard maximum, escrow, capacity reservation, inclusion guarantee, assigned subsidy, or claimable reimbursement.</p>
+        <p><span class="status-badge">PLANNED</span> A future Station constitution may surface protected reserves, liabilities, policy modules, revenue routing, mutability, and warnings such as insolvency or an unverified fee policy. An administrator must not be assumed safe to withdraw funds that protect publication or mature claims. No public V1 vault/claim contract or withdrawal policy is available today.</p>
+        <h2>What to do today</h2>
+        <ul><li>Use the V1 watcher’s exact Station, publisher, and transaction identifiers.</li><li>Read fee estimates as planning-only and keep a dedicated publisher wallet’s maximum exposure independent from any expected recovery.</li><li>Label unavailable, unsupported, or conflicting evidence rather than picking a silent default.</li><li>Do not route value, sign a policy action, or advertise a `.gwei` binding based on these schemas until a public deployment and applicable review exist.</li></ul>
+      </article></div></section>
+      <footer class="source-footer"><nav class="docs-pagination" aria-label="Documentation pages"><a class="codebase-link" rel="prev" href="./publisher-safety.html">Previous: publisher safety</a><a class="codebase-link" rel="next" href="./station-operations.html">Next: Station operations</a></nav></footer>
+    </section>
+  </main>
+  <script src="./docs.js"></script>
+</body>
+</html>

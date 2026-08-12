@@ -1,0 +1,29 @@
+{
+  "input": {
+    "chainId": "11155111",
+    "stationCore": "0x1111111111111111111111111111111111111111",
+    "publisher": "0x2222222222222222222222222222222222222222",
+    "winner": "0x3333333333333333333333333333333333333333",
+    "channelKey": "0xcfee7c08a98f4b565d124c7e4e28acc52e1bc780e3887db0a02a7d2d5bc66728",
+    "seasonNumber": "7",
+    "lotIndex": "12",
+    "allocationNonce": "3",
+    "programNonce": "4",
+    "manifestRoot": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "codecProfileHash": "0xb647e7fb93cdfe19106777bf9aa2cd90a1aa3afd8456e35f8fd8b21ae8ff3cd9",
+    "totalDurationMs": "3600000",
+    "sequence": "9",
+    "streamIdHash": "0xf04474d0eb7e5fe9e8411872fc6c888d03c35618b571b24702560457afa98bcb"
+  },
+  "expected": {
+    "stationId": "0x4c667502f258756575d29a36db959b853e27a2b09de4d8abc0e48b06a1b4f328",
+    "channelId": "0x556c95eba02c93332f2acf7fbe929f29cfb38e9411157507cb420e00a8ae5a39",
+    "seasonId": "0x32d37a72ba978ffa048a1dda4fdbf54043a404179f1845d53e875ff12608cb0a",
+    "lotId": "0x96db2f55eebaa19736f1647d690e3abce28f732c6ce605f79b01a90dc9413faa",
+    "reservationId": "0xf826f2d2e5b68b48e5d969fed92cc2d8bce45d4591fff0f58a018efc0e8027b8",
+    "programId": "0x71e0e4417ffe116401b560267c081868d55fc5cf1def91d136e52e40194d0c5c",
+    "assetId": "0x29d03c21b2e7f3040812261d330f63caf09d7ccb5196d8ae5a96e081033da765",
+    "segmentId": "0x1a83351f9d6d66e2f76ebcb759dc92f0d606295991919e7f55ade563a1ef3f34",
+    "v1SyntheticChannelId": "0x1f6f66f9d51c74de9191993f08320558f4ade8ef37708b9a5e5c72a4528723cc"
+  }
+}

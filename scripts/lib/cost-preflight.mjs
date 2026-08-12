@@ -1,8 +1,9 @@
 import fs from 'node:fs'
-import { bytesToHex, createPublicClient, formatEther, http, parseGwei, toBlobs } from 'viem'
+import { createPublicClient, formatEther, http, parseGwei } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mainnet, sepolia } from 'viem/chains'
 import { readArg } from './cli-args.mjs'
+import { blobCountForPayloadBytes } from './station-cli.mjs'
 
 export const chains = { mainnet, sepolia }
 
@@ -144,12 +145,12 @@ export function segmentStats(segments) {
 export function readSegmentFilesAsCostSegments(files) {
   return files
     .map((file) => {
-      const payload = fs.readFileSync(file)
-      if (!payload.length) return null
+      const payloadBytes = fs.statSync(file).size
+      if (!payloadBytes) return null
       return {
         file,
-        payloadBytes: payload.length,
-        blobCount: toBlobs({ data: bytesToHex(payload) }).length,
+        payloadBytes,
+        blobCount: blobCountForPayloadBytes(payloadBytes),
       }
     })
     .filter(Boolean)
@@ -172,12 +173,19 @@ async function readFeeWei({ chainName, rpcUrl, options }) {
         : publicClient.getGasPrice(),
       options.maxFeePerBlobGasGwei
         ? Promise.resolve(parseGwei(options.maxFeePerBlobGasGwei))
-        : publicClient.request({ method: 'eth_blobBaseFee' }).catch(() => null),
+        : publicClient.request({ method: 'eth_blobBaseFee', params: [] }).catch(() => null),
     ])
+    let blobGasPriceWei = parseGwei('1')
+    if (blobBaseFeeHex !== null) {
+      if (typeof blobBaseFeeHex !== 'string' || !/^0x[0-9a-f]+$/i.test(blobBaseFeeHex)) {
+        throw new Error('RPC eth_blobBaseFee returned a malformed quantity')
+      }
+      blobGasPriceWei = BigInt(blobBaseFeeHex)
+    }
     return {
       source: 'current RPC fee quote',
       executionGasPriceWei,
-      blobGasPriceWei: blobBaseFeeHex ? BigInt(blobBaseFeeHex) : parseGwei('1'),
+      blobGasPriceWei,
     }
   }
 
@@ -190,7 +198,9 @@ async function readFeeWei({ chainName, rpcUrl, options }) {
 
 async function readWalletBalance({ chainName, rpcUrl, options }) {
   if (options.skipWalletBalanceCheck || !process.env.PRIVATE_KEY || !rpcUrl || !chains[chainName]) return null
-  const account = privateKeyToAccount(process.env.PRIVATE_KEY)
+  const privateKey = process.env.PRIVATE_KEY
+  if (!/^0x[0-9a-f]{64}$/i.test(privateKey)) throw new Error('PRIVATE_KEY must be a 32-byte 0x-prefixed hex value')
+  const account = privateKeyToAccount(/** @type {`0x${string}`} */ (privateKey))
   const publicClient = createPublicClient({ chain: chains[chainName], transport: http(rpcUrl, { timeout: 20_000 }) })
   const balanceWei = await publicClient.getBalance({ address: account.address })
   return {

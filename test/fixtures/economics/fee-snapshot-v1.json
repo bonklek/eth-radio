@@ -1,0 +1,31 @@
+{
+  "chainId": "11155111",
+  "observationBlock": "103",
+  "observationBlockHash": "0x4444444444444444444444444444444444444444444444444444444444444444",
+  "estimatorVersion": "1",
+  "availabilityProfileVersion": "1",
+  "horizonStartBlock": "200",
+  "horizonEndBlock": "300",
+  "contentMode": "LIVE",
+  "expectedBlobCount": "2",
+  "maximumBlobCount": "3",
+  "executionGasUnits": "100000",
+  "currentBlobBaseFeeWei": "40",
+  "currentExecutionBaseFeeWei": "100",
+  "safetyMultiplierBps": "15000",
+  "stressMultiplierBps": "20000",
+  "expiresAtBlock": "110",
+  "economics": {
+    "airtimeValueWei": "1000000",
+    "transmissionContributionWei": "50000000",
+    "publisherLiquidityRequirementWei": "130000000",
+    "performanceBondWei": "2000000",
+    "stationSubsidyWei": "10000000",
+    "maximumReimbursementWei": "60000000"
+  },
+  "expectedEstimates": {
+    "baseEstimateWei": "20485760",
+    "guardedEstimateWei": "62185920",
+    "stressEstimateWei": "124371840"
+  }
+}

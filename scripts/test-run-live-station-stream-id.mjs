@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { streamFilesystemIdentity } from './lib/filesystem-identity.mjs'
 import { spawnSync } from 'node:child_process'
 import ffmpegPath from 'ffmpeg-static'
 
@@ -10,7 +11,7 @@ const input = path.join(tempRoot, 'input.mp4')
 const outDir = path.join(tempRoot, 'segments')
 const statusPath = path.join(tempRoot, 'status.json')
 const streamId = '../unsafe stream'
-const safeStreamId = '.._unsafe_stream'
+const safeStreamId = streamFilesystemIdentity(streamId).key
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -59,11 +60,14 @@ function assertRunManifestShapeGuard() {
   if (!source.includes('function readSegmentManifest(manifestPath)')) {
     throw new Error('run-live-station should validate segment manifest shape before use')
   }
-  if (!source.includes('segments must be an array')) {
-    throw new Error('run-live-station should reject segment manifests with non-array segments')
+  if (!source.includes('segmentManifestEntries(manifest, manifestPath)')) {
+    throw new Error('run-live-station should apply the shared bounded segment-manifest shape guard')
   }
   if (source.includes('return manifest.segments || []')) {
     throw new Error('run-live-station reintroduced permissive manifest segment fallback')
+  }
+  if (!source.includes('blobCountForPayloadBytes(bytes)') || source.includes('function estimateBlobs(')) {
+    throw new Error('run-live-station should derive blob counts from stat size without reading oversized segment payloads')
   }
 }
 

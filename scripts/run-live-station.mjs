@@ -1,10 +1,19 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { bytesToHex, toBlobs } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 import { hasFlag, numberArg, readArg } from './lib/cli-args.mjs'
+import { helpRequested } from './lib/cli-help.mjs'
 import { runCostPreflightOrExit, serializableCostReport } from './lib/cost-preflight.mjs'
+import { blobCountForPayloadBytes, maxBlobsArg, segmentMsArg } from './lib/station-cli.mjs'
+import { resolveRunDirectory, scopedStreamFilesystemIdentity, streamFilesystemIdentity, withFilesystemIdentity } from './lib/filesystem-identity.mjs'
+import { installEndpointSafeProcessHandlers } from './lib/endpoint-privacy.mjs'
+import { readBoundedSegmentManifest, segmentManifestEntries, serializeSegmentManifest } from './lib/live-segment-manifest.mjs'
+import { readPublisherStateSnapshot } from './lib/publisher-state.mjs'
+import { prepareSegmentOutputDirectory, segmentOutputEntries } from './lib/segment-output.mjs'
+
+installEndpointSafeProcessHandlers(() => [process.env.ETH_RPC_URL, process.env.BEACON_RPC_URL].filter(Boolean))
 
 const profiles = {
   '360p24': { width: 640, height: 360, fps: 24, videoBitrate: '420k', maxBlobs: 6 },
@@ -19,8 +28,9 @@ const bitrateLadders = {
   '720p24': ['900k', '760k', '640k', '520k', '420k'],
 }
 
-function usage() {
-  console.error(`Usage:
+function usage(exitCode = 1) {
+  const output = exitCode === 0 ? console.log : console.error
+  output(`Usage:
   pnpm live:run -- --input <video> --stream-id <id> [--profile 360p24] [--segment-ms 12000]
                     [--publish] [--reset] [--no-audio] [--out-dir <dir>]
                     [--max-blobs 6] [--max-bytes 761856] [--no-adaptive]
@@ -38,12 +48,11 @@ Use --no-adaptive to fail instead.
 Without --publish, live:run only segments and validates local output.
 With --publish, it submits produced segments through Station.
 `)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
-function sanitize(value) {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_')
-}
+if (helpRequested()) usage(0)
+dotenv.config({ quiet: true })
 
 function runStep(label, args, status, statusPath) {
   return new Promise((resolve, reject) => {
@@ -77,29 +86,19 @@ function readSegments(segmentManifestPath) {
 }
 
 function readSegmentManifest(manifestPath) {
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    throw new Error(`Invalid segment manifest ${manifestPath}: expected a JSON object`)
-  }
-  if (!Array.isArray(manifest.segments)) {
-    throw new Error(`Invalid segment manifest ${manifestPath}: segments must be an array`)
-  }
+  const manifest = readBoundedSegmentManifest(manifestPath)
+  segmentManifestEntries(manifest, manifestPath)
   return manifest
 }
 
 function readPublishStateSnapshot(statePath, status) {
   if (!fs.existsSync(statePath)) return null
   try {
-    return JSON.parse(fs.readFileSync(statePath, 'utf8'))
+    return readPublisherStateSnapshot(statePath)
   } catch (error) {
     status.warnings.push(`Could not read publisher state snapshot for status output: ${error.message}`)
     return null
   }
-}
-
-function estimateBlobs(file) {
-  const payload = fs.readFileSync(file)
-  return toBlobs({ data: bytesToHex(payload) }).length
 }
 
 function unique(values) {
@@ -157,38 +156,40 @@ function attemptDirFor(outDir, index, candidate) {
   return path.join(parent, '.adaptive-attempts', `${base}-${label}`)
 }
 
-function removeDirIfExists(dir) {
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true })
+function prepareOwnedSegmentDirectory(dir, filePrefix) {
+  prepareSegmentOutputDirectory(dir, filePrefix)
 }
 
-function copyChosenAttempt({ attemptDir, outDir, streamId }) {
-  removeDirIfExists(outDir)
+function copyChosenAttempt({ attemptDir, outDir, filePrefix }) {
+  prepareOwnedSegmentDirectory(outDir, filePrefix)
   fs.mkdirSync(outDir, { recursive: true })
 
-  const files = fs.readdirSync(attemptDir)
-  for (const name of files) {
-    const source = path.join(attemptDir, name)
-    const target = path.join(outDir, name)
-    if (fs.statSync(source).isFile()) fs.copyFileSync(source, target)
+  for (const entry of segmentOutputEntries(attemptDir, filePrefix)) {
+    fs.copyFileSync(entry.file, path.join(outDir, path.basename(entry.file)))
   }
+  const sourceManifest = path.join(attemptDir, `${filePrefix}.segments.json`)
+  if (!fs.existsSync(sourceManifest)) throw new Error(`Chosen attempt manifest is missing: ${sourceManifest}`)
+  fs.copyFileSync(sourceManifest, path.join(outDir, path.basename(sourceManifest)))
 
-  const manifestPath = path.join(outDir, `${streamId}.segments.json`)
+  const manifestPath = path.join(outDir, `${filePrefix}.segments.json`)
   const manifest = readSegmentManifest(manifestPath)
   manifest.outDir = outDir
   manifest.segments = manifest.segments.map((segment) => ({
     ...segment,
     file: path.join(outDir, path.basename(segment.file)),
   }))
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  fs.writeFileSync(manifestPath, serializeSegmentManifest(manifest, manifestPath))
 }
 
 function summarizeSegments({ segments, maxBytes, maxBlobs }) {
   return segments.map((segment) => {
-    const estimatedBlobs = estimateBlobs(segment.file)
+    const bytes = fs.statSync(segment.file).size
+    const estimatedBlobs = blobCountForPayloadBytes(bytes)
     return {
       ...segment,
+      bytes,
       estimatedBlobs,
-      overBudget: segment.bytes > maxBytes || estimatedBlobs > maxBlobs,
+      overBudget: bytes > maxBytes || estimatedBlobs > maxBlobs,
     }
   })
 }
@@ -201,18 +202,28 @@ const profileName = readArg('profile', '360p24')
 const profile = profiles[profileName]
 if (!profile) throw new Error(`Unknown profile "${profileName}". Choose one of: ${Object.keys(profiles).join(', ')}`)
 
-const segmentMs = numberArg('segment-ms', '12000', { integer: true, min: 1 })
+const segmentMs = segmentMsArg('12000')
 const publish = hasFlag('publish')
 const reset = hasFlag('reset')
 const noAudio = hasFlag('no-audio')
 const adaptive = !hasFlag('no-adaptive')
 const codec = noAudio ? 'av1/webm' : 'av1-opus/webm'
-const safeStreamId = sanitize(streamId)
-const outDir = path.resolve(readArg('out-dir', `work/blob-radio-testnet/live-runs/${safeStreamId}/segments`))
-const statusPath = path.resolve(readArg('status', `work/blob-radio-testnet/live-runs/${safeStreamId}/status.json`))
-const statePath = path.resolve(readArg('state', `work/blob-radio-testnet/live-runs/${safeStreamId}/publish-state.json`))
-const segmentManifestPath = path.join(outDir, `${safeStreamId}.segments.json`)
-const maxBlobs = numberArg('max-blobs', String(profile.maxBlobs), { integer: true, min: 1 })
+const filePrefix = streamFilesystemIdentity(streamId).key
+const publisher = process.env.PRIVATE_KEY
+  ? privateKeyToAccount(/** @type {`0x${string}`} */ (process.env.PRIVATE_KEY)).address
+  : process.env.PUBLISHER_ADDRESS
+const runIdentity = scopedStreamFilesystemIdentity({ chain: process.env.CHAIN || 'sepolia', station: process.env.STATION_ADDRESS, publisher, streamId })
+const outDirArg = readArg('out-dir')
+const statusArg = readArg('status')
+const stateArg = readArg('state')
+const defaultRunDir = outDirArg && statusArg && stateArg
+  ? path.join(path.resolve('work/blob-radio-testnet/live-runs'), runIdentity.key)
+  : resolveRunDirectory({ baseDir: path.resolve('work/blob-radio-testnet/live-runs'), streamId, identity: runIdentity })
+const outDir = path.resolve(outDirArg || path.join(defaultRunDir, 'segments'))
+const statusPath = path.resolve(statusArg || path.join(defaultRunDir, 'status.json'))
+const statePath = path.resolve(stateArg || path.join(defaultRunDir, 'publish-state.json'))
+const segmentManifestPath = path.join(outDir, `${filePrefix}.segments.json`)
+const maxBlobs = maxBlobsArg(String(profile.maxBlobs))
 const maxBytes = numberArg('max-bytes', String(maxBlobs * 126_976), { integer: true, min: 1 })
 const requestedVideoBitrate = readArg('video-bitrate', profile.videoBitrate)
 const audioBitrate = readArg('audio-bitrate', '32k')
@@ -221,13 +232,13 @@ if (!fs.existsSync(path.resolve(input))) throw new Error(`Input not found: ${pat
 if (publish && !process.env.STATION_ADDRESS) throw new Error('STATION_ADDRESS is required when using --publish')
 
 if (reset && fs.existsSync(outDir)) {
-  fs.rmSync(outDir, { recursive: true, force: true })
+  prepareOwnedSegmentDirectory(outDir, filePrefix)
 }
 if (reset && fs.existsSync(statePath)) {
   fs.rmSync(statePath, { force: true })
 }
 
-const status = {
+const status = withFilesystemIdentity({
   app: 'eth-radio',
   kind: 'live-run',
   streamId,
@@ -250,7 +261,7 @@ const status = {
   attempts: [],
   segments: [],
   warnings: [],
-}
+}, runIdentity)
 writeStatus(statusPath, status)
 
 try {
@@ -264,7 +275,7 @@ try {
   let chosen = null
   for (const [index, candidate] of candidates.entries()) {
     const attemptDir = attemptDirFor(outDir, index, candidate)
-    removeDirIfExists(attemptDir)
+    prepareOwnedSegmentDirectory(attemptDir, filePrefix)
 
     const segmentArgs = [
       'scripts/segment-av1-webm.mjs',
@@ -305,7 +316,7 @@ try {
 
     await runStep(`segmenting attempt ${index + 1}/${candidates.length}`, segmentArgs, status, statusPath)
 
-    const attemptManifestPath = path.join(attemptDir, `${safeStreamId}.segments.json`)
+    const attemptManifestPath = path.join(attemptDir, `${filePrefix}.segments.json`)
     const attemptSegments = summarizeSegments({
       segments: readSegments(attemptManifestPath),
       maxBytes,
@@ -333,7 +344,7 @@ try {
     throw new Error(`No adaptive encode fit within budget. See ${statusPath}`)
   }
 
-  copyChosenAttempt({ attemptDir: chosen.attemptDir, outDir, streamId: safeStreamId })
+  copyChosenAttempt({ attemptDir: chosen.attemptDir, outDir, filePrefix })
   status.profile = chosen.candidate.profileName
   status.videoBitrate = chosen.candidate.videoBitrate
   status.segmentMs = chosen.candidate.segmentMs

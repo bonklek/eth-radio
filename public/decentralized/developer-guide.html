@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'" />
+  <title>Developer guide · Radio Free Ethereum</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell docs-shell" data-layout="default">
+    <section class="main-column panel-zone panel-player" aria-labelledby="developer-title">
+      <header class="topbar">
+        <button id="theme-toggle" class="theme-toggle icon-button" type="button" aria-label="Switch to light mode" title="Switch theme"></button>
+        <div class="brand"><span class="brand-kicker"><i></i> DEVELOPER GUIDE / V1</span><h1 id="developer-title">Integrating the V1 watcher</h1><p>Current contract evidence, client boundaries, and safe integration rules.</p></div>
+        <div class="header-badges"><span class="status-badge"><i></i> SHIPPED &amp; VERIFIED</span></div>
+      </header>
+      <nav class="nowbar" aria-label="Documentation navigation"><a class="codebase-link" href="./docs.html">Documentation</a><a class="codebase-link" href="./viewer-recovery.html">Viewer recovery</a><a class="codebase-link" href="./index.html">Open watcher</a></nav>
+      <section class="viewer-frame"><div class="screen docs-screen"><article class="docs-copy">
+        <p class="player-status">This is a source-level orientation, not a production SDK or a production V2 ABI. Pin and review the source revision you integrate.</p>
+        <h2>Repository map</h2>
+        <ul><li><code>contracts/Station.sol</code> holds the V1 Station contract.</li><li><code>public/decentralized/</code> holds the static browser watcher and its bounded I/O helpers.</li><li><code>packages/protocol/</code> holds partial, dependency-light experimental V2 schemas.</li><li><code>packages/economics/</code> holds client-planning-only fee snapshots.</li></ul>
+        <h2>V1 contract evidence <span class="status-badge">SHIPPED &amp; VERIFIED</span></h2>
+        <p><code>Station.publishSegment</code> accepts a stream ID, sequence, duration, payload length/hash, codec, previous segment hash, and blob count. It rejects zero blobs, more than six blobs, duplicate publisher/stream-hash/sequence tuples, and missing blob hashes. It emits <code>SegmentPublished</code> with indexed publisher, stream ID hash, and sequence.</p>
+        <table><thead><tr><th scope="col">Event field</th><th scope="col">Integration meaning</th></tr></thead><tbody>
+          <tr><td><code>publisher</code>, <code>streamIdHash</code>, <code>sequence</code></td><td>Indexed scope/order fields. Do not collapse publishers that happen to use the same stream ID.</td></tr>
+          <tr><td><code>streamId</code>, <code>durationMs</code>, <code>payloadBytes</code>, <code>payloadSha256</code>, <code>codec</code></td><td>Untrusted event metadata to validate before displaying or decoding.</td></tr>
+          <tr><td><code>previousSegmentHash</code>, <code>blobVersionedHashes</code></td><td>Continuity and blob references; validate shape, uniqueness, and expected bounds.</td></tr>
+        </tbody></table>
+        <h2>Viewer integration rules</h2>
+        <ol><li>Read Station logs with a verified chain ID and exact Station address.</li><li>Sort by sequence, block number, transaction index, and log index; do not rely on provider order.</li><li>Require an explicit publisher when a stream ID is ambiguous.</li><li>Retrieve sidecars from a beacon endpoint, match versioned hashes, reconstruct bounded payload bytes, and verify the payload hash before playback.</li><li>Make scans and handlers replay-safe: logs can repeat, endpoints can disagree, and recent chain state can reorganize.</li></ol>
+        <h2>Capabilities and compatibility <span class="status-badge">EXPERIMENTAL</span></h2>
+        <p>The shared protocol package has versioned identifier, availability, playback-decision, and constitution schemas. These are not wired into the public watcher as canonical V2 behavior. An integration encountering an unsupported version, invalid schema, conflicting identity evidence, or unknown capability must show that condition and decline to infer a safe default.</p>
+        <h2>Fees, fallback, and policy <span class="status-badge">PLANNED / EXPERIMENTAL</span></h2>
+        <p>Fee snapshots are deterministic client planning evidence, not an oracle, enforceable policy, reimbursement liability, or capacity reservation. The bounded fallback resolver is experimental schema logic and does not make the V1 watcher a Station V2 fallback client. Do not fabricate an ABI, module interface, auction rule, vault claim, or name-resolution API from these sources.</p>
+        <h2>Security review checklist</h2>
+        <ul><li>Validate all RPC/beacon/media input sizes and types; render metadata as text, never trusted HTML.</li><li>Verify contract deployment and chain context before a user signs or funds anything.</li><li>Keep private keys and API credentials outside browser-delivered configuration.</li><li>Model reorg/finality, endpoint divergence, and blob/media availability as normal failure cases.</li><li>Use released fixtures and public source evidence before publishing copyable commands.</li></ul>
+      </article></div></section>
+      <footer class="source-footer"><nav class="docs-pagination" aria-label="Documentation pages"><a class="codebase-link" rel="prev" href="./glossary-status.html">Previous: glossary and status</a><a class="codebase-link" rel="next" href="./docs.html">Next: overview</a></nav></footer>
+    </section>
+  </main>
+  <script src="./docs.js"></script>
+</body>
+</html>

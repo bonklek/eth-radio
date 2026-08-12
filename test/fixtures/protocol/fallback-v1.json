@@ -1,0 +1,10 @@
+{
+  "stationId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "seasonNumber": "7",
+  "lotIndex": "12",
+  "failureClass": "NO_RESERVATION",
+  "failureClassCode": 0,
+  "fallbackSeed": "0x2222222222222222222222222222222222222222222222222222222222222222",
+  "candidateCount": "5",
+  "expectedIndex": 4
+}
