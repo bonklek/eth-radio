@@ -23,8 +23,8 @@ importers:
         specifier: ^1.0.0
         version: 1.0.0
       solc:
-        specifier: ^0.8.35
-        version: 0.8.35(debug@4.4.3)
+        specifier: ^0.8.36
+        version: 0.8.36
       viem:
         specifier: ^2.45.2
         version: 2.54.1(typescript@6.0.3)
@@ -539,8 +539,8 @@ packages:
     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
     engines: {node: '>=8'}
 
-  solc@0.8.35:
-    resolution: {integrity: sha512-OaP/4zyoKRo2CjqZDxbtkeRlEo6MxP4FLCxntw1Agf9OSoecmwYKoFBSB34UcSKBFBucrTh3Mb0nRoJou62ibw==}
+  solc@0.8.36:
+    resolution: {integrity: sha512-cnDhjWo8dC5FxnEwCrWxUsJS7RPsHf+pVUe9Tr/+b15sQ40WCVn4vX4R+tOvN5gRfEgiquvFzfF4VV0kSnknhw==}
     engines: {node: '>=12.0.0'}
     hasBin: true
 
@@ -944,9 +944,7 @@ snapshots:
 
   flatted@3.4.2: {}
 
-  follow-redirects@1.16.0(debug@4.4.3):
-    optionalDependencies:
-      debug: 4.4.3
+  follow-redirects@1.16.0: {}
 
   glob-parent@6.0.2:
     dependencies:
@@ -1093,11 +1091,11 @@ snapshots:
 
   shebang-regex@3.0.0: {}
 
-  solc@0.8.35(debug@4.4.3):
+  solc@0.8.36:
     dependencies:
       command-exists: 1.2.9
       commander: 8.3.0
-      follow-redirects: 1.16.0(debug@4.4.3)
+      follow-redirects: 1.16.0
       js-sha3: 0.8.0
       memorystream: 0.3.1
       semver: 5.7.2
