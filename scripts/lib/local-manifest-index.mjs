@@ -142,6 +142,7 @@ export function createLocalManifestIndex({
       if (!victim) break
       onTrace({
         type: 'evict',
+        request,
         victim: { name: victim.name, sequence: victim.manifest?.sequence, channelKey: victim.manifest?.channelKey },
         entries: [...entries.values()].map((entry) => ({ name: entry.name, sequence: entry.manifest?.sequence, channelKey: entry.manifest?.channelKey })),
       })
