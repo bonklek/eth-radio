@@ -87,6 +87,6 @@
     "globals": "^17.7.0",
     "happy-dom": "20.10.6",
     "prettier": "3.9.4",
-    "typescript": "6.0.3"
+    "typescript": "7.0.2"
   }
 }
