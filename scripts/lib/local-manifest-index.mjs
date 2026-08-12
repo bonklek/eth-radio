@@ -283,11 +283,14 @@ export function createLocalManifestIndex({
       reset()
       return { manifests: [], complete: true, eligibleCount: 0, cacheEntries: 0, cacheBytes: 0, negativeEntries: 0 }
     }
-    discover(request)
-    revalidate(request)
-    let matchingEntries = [...entries.values()].filter((entry) => requestMatches(entry.manifest, request))
     const key = requestKey(request)
-    if (!matchingEntries.length && key && !scan && !hasFreshCompletedMiss(key)) {
+    const freshCompletedMiss = key ? hasFreshCompletedMiss(key) : false
+    if (!freshCompletedMiss) {
+      discover(request)
+      revalidate(request)
+    }
+    let matchingEntries = [...entries.values()].filter((entry) => requestMatches(entry.manifest, request))
+    if (!matchingEntries.length && key && !scan && !freshCompletedMiss) {
       // A prior request may have filled the bounded cache with other channels.
       // Rescan incrementally with this identity protected so a busy channel
       // cannot permanently starve a later, quieter requested channel.
