@@ -82,7 +82,7 @@
     "@ethereumjs/evm": "10.1.2",
     "@ethereumjs/util": "10.1.2",
     "@eslint/js": "^10.0.1",
-    "@types/node": "24.10.15",
+    "@types/node": "26.2.0",
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
     "happy-dom": "20.10.6",
