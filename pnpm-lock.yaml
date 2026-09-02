@@ -39,8 +39,8 @@ importers:
         specifier: 10.1.2
         version: 10.1.2
       '@ethereumjs/util':
-        specifier: 10.1.2
-        version: 10.1.2
+        specifier: 10.1.3
+        version: 10.1.3
       '@types/node':
         specifier: 24.10.15
         version: 24.10.15
@@ -123,16 +123,16 @@ packages:
     resolution: {integrity: sha512-dBlXpkP1ssp+AcUxsJUrY72LZuE1JQEp1AZn5mgmbBcd2Gwkpyi57q4zATlZbxrZUxp/K9UIidgqxQWcOCbo5g==}
     engines: {node: '>=20'}
 
-  '@ethereumjs/rlp@10.1.2':
-    resolution: {integrity: sha512-T5Zt6C2pd02Wd88Q9A5/UX+He1Q2Y1LntHxz/038tfbUMiqby4fYSSTLEDx+TEfJqw1BsJSBY/TSu6goUzlk+w==}
+  '@ethereumjs/rlp@10.1.3':
+    resolution: {integrity: sha512-d795YWkN6O8EJh/PgJ2zZKCdBMl8OlqkuVQESoidH666gaFtUuJ01jDtiuqfyOqTNcTdGhHi8LkQv1WEZzvZZw==}
     engines: {node: '>=20'}
     hasBin: true
 
   '@ethereumjs/statemanager@10.1.2':
     resolution: {integrity: sha512-Pkm9VHF19wxT5c0jB+IDiQBv4W42o0wYSS1NLXeRea0D6CDBu0CLo9ihhnQgM368zXPl6JRbLS+YiG8tJkz4aA==}
 
-  '@ethereumjs/util@10.1.2':
-    resolution: {integrity: sha512-UPBgXtHHfQugoXOSAoeG3jdmPbl37cwV9y3XqTPAnw8tJj8np14TPV2uc5lOs7C2LMF9Ubn66zyaiYxgwGppng==}
+  '@ethereumjs/util@10.1.3':
+    resolution: {integrity: sha512-PhezOVe4DFaC+QLIsnK/tiOaXjpjS2F9AH4Ez0EfWevFw9NWNSg95l7I0dWuHF0B7v9odm2Ijqwo0EnARXtUmA==}
     engines: {node: '>=20'}
 
   '@humanfs/core@0.19.2':
@@ -170,12 +170,20 @@ packages:
     resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
     engines: {node: '>= 20.19.0'}
 
+  '@noble/curves@2.3.0':
+    resolution: {integrity: sha512-v7cY+4oWYPQszRj6ZFGzTVL7uP2TaLo1xMhWHzYC5wj0ZhOXQ5x+sBre8rF3hi8cAoi0bh1qXoovoOkdFtvqEg==}
+    engines: {node: '>= 20.19.0'}
+
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@2.3.0':
+    resolution: {integrity: sha512-oN+QwyX7VSHotibwubG3kpzbwKrfnyR6OOO+3Nk/53ADL7FmgHHz4TgrbaYKvvOw09u6QTx0oiH1cNCIOuN0CQ==}
     engines: {node: '>= 20.19.0'}
 
   '@scure/base@1.2.6':
@@ -656,8 +664,8 @@ snapshots:
 
   '@ethereumjs/binarytree@10.1.2':
     dependencies:
-      '@ethereumjs/rlp': 10.1.2
-      '@ethereumjs/util': 10.1.2
+      '@ethereumjs/rlp': 10.1.3
+      '@ethereumjs/util': 10.1.3
       '@noble/hashes': 2.2.0
       debug: 4.4.3
       lru-cache: 11.0.2
@@ -666,7 +674,7 @@ snapshots:
 
   '@ethereumjs/common@10.1.2':
     dependencies:
-      '@ethereumjs/util': 10.1.2
+      '@ethereumjs/util': 10.1.3
       eventemitter3: 5.0.4
 
   '@ethereumjs/evm@10.1.2':
@@ -674,7 +682,7 @@ snapshots:
       '@ethereumjs/binarytree': 10.1.2
       '@ethereumjs/common': 10.1.2
       '@ethereumjs/statemanager': 10.1.2
-      '@ethereumjs/util': 10.1.2
+      '@ethereumjs/util': 10.1.3
       '@noble/curves': 2.2.0
       '@noble/hashes': 2.2.0
       debug: 4.4.3
@@ -684,23 +692,23 @@ snapshots:
 
   '@ethereumjs/mpt@10.1.2':
     dependencies:
-      '@ethereumjs/rlp': 10.1.2
-      '@ethereumjs/util': 10.1.2
-      '@noble/hashes': 2.2.0
+      '@ethereumjs/rlp': 10.1.3
+      '@ethereumjs/util': 10.1.3
+      '@noble/hashes': 2.3.0
       debug: 4.4.3
       lru-cache: 11.0.2
     transitivePeerDependencies:
       - supports-color
 
-  '@ethereumjs/rlp@10.1.2': {}
+  '@ethereumjs/rlp@10.1.3': {}
 
   '@ethereumjs/statemanager@10.1.2':
     dependencies:
       '@ethereumjs/binarytree': 10.1.2
       '@ethereumjs/common': 10.1.2
       '@ethereumjs/mpt': 10.1.2
-      '@ethereumjs/rlp': 10.1.2
-      '@ethereumjs/util': 10.1.2
+      '@ethereumjs/rlp': 10.1.3
+      '@ethereumjs/util': 10.1.3
       '@js-sdsl/ordered-map': 4.4.2
       '@noble/hashes': 2.2.0
       debug: 4.4.3
@@ -708,11 +716,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@ethereumjs/util@10.1.2':
+  '@ethereumjs/util@10.1.3':
     dependencies:
-      '@ethereumjs/rlp': 10.1.2
-      '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
+      '@ethereumjs/rlp': 10.1.3
+      '@noble/curves': 2.3.0
+      '@noble/hashes': 2.3.0
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -742,9 +750,15 @@ snapshots:
     dependencies:
       '@noble/hashes': 2.2.0
 
+  '@noble/curves@2.3.0':
+    dependencies:
+      '@noble/hashes': 2.3.0
+
   '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.2.0': {}
+
+  '@noble/hashes@2.3.0': {}
 
   '@scure/base@1.2.6': {}
 
